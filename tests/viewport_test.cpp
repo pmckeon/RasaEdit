@@ -12,6 +12,12 @@
 #include <memory>
 #include <string>
 
+// An environment variable's value, or nullptr when it is unset or empty (PowerShell leaves cleared variables empty).
+static const char* envValue(const char* name) {
+    const char* v = std::getenv(name);
+    return v && *v ? v : nullptr;
+}
+
 int main(int argc, char** argv) {
     if (argc < 13) { std::puts("usage: viewport_test root game.zip map out.rgba w h ex ey ez tx ty tz"); return 1; }
     if (!SDL_Init(SDL_INIT_VIDEO)) { std::printf("SDL_Init: %s\n", SDL_GetError()); return 1; }
@@ -20,7 +26,8 @@ int main(int argc, char** argv) {
     std::printf("GPU driver: %s, BC1 textures %s\n", SDL_GetGPUDeviceDriver(device),
                 SDL_GPUTextureSupportsFormat(device, SDL_GPU_TEXTUREFORMAT_BC1_RGBA_UNORM, SDL_GPU_TEXTURETYPE_2D, SDL_GPU_TEXTUREUSAGE_SAMPLER) ? "supported" : "not supported");
     const uint32_t width = uint32_t(std::atoi(argv[5])), height = uint32_t(std::atoi(argv[6]));
-    {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);          // keep the output if something goes wrong
+    try {
         Renderer renderer(device);
         renderer.resize(width, height);
         tr::AssetLibrary assets(argv[1]);
@@ -28,10 +35,33 @@ int main(int argc, char** argv) {
         const tr::MapBundle map = tr::loadMap(assets, argv[3]);
         SceneView scene(renderer, assets, map, [&](int32_t id) { return data.classMeshName(id); },
                         [&](int32_t id) { return !data.className(id).empty(); });
+        {
+            std::vector<std::pair<int32_t, std::string>> regionSkies;
+            for (const tr::MapRegion& r : map.map.regions)
+                if (r.sky > 0) regionSkies.emplace_back(r.regionId, data.stringById(r.sky));
+            scene.setRegionSkies(regionSkies);
+            // RASA_TIME=<fraction of the day>, RASA_SKY=<index>, RASA_NOSKY=1 / RASA_NOFOG=1 for lighting checks.
+            if (const char* t = envValue("RASA_TIME")) scene.timeOfDay = float(std::atof(t));
+            if (const char* k = envValue("RASA_SKY")) scene.skyIndex = size_t(std::atoi(k));
+            if (envValue("RASA_NOSKY")) scene.skyLighting = false;
+            if (envValue("RASA_NOFOG")) scene.showFog = false;
+            if (envValue("RASA_NOSUN")) scene.showSun = false;
+            if (envValue("RASA_NOLIGHTS")) scene.showMapLights = false;
+            std::printf("map lights: %zu%s%s\n", scene.mapLights().size(), scene.mapLightsError().empty() ? "" : " - ", scene.mapLightsError().c_str());
+            for (size_t k = 0; k < scene.skies().size(); ++k) {
+                const SceneView::SkyChoice& c = scene.skies()[k];
+                std::printf("sky %zu%s: %s (%zu regions)%s%s\n", k, k == scene.skyIndex ? " *" : "", c.name.c_str(), c.regions.size(),
+                            c.loaded ? "" : " - not usable: ", c.error.c_str());
+            }
+            const SceneLighting l = scene.lighting();
+            std::printf("time %.3f: hemi top %.2f %.2f %.2f bottom %.2f %.2f %.2f, sun %.2f %.2f %.2f towards %.2f %.2f %.2f, fog %s from %.0f m density %.4f, %d placed lights in use\n",
+                        scene.timeOfDay, l.hemiTop.x, l.hemiTop.y, l.hemiTop.z, l.hemiBottom.x, l.hemiBottom.y, l.hemiBottom.z, l.sunFront.x,
+                        l.sunFront.y, l.sunFront.z, l.towardsLight.x, l.towardsLight.y, l.towardsLight.z, l.fog ? "on" : "off", l.fogStart, l.fogDensity, l.localCount);
+        }
         // Optional server content: set RASA_DB to a Rasa.NET World database.
         std::unique_ptr<WorldDatabase> database;
         WorldContent content;
-        if (const char* dbPath = std::getenv("RASA_DB")) {
+        if (const char* dbPath = envValue("RASA_DB")) {
             database = std::make_unique<WorldDatabase>(dbPath);
             content = database->loadMap(database->contextIdForMap(map.name));
             scene.setServerContent(&content, database.get(), [&](int32_t id) { return data.classMeshName(id); },
@@ -44,7 +74,8 @@ int main(int argc, char** argv) {
                 const AvatarLook look = resolveAvatar(data, *database, *c);
                 if (look.parts.empty()) continue;
                 ++listed;
-                std::printf("avatar %d %s: base %s, skin %08x\n", c->id, c->comment.c_str(), look.baseMesh.c_str(), look.skinColour);
+                std::printf("avatar %d %s: base %s, skin %08x, pose %s\n", c->id, c->comment.c_str(), look.baseMesh.c_str(), look.skinColour,
+                            look.poseAnimation.empty() ? "(bind)" : look.poseAnimation.c_str());
                 for (const AvatarPart& part : look.parts)
                     std::printf("    slot %d -> swap set %u (%s) from %s, colour %08x\n", part.slotId, part.swapsetId,
                                 data.swapsetName(int32_t(part.swapsetId)).c_str(), part.mesh.c_str(), part.colour);
@@ -107,7 +138,41 @@ int main(int argc, char** argv) {
         std::fclose(f);
         SDL_UnmapGPUTransferBuffer(device, download);
         SDL_ReleaseGPUTransferBuffer(device, download);
+
+        // Focus check: from a camera looking 30 degrees up (the old failure case), "show in viewport" must not put
+        // the camera under the terrain. Targets below the terrain surface (caves, interiors) are counted apart.
+        {
+            size_t tried = 0, underground = 0, caveTargets = 0, listed = 0;
+            auto check = [&](const Selection& s) {
+                tr::Vec3 target;
+                float distance = 0, targetGround = 0;
+                if (!scene.focusTarget(s, target, distance)) return;
+                if (!map.hasTerrain || !map.terrain.heightAtWorld(target.x, target.z, targetGround)) return;
+                if (target.y < targetGround - 3.0f) { ++caveTargets; return; }
+                cam.yaw = 0.7f;
+                cam.pitch = 0.5f;
+                scene.focusOn(s);
+                ++tried;
+                float h = 0;
+                if (map.terrain.heightAtWorld(cam.position.x, cam.position.z, h) && cam.position.y < h + 0.5f) {
+                    ++underground;
+                    if (listed++ < 5)
+                        std::printf("  under: kind %d #%zu target %.1f %.1f %.1f (ground %.1f), camera %.1f %.1f %.1f (ground %.1f), distance %.1f\n",
+                                    int(s.kind), s.index, target.x, target.y, target.z, targetGround, cam.position.x, cam.position.y,
+                                    cam.position.z, h, distance);
+                }
+            };
+            for (size_t k = 0; k < map.map.entities.size(); ++k) check(Selection{SelectionKind::MapEntity, k});
+            for (size_t k = 0; k < content.spawnPools.size(); ++k) check(Selection{SelectionKind::SpawnPool, k});
+            std::printf("focus check: %zu targets, camera under the terrain for %zu (%zu targets below the surface skipped)\n",
+                        tried, underground, caveTargets);
+        }
         SDL_WaitForGPUIdle(device);
+    } catch (const std::exception& e) {
+        std::printf("error: %s\n", e.what());               // report instead of aborting (a Debug Error dialog)
+        SDL_DestroyGPUDevice(device);
+        SDL_Quit();
+        return 2;
     }
     SDL_DestroyGPUDevice(device);
     SDL_Quit();

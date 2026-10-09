@@ -103,7 +103,7 @@ int main() {
                             w && w->DockNode ? (w->DockNode->SelectedTabId == w->TabId ? "this" : "other") : "-");
             }
         check(server.viewport_.visible_, "server viewport drawn");
-        check(ctx.scene && ctx.scene->dimMapEntities, "static map dimmed in the server viewport");
+        check(ctx.scene && ctx.scene->showServer, "server viewport shows the server overlay");
         frames(editor, device, 60);                                  // let models load
         saveViewport(ctx, device, "/tmp/smoke_server.rgba");
 
@@ -133,7 +133,7 @@ int main() {
         frames(editor, device, 3);
         check(dockspaceExists("ClientDockSpace"), "client layout built");
         check(editor.client_->viewport_.visible_, "client viewport drawn");
-        check(!ctx.scene->showServer && !ctx.scene->dimMapEntities, "client viewport hides the server overlay, map not dimmed");
+        check(!ctx.scene->showServer, "client viewport hides the server overlay");
         check(editor.client_->visibleEntities_.size() == ctx.map->map.entities.size(), "client entity table filled");
         saveViewport(ctx, device, "/tmp/smoke_client.rgba");
 

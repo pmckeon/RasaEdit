@@ -6,7 +6,9 @@
 // the per-sample blend without seams or a per-patch layer limit. Layers live in one texture array
 // and are projected tri-planar with the game's hard switch by normal (TRTerrain shader:
 // |n.x| > 0.5 -> X-facing, else |n.z| > 0.5 -> Z-facing, else top-down), scaled by each layer's
-// tiling (taken as metres per repeat). Registers as in scene.hlsl.
+// tiling (taken as metres per repeat). Registers as in scene.hlsl; lighting and fog as in lighting.hlsli.
+
+#include "lighting.hlsli"
 
 cbuffer VertexUniforms : register(b0, space1)
 {
@@ -19,6 +21,18 @@ cbuffer FragmentUniforms : register(b0, space3)
     float4 grid;              // x: world x of sample column 0, y: world z of sample row 0, z: 1 / spacing
     float4 gridSize;          // x: columns, y: rows, z: 1 / columns, w: 1 / rows
     float4 lightDirection;    // xyz: towards the light
+    float4 sunFront;
+    float4 sunBack;
+    float4 hemiTop;
+    float4 hemiBottom;
+    float4 fogColour;         // rgb; w: 1 = fog on
+    float4 fogRange;          // x: start distance, y: density
+    float4 cameraPosition;    // xyz
+    float4 localCount;        // x: number of placed lights
+    float4 localPosition[MAX_LOCAL_LIGHTS];
+    float4 localColour[MAX_LOCAL_LIGHTS];
+    float4 localSpot[MAX_LOCAL_LIGHTS];
+    float4 localSpotInner[MAX_LOCAL_LIGHTS];
     float4 tilings[32];       // metres per repeat for layers 0..127 (four per entry)
 };
 
@@ -35,6 +49,7 @@ struct VertexInput
     float3 normal   : TEXCOORD1;
     float4 colour   : TEXCOORD2;
     float2 uv       : TEXCOORD3;
+    float2 uv1      : TEXCOORD4;      // unused (shared vertex layout)
 };
 
 struct VertexOutput
@@ -91,6 +106,12 @@ float4 psMain(VertexOutput input) : SV_Target0
             colour += texel * (weights[slot] * bilinear);
         }
     }
-    const float diffuse = saturate(dot(n, normalize(lightDirection.xyz)));
-    return float4(colour * (0.45 + 0.55 * diffuse), 1.0);
+    SkyLighting s;
+    s.towardsLight = normalize(lightDirection.xyz);
+    s.sunFront = sunFront.rgb;
+    s.sunBack = sunBack.rgb;
+    s.hemiTop = hemiTop.rgb;
+    s.hemiBottom = hemiBottom.rgb;
+    const float3 lit = colour * (skyLight(n, s) + localLights(input.world, n, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner));
+    return float4(applyFog(lit, length(cameraPosition.xyz - input.world), fogColour, fogRange), 1.0);
 }

@@ -776,4 +776,19 @@ std::string GameData::swapsetName(int32_t swapsetId) {
     return py::asString(py::dictGet(global("generated.client.equipmentdata", "swapset"), swapsetId));
 }
 
+int32_t GameData::meshSkeletonId(int32_t meshId) {
+    const py::Object* id = py::dictGet(global("generated.client.animationdata", "meshSkeleton"), meshId);
+    return py::isInt(id) ? int32_t(py::asInt(id)) : -1;
+}
+
+std::vector<std::string> GameData::familyAnimations(int32_t skeletonId, int32_t familyId) {
+    std::vector<std::string> names;
+    const py::Object* list = py::dictGetTuple(global("generated.client.animationdata", "animationFamilyData"), {skeletonId, familyId});
+    for (size_t k = 0; k < py::length(list); ++k) {
+        const py::Object* animation = py::item(py::item(list, k), 0);
+        if (py::isInt(animation)) names.push_back(stringById(int32_t(py::asInt(animation))));
+    }
+    return names;
+}
+
 }  // namespace tr

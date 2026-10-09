@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # zlib: on Windows e.g. `vcpkg install zlib` and pass -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake
 find_package(ZLIB REQUIRED)
 
-add_library(trformats trformats.cpp trformats.h assetlibrary.cpp assetlibrary.h gamedata.cpp gamedata.h dds.cpp dds.h)
+add_library(trformats trformats.cpp trformats.h assetlibrary.cpp assetlibrary.h gamedata.cpp gamedata.h dds.cpp dds.h sky.cpp sky.h)
 target_include_directories(trformats PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(trformats PUBLIC ZLIB::ZLIB)
 if(MSVC)

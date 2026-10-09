@@ -445,8 +445,23 @@ struct GeoVertex {
     Vec3 position;
     Vec3 normal;
     Vec2 uv;
+    Vec2 uv1;                          // TEXCOORD1, if present (e.g. GlowTexCoord 1)
     uint32_t colour = 0xFFFFFFFF;      // D3DCOLOR (ARGB)
+    // Skinning (GSKN pieces): BLENDWEIGHT holds weightCount - 1 explicit weights, the last is 1 - their sum;
+    // BLENDINDICES is a D3DCOLOR whose bytes 0, 1, 2, 3 (no swizzle; verified 2026-10-10) index the piece's skinBones.
+    float blendWeight0 = 1, blendWeight1 = 0, blendWeight2 = 0, blendWeight3 = 0;
+    uint32_t blendIndices = 0;
 };
+
+inline uint32_t blendIndex(const GeoVertex& v, uint32_t i) { return (v.blendIndices >> (i * 8)) & 0xFF; }
+inline float blendWeight(const GeoVertex& v, uint32_t i) {
+    switch (i) {
+        case 0: return v.blendWeight0;
+        case 1: return v.blendWeight1;
+        case 2: return v.blendWeight2;
+        default: return v.blendWeight3;
+    }
+}
 
 struct GeoParameter {
     std::string key;
@@ -506,5 +521,45 @@ GeoModel readGeo(const Bytes& data);
 // OBJ export. Pieces attached to a bone are moved by it (rotate, scale, translate - as TRRM does).
 // rightHanded = true negates z (Direct3D winding then reads correctly as OBJ's counter-clockwise).
 void writeGeoObj(const GeoModel& model, const std::string& objPath, bool applyBoneTransforms, bool rightHanded = true);
+
+// ------------------------------------------------------------------------------------------
+// Animation (.anm). Verified 2026-10-10 over all 6,238 files (6,236 parse; 2 are 68-byte stubs):
+//   ANIM v4 { u32 trackCount, u8 0, then per track: fourcc (UNKNOWN; often the key chunk's), TRAK v3 {
+//     u8 0, fourcc target ("SKEL" bone / "EFCT" material), cstr name, u8 0, u32 flags (UNKNOWN: 95, 26, 0),
+//     u32 keyCount, key chunk } }, then 4 UNKNOWN bytes.
+// Key chunks list their components in the order scale, rotation, translation, then time:
+//   K* (KEYT, KEYR, KEYS, KERT, KEST, KESR, KSRT): float32 scale xyz, quaternion xyzw, translation xyz, time
+//   X* (XKER, XKRT, XKSR, XSRT): half scale, int16/32767 quaternion, half translation, half time
+// Keys are absolute local bone transforms in the .geo skeleton's convention (track names = PSKE bone names);
+// 30 keys per second. Components a track lacks keep the bone's bind value.
+// ------------------------------------------------------------------------------------------
+struct AnimKey {
+    float time = 0;                    // seconds
+    Vec3 scale{1, 1, 1};
+    Quat rotation;
+    Vec3 translation;
+};
+
+struct AnimTrack {
+    std::string name;                  // bone name for "SKEL" tracks
+    uint32_t target = 0;               // fourcc as read (u32 little-endian of the reversed text, like chunk tags)
+    uint32_t keyKind = 0;              // key chunk tag
+    uint32_t flags = 0;                // UNKNOWN
+    bool hasScale = false;
+    bool hasRotation = false;
+    bool hasTranslation = false;
+    std::vector<AnimKey> keys;
+};
+
+struct Animation {
+    uint32_t version = 0;
+    float duration = 0;                // last key time over all bone tracks
+    std::vector<AnimTrack> tracks;     // bone tracks only ("EFCT" tracks are skipped)
+};
+
+Animation readAnimation(const Bytes& data);
+const AnimTrack* findTrack(const Animation& animation, const std::string& boneName);
+// Interpolated key at time (clamped to the track's range): linear scale/translation, normalised lerp rotation.
+AnimKey sampleTrack(const AnimTrack& track, float time);
 
 }  // namespace tr

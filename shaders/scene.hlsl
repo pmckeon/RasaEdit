@@ -7,6 +7,8 @@
 // Matrices are row_major, used as mul(matrix, columnVector); world space is the game's
 // left-handed space (+x right, +y up, +z forward).
 
+#include "lighting.hlsli"
+
 cbuffer VertexUniforms : register(b0, space1)
 {
     row_major float4x4 viewProjection;
@@ -17,12 +19,26 @@ cbuffer FragmentUniforms : register(b0, space3)
 {
     float4 tint;              // multiplied with the vertex colour and the texture
     float4 lightDirection;    // xyz: towards the light (world space); w: 1 = lit, 0 = unlit
-    float4 options;           // x: 1 = alpha test (discard below 0.5)
+    float4 options;           // x: 1 = alpha test (discard below 0.5); z: 1 = additive
     float4 hue;               // rgb added to the texel weighted by its alpha (the game's "Hue" effects); w: 1 = on
+    float4 sunFront;          // rgb: directional light on surfaces facing it
+    float4 sunBack;           // rgb: directional light's back colour (surfaces facing away)
+    float4 hemiTop;           // rgb: hemispheric light from above
+    float4 hemiBottom;        // rgb: hemispheric light from below
+    float4 fogColour;         // rgb; w: 1 = fog on
+    float4 fogRange;          // x: start distance, y: density
+    float4 cameraPosition;    // xyz
+    float4 localCount;        // x: number of placed lights
+    float4 localPosition[MAX_LOCAL_LIGHTS];
+    float4 localColour[MAX_LOCAL_LIGHTS];
+    float4 localSpot[MAX_LOCAL_LIGHTS];
+    float4 localSpotInner[MAX_LOCAL_LIGHTS];
 };
 
 [[vk::combinedImageSampler]] Texture2D diffuseTexture : register(t0, space2);
 [[vk::combinedImageSampler]] SamplerState diffuseSampler : register(s0, space2);
+[[vk::combinedImageSampler]] Texture2D glowTexture : register(t1, space2);
+[[vk::combinedImageSampler]] SamplerState glowSampler : register(s1, space2);
 
 struct VertexInput
 {
@@ -30,6 +46,7 @@ struct VertexInput
     float3 normal   : TEXCOORD1;
     float4 colour   : TEXCOORD2;
     float2 uv       : TEXCOORD3;
+    float2 uv1      : TEXCOORD4;
 };
 
 struct VertexOutput
@@ -38,6 +55,8 @@ struct VertexOutput
     float3 normal   : TEXCOORD0;
     float4 colour   : TEXCOORD1;
     float2 uv       : TEXCOORD2;
+    float3 world    : TEXCOORD3;
+    float2 uv1      : TEXCOORD4;
 };
 
 VertexOutput vsMain(VertexInput input)
@@ -48,6 +67,8 @@ VertexOutput vsMain(VertexInput input)
     output.normal = mul((float3x3)model, input.normal);
     output.colour = input.colour;
     output.uv = input.uv;
+    output.world = world.xyz;
+    output.uv1 = input.uv1;
     return output;
 }
 
@@ -60,10 +81,27 @@ float4 psMain(VertexOutput input) : SV_Target0
     // shader computes diffuse.rgb + Hue.rgb * diffuse.a (decal maps not applied here).
     const float3 albedo = hue.w > 0.5 ? saturate(texel.rgb + hue.rgb * texel.a) : texel.rgb;
     const float4 base = input.colour * tint * float4(albedo, 1.0);
+    if (options.z > 0.5)
+    {
+        // Additive (TRAdditive* effects: glows, holograms, light cones): unlit, blended one/one; fog fades it out.
+        const float3 black = applyFog(base.rgb, length(cameraPosition.xyz - input.world), float4(0, 0, 0, fogColour.w), fogRange);
+        return float4(black, 1.0);
+    }
     if (lightDirection.w < 0.5)
         return base;
-    const float3 n = normalize(input.normal);
-    // Two-sided: mesh winding and thin geometry are not relied on.
-    const float diffuse = abs(dot(n, normalize(lightDirection.xyz)));
-    return float4(base.rgb * (0.35 + 0.65 * diffuse), base.a);
+    // Two-sided: the normal is turned towards the camera (mesh winding and thin geometry are not relied on).
+    const float3 view = cameraPosition.xyz - input.world;
+    float3 n = normalize(input.normal);
+    if (dot(n, view) < 0.0)
+        n = -n;
+    SkyLighting s;
+    s.towardsLight = normalize(lightDirection.xyz);
+    s.sunFront = sunFront.rgb;
+    s.sunBack = sunBack.rgb;
+    s.hemiTop = hemiTop.rgb;
+    s.hemiBottom = hemiBottom.rgb;
+    // Glow maps add after lighting (the game's glow buffer, added in trhdrcomposite before fog).
+    const float3 glow = glowTexture.Sample(glowSampler, input.uv1).rgb;
+    const float3 lit = base.rgb * (skyLight(n, s) + localLights(input.world, n, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner)) + glow;
+    return float4(applyFog(lit, length(view), fogColour, fogRange), base.a);
 }

@@ -163,6 +163,11 @@ public:
     std::string suitMeshName(int32_t suitId);                 // suit[id][1] via the string table; "" if none
     std::string swapsetName(int32_t swapsetId);               // swapset[id], e.g. "Torso"
 
+    // Animation sets (generated.client.animationdata): meshSkeleton[meshId] = skeletonId;
+    // animationFamilyData[(skeletonId, familyId)] = [(animation string id, weight, ...)], family 1 = "Idle - Non Combat".
+    int32_t meshSkeletonId(int32_t meshId);                   // -1 if the mesh has none
+    std::vector<std::string> familyAnimations(int32_t skeletonId, int32_t familyId);   // .anm names, table order
+
 private:
     ZipArchive zip_;
     std::unordered_map<std::string, size_t> moduleEntries_;   // dotted name -> zip entry

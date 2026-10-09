@@ -13,6 +13,7 @@ struct MeshVertex {
     float normalX = 0, normalY = 0, normalZ = 0;
     uint32_t colour = 0xFFFFFFFF;
     float texU = 0, texV = 0;
+    float texU1 = 0, texV1 = 0;        // second UV set (glow maps)
 };
 
 inline uint32_t packColour(uint8_t red, uint8_t green, uint8_t blue, uint8_t alpha) {
@@ -39,6 +40,29 @@ struct TerrainMaterial {
     std::vector<float> tilings;                 // metres per repeat, per layer (up to 128)
 };
 
+// Frame lighting (see shaders/lighting.hlsli): hemispheric light + one directional light, linear fog.
+// The defaults are the plain editor lighting used when sky lighting is off.
+struct SceneLighting {
+    tr::Vec3 towardsLight{-0.35f, 0.85f, -0.4f};
+    Vec4f sunFront{0.65f, 0.65f, 0.65f, 1};
+    Vec4f sunBack{0, 0, 0, 1};
+    Vec4f hemiTop{0.4f, 0.4f, 0.4f, 1};
+    Vec4f hemiBottom{0.3f, 0.3f, 0.3f, 1};
+    bool fog = false;
+    Vec4f fogColour{0.55f, 0.66f, 0.78f, 1};
+    float fogStart = 0;
+    float fogDensity = 0;                        // exp-squared fog, see shaders/lighting.hlsli
+    SDL_FColor clearColour{0.55f, 0.66f, 0.78f, 1.0f};   // background (the sky colour with sky lighting)
+    // Placed lights, laid out as the shaders' arrays (shaders/lighting.hlsli): position xyz + range; colour rgb *
+    // intensity + fade share; spot direction + cos(outer half angle) (-2 = point); x = cos(inner half angle).
+    static constexpr int maxLocalLights = 16;
+    int localCount = 0;
+    Vec4f localPosition[maxLocalLights] = {};
+    Vec4f localColour[maxLocalLights] = {};
+    Vec4f localSpot[maxLocalLights] = {};
+    Vec4f localSpotInner[maxLocalLights] = {};
+};
+
 // Creates the GPU device, preferring Vulkan (the same SPIR-V path on Windows, Linux and macOS via MoltenVK); falls back
 // to SDL's own choice (Direct3D 12 on Windows) if Vulkan is unavailable. SDL_GPU_DRIVER, when set, still wins.
 SDL_GPUDevice* createGpuDevice(SDL_GPUShaderFormat formats, bool debug);
@@ -63,16 +87,19 @@ public:
     void destroyMesh(GpuMesh& mesh);
 
     // Frame: begin, queue draws, then record everything into a command buffer.
-    void beginFrame(const Mat4& viewProjection, const tr::Vec3& towardsLight, SDL_FColor clearColour);
+    void beginFrame(const Mat4& viewProjection, const tr::Vec3& cameraPosition, const SceneLighting& lighting);
     // texture nullptr draws untextured (white); alphaTest discards texels with alpha below 0.5.
     // hue (w = 1) adds hue.rgb weighted by the texture alpha, as the game's "Hue" effects do (avatar skin, hair, clothing).
+    // glow (sampled with the second UV set) is added after lighting, as the game's glow buffer is.
     void draw(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, bool lit, SDL_GPUTexture* texture = nullptr, bool alphaTest = false,
-              const Vec4f& hue = Vec4f{0, 0, 0, 0});
+              const Vec4f& hue = Vec4f{0, 0, 0, 0}, SDL_GPUTexture* glow = nullptr);
     // Alpha-blended (tint.w is the opacity), drawn after all opaque draws, without depth writes.
     void drawTranslucent(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint);
+    // Additive (one, one), unlit, faded by fog, drawn last without depth writes: the game's TRAdditive* effects.
+    void drawAdditive(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, SDL_GPUTexture* texture);
     void drawTerrain(const GpuMesh& mesh, const TerrainMaterial& material);
     void record(SDL_GPUCommandBuffer* commands);
-    size_t queuedDraws() const { return draws_.size() + translucentDraws_.size(); }
+    size_t queuedDraws() const { return draws_.size() + translucentDraws_.size() + additiveDraws_.size(); }
 
 private:
     struct DrawItem {
@@ -85,11 +112,13 @@ private:
         const TerrainMaterial* terrain;          // non-null: terrain draw
         bool translucent;
         Vec4f hue;
+        SDL_GPUTexture* glow;                    // never null for scene draws (black_ when none)
+        bool additive = false;
     };
     SDL_GPUShader* createShader(const unsigned char* dxil, size_t dxilSize, const unsigned char* spirv, size_t spirvSize,
                                 const char* entryPoint, SDL_GPUShaderStage stage, uint32_t samplers);
     SDL_GPUGraphicsPipeline* createPipeline(SDL_GPUShader* vertexShader, SDL_GPUShader* fragmentShader, SDL_GPUPrimitiveType primitive,
-                                            bool blended = false);
+                                            int blend = 0);
     void recordItem(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const DrawItem& item, SDL_GPUGraphicsPipeline*& bound);
 
     SDL_GPUDevice* device_;
@@ -101,9 +130,11 @@ private:
     SDL_GPUGraphicsPipeline* linePipeline_ = nullptr;
     SDL_GPUGraphicsPipeline* terrainPipeline_ = nullptr;
     SDL_GPUGraphicsPipeline* translucentPipeline_ = nullptr;
+    SDL_GPUGraphicsPipeline* additivePipeline_ = nullptr;
     SDL_GPUSampler* linearSampler_ = nullptr;   // trilinear, repeat
     SDL_GPUSampler* pointSampler_ = nullptr;    // nearest, clamp (terrain data textures)
     SDL_GPUTexture* white_ = nullptr;
+    SDL_GPUTexture* black_ = nullptr;          // default glow
     SDL_GPUTextureFormat colourFormat_ = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
     SDL_GPUTextureFormat depthFormat_ = SDL_GPU_TEXTUREFORMAT_D32_FLOAT;
     SDL_GPUTexture* colour_ = nullptr;
@@ -114,6 +145,9 @@ private:
     Mat4 viewProjection_;
     Vec4f towardsLight_;
     SDL_FColor clearColour_ = {0, 0, 0, 1};
+    SceneLighting lighting_;
+    Vec4f cameraPosition_;
     std::vector<DrawItem> draws_;
     std::vector<DrawItem> translucentDraws_;
+    std::vector<DrawItem> additiveDraws_;
 };

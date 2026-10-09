@@ -22,6 +22,22 @@ struct ClassInfo {
     bool known = false;          // false: the class id is not in the shipped tables
 };
 
+// How the 3D viewport shows the map, shared by both workspaces so switching keeps the same view
+// (the camera itself lives in the shared SceneView). The server layers are per workspace (ViewportOptions).
+struct ViewSettings {
+    bool showTextures = true;
+    bool showTerrain = true;
+    bool showEntities = true;
+    bool showEffects = true;
+    bool showPlaceholders = true;
+    float drawDistance = 1200.0f;
+    float flySpeed = 20.0f;      // metres per second
+    bool skyLighting = true;     // light from the map region's .sky (the time of day and sky choice are per map, in SceneView)
+    bool fog = true;
+    bool sun = true;             // the sky's sun/moon (turn off in caves: the game shadows it, the editor has no shadows)
+    bool mapLights = true;       // the map's lights.xml
+};
+
 // State shared by both workspaces: settings, the game install and its data tables, the open map with
 // its renderer and scene, and work queued for between frames. It knows nothing about workspaces;
 // the Editor tells them when the game or map changes.
@@ -75,6 +91,7 @@ public:
     std::unique_ptr<RadarMap> radar;                    // the game's own map image
     std::unique_ptr<Renderer> renderer;
     std::unique_ptr<SceneView> scene;
+    ViewSettings view;
 
     std::string statusText;
     bool statusIsError = false;

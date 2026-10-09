@@ -169,6 +169,14 @@ bool EditorContext::openMap(const std::string& name) {
         if (renderer) {
             scene = std::make_unique<SceneView>(*renderer, *assets, *map, [this](int32_t id) { return classInfo(id).mesh; },
                                                 [this](int32_t id) { return !gameData || classInfo(id).known; });
+            // Region skies: MapRegion.sky is a string-table id of a .sky file (-1 / 0 = none).
+            std::vector<std::pair<int32_t, std::string>> regionSkies;
+            if (gameData)
+                for (const tr::MapRegion& r : map->map.regions)
+                    if (r.sky > 0) {
+                        try { regionSkies.emplace_back(r.regionId, gameData->stringById(r.sky)); } catch (const std::exception&) {}
+                    }
+            scene->setRegionSkies(regionSkies);
         }
         currentMapName = map->name;
         mapTemplateId = templateId;

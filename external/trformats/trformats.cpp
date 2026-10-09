@@ -883,10 +883,27 @@ void readVert(ByteReader& r, GeoPiece& piece) {
         GeoVertex& v = piece.vertices[size_t(i)];
         const uint8_t* p = base + size_t(i) * stride;
         for (const VertexElement& e : piece.layout) {
-            if (e.usageIndex != 0 || e.offset + elementSize(e.type) > stride) continue;
+            if (e.offset + elementSize(e.type) > stride) continue;
+            if (e.usageIndex != 0) {
+                if (e.usage == 5 && e.usageIndex == 1) {                            // TEXCOORD1 (glow / decal maps)
+                    const Value4 value = decodeElement(e.type, p + e.offset);
+                    v.uv1 = {value.x, value.y};
+                }
+                continue;
+            }
             const Value4 value = decodeElement(e.type, p + e.offset);
             switch (e.usage) {
                 case 0: v.position = {value.x, value.y, value.z}; break;           // POSITION
+                case 1: {                                                          // BLENDWEIGHT (FLOAT1..3)
+                    const uint32_t explicitWeights = e.type <= 2 ? uint32_t(e.type) + 1 : 0;
+                    if (explicitWeights == 0) break;
+                    v.blendWeight0 = value.x;
+                    v.blendWeight1 = explicitWeights >= 2 ? value.y : 1 - value.x;
+                    v.blendWeight2 = explicitWeights >= 3 ? value.z : explicitWeights == 2 ? 1 - value.x - value.y : 0;
+                    v.blendWeight3 = explicitWeights == 3 ? 1 - value.x - value.y - value.z : 0;
+                    break;
+                }
+                case 2: v.blendIndices = loadU32(p + e.offset); break;            // BLENDINDICES (D3DCOLOR / UBYTE4)
                 case 3: v.normal = {value.x, value.y, value.z}; break;             // NORMAL
                 case 5: v.uv = {value.x, value.y}; break;                          // TEXCOORD0
                 case 10: v.colour = e.type == 4 ? loadU32(p + e.offset) : packColour(value); break;  // COLOR0
@@ -1118,6 +1135,141 @@ GeoModel readGeo(const Bytes& data) {
         skipChunk(r);
     }
     throw FormatError("no GBOD chunk found");
+}
+
+namespace {
+
+// Which components a key chunk stores, and whether it is the compressed (half / int16) form.
+struct KeyLayout {
+    bool known = false;
+    bool compressed = false;
+    bool scale = false;
+    bool rotation = false;
+    bool translation = false;
+    uint32_t size() const {
+        return compressed ? (scale ? 6 : 0) + (rotation ? 8 : 0) + (translation ? 6 : 0) + 2
+                          : (scale ? 12 : 0) + (rotation ? 16 : 0) + (translation ? 12 : 0) + 4;
+    }
+};
+
+KeyLayout keyLayout(uint32_t tag) {
+    struct Entry { uint32_t tag; bool compressed, scale, rotation, translation; };
+    static const Entry table[] = {
+        {fourcc("KEYT"), false, false, false, true},  {fourcc("KEYR"), false, false, true, false},
+        {fourcc("KEYS"), false, true, false, false},  {fourcc("KERT"), false, false, true, true},
+        {fourcc("KEST"), false, true, false, true},   {fourcc("KESR"), false, true, true, false},
+        {fourcc("KSRT"), false, true, true, true},    {fourcc("XKER"), true, false, true, false},
+        {fourcc("XKRT"), true, false, true, true},    {fourcc("XKSR"), true, true, true, false},
+        {fourcc("XSRT"), true, true, true, true},
+    };
+    for (const Entry& e : table)
+        if (e.tag == tag) return KeyLayout{true, e.compressed, e.scale, e.rotation, e.translation};
+    return KeyLayout{};
+}
+
+Quat normalizedQuat(const Quat& q) {
+    const float n = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+    return n > 0 ? Quat{q.x / n, q.y / n, q.z / n, q.w / n} : Quat{};
+}
+
+float readHalf(ByteReader& r) { return halfToFloat(r.u16()); }
+float readSnorm16(ByteReader& r) { return float(int16_t(r.u16())) / 32767.0f; }
+
+AnimKey readKey(ByteReader& r, const KeyLayout& layout) {
+    AnimKey key;
+    if (layout.scale) {
+        key.scale.x = layout.compressed ? readHalf(r) : r.f32();
+        key.scale.y = layout.compressed ? readHalf(r) : r.f32();
+        key.scale.z = layout.compressed ? readHalf(r) : r.f32();
+    }
+    if (layout.rotation) {
+        key.rotation.x = layout.compressed ? readSnorm16(r) : r.f32();
+        key.rotation.y = layout.compressed ? readSnorm16(r) : r.f32();
+        key.rotation.z = layout.compressed ? readSnorm16(r) : r.f32();
+        key.rotation.w = layout.compressed ? readSnorm16(r) : r.f32();
+    }
+    if (layout.translation) {
+        key.translation.x = layout.compressed ? readHalf(r) : r.f32();
+        key.translation.y = layout.compressed ? readHalf(r) : r.f32();
+        key.translation.z = layout.compressed ? readHalf(r) : r.f32();
+    }
+    key.time = layout.compressed ? readHalf(r) : r.f32();
+    // 382 of 13.8 million keys are > 1% off unit length (int16 rounding of small rotations): normalise.
+    if (layout.rotation) key.rotation = normalizedQuat(key.rotation);
+    return key;
+}
+
+}  // namespace
+
+Animation readAnimation(const Bytes& data) {
+    if (data.size() < 8 || std::memcmp(data.data(), "CHNK", 4) != 0) throw FormatError("not a chunk file (no CHNK header)");
+    if (data[4] != 'B') throw FormatError("text chunk files are not supported");
+    ByteReader r(data, 8);
+    const Chunk anim = expectChunk(r, fourcc("ANIM"));
+    Animation animation;
+    animation.version = anim.version;
+    const uint32_t tracks = r.u32();
+    r.u8();                                    // UNKNOWN, always 0
+    for (uint32_t t = 0; t < tracks; ++t) {
+        r.u32();                               // UNKNOWN fourcc before each track
+        const Chunk trak = expectChunk(r, fourcc("TRAK"));
+        AnimTrack track;
+        r.u8();                                // UNKNOWN, always 0
+        track.target = r.u32();
+        if (track.target != fourcc("SKEL")) {  // material ("EFCT") tracks use another layout: skipped
+            r.seek(trak.end);
+            continue;
+        }
+        track.name = r.cstr();
+        r.u8();                                // UNKNOWN, always 0
+        track.flags = r.u32();
+        const uint32_t keyCount = r.u32();
+        const Chunk keys = readChunk(r);
+        const KeyLayout layout = keyLayout(keys.tag);
+        if (!layout.known) throw FormatError("TRAK " + track.name + ": unknown key chunk " + tagName(keys.tag));
+        if (size_t(keyCount) * layout.size() != keys.size)
+            throw FormatError("TRAK " + track.name + ": " + tagName(keys.tag) + " size does not match its key count");
+        track.keyKind = keys.tag;
+        track.hasScale = layout.scale;
+        track.hasRotation = layout.rotation;
+        track.hasTranslation = layout.translation;
+        track.keys.reserve(keyCount);
+        for (uint32_t k = 0; k < keyCount; ++k) track.keys.push_back(readKey(r, layout));
+        if (!track.keys.empty()) animation.duration = std::max(animation.duration, track.keys.back().time);
+        animation.tracks.push_back(std::move(track));
+        r.seek(trak.end);
+    }
+    return animation;
+}
+
+const AnimTrack* findTrack(const Animation& animation, const std::string& boneName) {
+    for (const AnimTrack& t : animation.tracks)
+        if (t.name == boneName) return &t;
+    const std::string wanted = toLowerAscii(boneName);  // e.g. npc_eloh_hologram_large: CTRL_world (.anm) vs CTRL_World (.geo)
+    for (const AnimTrack& t : animation.tracks)
+        if (toLowerAscii(t.name) == wanted) return &t;
+    return nullptr;
+}
+
+AnimKey sampleTrack(const AnimTrack& track, float time) {
+    if (track.keys.empty()) return AnimKey{};
+    if (time <= track.keys.front().time) return track.keys.front();
+    if (time >= track.keys.back().time) return track.keys.back();
+    const auto next = std::upper_bound(track.keys.begin(), track.keys.end(), time,
+                                       [](float t, const AnimKey& k) { return t < k.time; });
+    const AnimKey& b = *next;
+    const AnimKey& a = *(next - 1);
+    const float span = b.time - a.time;
+    const float u = span > 0 ? (time - a.time) / span : 0.0f;
+    auto mix = [u](const Vec3& p, const Vec3& q) { return Vec3{p.x + (q.x - p.x) * u, p.y + (q.y - p.y) * u, p.z + (q.z - p.z) * u}; };
+    AnimKey out;
+    out.time = time;
+    out.scale = mix(a.scale, b.scale);
+    out.translation = mix(a.translation, b.translation);
+    const float sign = a.rotation.x * b.rotation.x + a.rotation.y * b.rotation.y + a.rotation.z * b.rotation.z + a.rotation.w * b.rotation.w < 0 ? -1.0f : 1.0f;
+    out.rotation = normalizedQuat(Quat{a.rotation.x + (sign * b.rotation.x - a.rotation.x) * u, a.rotation.y + (sign * b.rotation.y - a.rotation.y) * u,
+                                       a.rotation.z + (sign * b.rotation.z - a.rotation.z) * u, a.rotation.w + (sign * b.rotation.w - a.rotation.w) * u});
+    return out;
 }
 
 void writeGeoObj(const GeoModel& model, const std::string& objPath, bool applyBoneTransforms, bool rightHanded) {

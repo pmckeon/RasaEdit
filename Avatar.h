@@ -22,6 +22,9 @@ struct AvatarPart {
 
 struct AvatarLook {
     std::string baseMesh;          // "" if the creature class has no mesh
+    // Pose: the first "Idle - Non Combat" animation of the base mesh's skeleton (animationdata); "" = bind pose.
+    // Skeleton 23 (human female) has no families: the male list with "m_" -> "f_" is used (UNVERIFIED rule).
+    std::string poseAnimation;
     uint32_t skinColour = 0;       // ABGR hue for "flesh" pieces: the Face slot (17) colour; 0 = none (UNVERIFIED rule)
     std::vector<AvatarPart> parts;
 };

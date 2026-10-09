@@ -355,17 +355,20 @@ void OverviewPanel::draw(EditorContext& ctx, const char* title, const OverviewLa
 // ------------------------------------------------------------------------------------------
 // Viewport
 // ------------------------------------------------------------------------------------------
-void ViewportPanel::applyOptions(SceneView& scene) const {
-    scene.showTextures = options.showTextures;
-    scene.showTerrain = options.showTerrain;
-    scene.showEntities = options.showEntities;
-    scene.showEffects = options.showEffects;
-    scene.showPlaceholders = options.showPlaceholders;
+void ViewportPanel::applyOptions(const ViewSettings& view, SceneView& scene) const {
+    scene.showTextures = view.showTextures;
+    scene.showTerrain = view.showTerrain;
+    scene.showEntities = view.showEntities;
+    scene.showEffects = view.showEffects;
+    scene.showPlaceholders = view.showPlaceholders;
     scene.showServer = options.showServer;
     scene.showMissionAreas = options.showMissionAreas;
     scene.showRegions = options.showRegions;
-    scene.dimMapEntities = options.dimEntities;
-    scene.drawDistance = options.drawDistance;
+    scene.drawDistance = view.drawDistance;
+    scene.skyLighting = view.skyLighting;
+    scene.showFog = view.fog;
+    scene.showMapLights = view.mapLights;
+    scene.showSun = view.sun;
 }
 
 void ViewportPanel::focusOn(EditorContext& ctx, const Selection& selection) {
@@ -386,15 +389,15 @@ void ViewportPanel::draw(EditorContext& ctx, const char* title, Selection& selec
     const bool editing = hooks && hooks->editable();
 
     // Toolbar.
-    ImGui::Checkbox("Textures", &options.showTextures);
+    ImGui::Checkbox("Textures", &ctx.view.showTextures);
     ImGui::SameLine();
-    ImGui::Checkbox("Terrain", &options.showTerrain);
+    ImGui::Checkbox("Terrain", &ctx.view.showTerrain);
     ImGui::SameLine();
-    ImGui::Checkbox(serverControls_ ? "Map entities" : "Entities", &options.showEntities);
+    ImGui::Checkbox(serverControls_ ? "Map entities" : "Entities", &ctx.view.showEntities);
     ImGui::SameLine();
-    ImGui::Checkbox("Effects", &options.showEffects);
+    ImGui::Checkbox("Effects", &ctx.view.showEffects);
     ImGui::SameLine();
-    ImGui::Checkbox("Placeholders", &options.showPlaceholders);
+    ImGui::Checkbox("Placeholders", &ctx.view.showPlaceholders);
     if (serverControls_) {
         ImGui::SameLine();
         ImGui::Checkbox("Server", &options.showServer);
@@ -409,13 +412,55 @@ void ViewportPanel::draw(EditorContext& ctx, const char* title, Selection& selec
     }
     ImGui::SameLine();
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9);
-    ImGui::SliderFloat("##distance", &options.drawDistance, 100.0f, 4000.0f, "draw %.0f m");
+    ImGui::SliderFloat("##distance", &ctx.view.drawDistance, 100.0f, 4000.0f, "draw %.0f m");
     ImGui::SameLine();
     const bool canFocus = isSelected(selection);
     if (!canFocus) ImGui::BeginDisabled();
     if (ImGui::Button("Focus (F)")) scene.focusOn(selection);
     if (!canFocus) ImGui::EndDisabled();
-    applyOptions(scene);
+
+    // Second row: sky lighting (the region's .sky), its time of day, fog and the map's placed lights.
+    ImGui::Checkbox("Sky", &ctx.view.skyLighting);
+    ImGui::SameLine();
+    if (!ctx.view.skyLighting || scene.skies().empty()) ImGui::BeginDisabled();
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16);
+    const auto skyLabel = [&](size_t k) {
+        const SceneView::SkyChoice& c = scene.skies()[k];
+        std::string regions;
+        for (int32_t r : c.regions) regions += (regions.empty() ? "" : ", ") + std::to_string(r);
+        return c.name + "  (region " + regions + ")" + (c.loaded ? "" : "  - not usable");
+    };
+    if (ImGui::BeginCombo("##sky", scene.skies().empty() ? "no region skies" : skyLabel(std::min(scene.skyIndex, scene.skies().size() - 1)).c_str())) {
+        for (size_t k = 0; k < scene.skies().size(); ++k) {
+            if (ImGui::Selectable(skyLabel(k).c_str(), k == scene.skyIndex)) scene.skyIndex = k;
+            if (!scene.skies()[k].loaded && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", scene.skies()[k].error.c_str());
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine();
+    float hours = scene.timeOfDay * 24.0f;
+    const int minutes = int(hours * 60.0f + 0.5f) % (24 * 60);
+    char timeText[16];
+    std::snprintf(timeText, sizeof timeText, "%02d:%02d", minutes / 60, minutes % 60);
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+    if (ImGui::SliderFloat("##time", &hours, 0.0f, 24.0f, timeText)) scene.timeOfDay = std::clamp(hours / 24.0f, 0.0f, 1.0f);
+    if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) scene.timeOfDay = scene.startTimeOfDay();
+    if (ImGui::IsItemHovered()) {
+        const int start = int(scene.startTimeOfDay() * 24.0f * 60.0f + 0.5f) % (24 * 60);
+        ImGui::SetTooltip("Time of day; the map starts at %02d:%02d (right-click to reset)", start / 60, start % 60);
+    }
+    ImGui::SameLine();
+    ImGui::Checkbox("Fog", &ctx.view.fog);
+    ImGui::SameLine();
+    ImGui::Checkbox("Sun", &ctx.view.sun);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("The sky's sun or moon. The game shadows it; turn it off in caves.");
+    if (!ctx.view.skyLighting || scene.skies().empty()) ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::Checkbox("Lights", &ctx.view.mapLights);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("The map's placed lights (lights.xml): %zu, up to 16 nearest the camera are used%s%s", scene.mapLights().size(),
+                          scene.mapLightsError().empty() ? "" : "\n", scene.mapLightsError().c_str());
+    applyOptions(ctx.view, scene);
 
     // Canvas: an invisible button for input, the render target drawn underneath it.
     const ImVec2 origin = ImGui::GetCursorScreenPos();
@@ -441,12 +486,12 @@ void ViewportPanel::draw(EditorContext& ctx, const char* title, Selection& selec
     if (looking) {
         cam.yaw += io.MouseDelta.x * 0.005f;
         cam.pitch = std::clamp(cam.pitch - io.MouseDelta.y * 0.005f, -1.55f, 1.55f);
-        if (io.MouseWheel != 0.0f) flySpeed_ = std::clamp(flySpeed_ * std::pow(1.25f, io.MouseWheel), 2.0f, 2000.0f);
+        if (io.MouseWheel != 0.0f) ctx.view.flySpeed = std::clamp(ctx.view.flySpeed * std::pow(1.25f, io.MouseWheel), 2.0f, 2000.0f);
     } else if (hovered && io.MouseWheel != 0.0f && !io.KeyCtrl) {
-        cam.position = add(cam.position, scaled(cam.forward(), io.MouseWheel * flySpeed_ * 0.5f));
+        cam.position = add(cam.position, scaled(cam.forward(), io.MouseWheel * ctx.view.flySpeed * 0.1f));   // 2 m a notch at 20 m/s
     }
     if ((focused || looking) && !io.KeyCtrl) {
-        const float step = flySpeed_ * io.DeltaTime * (io.KeyShift ? 4.0f : 1.0f);
+        const float step = ctx.view.flySpeed * io.DeltaTime * (io.KeyShift ? 4.0f : 1.0f);
         tr::Vec3 move{0, 0, 0};
         if (ImGui::IsKeyDown(ImGuiKey_W)) move = add(move, cam.forward());
         if (ImGui::IsKeyDown(ImGuiKey_S)) move = subtract(move, cam.forward());
@@ -459,7 +504,7 @@ void ViewportPanel::draw(EditorContext& ctx, const char* title, Selection& selec
         if (ImGui::IsKeyPressed(ImGuiKey_Escape)) selection = Selection{};
     }
     if (active && ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
-        const float panScale = flySpeed_ * 0.01f;
+        const float panScale = ctx.view.flySpeed * 0.01f;
         cam.position = add(cam.position, add(scaled(cam.right(), -io.MouseDelta.x * panScale), scaled(cam.up(), io.MouseDelta.y * panScale)));
     }
 
@@ -519,7 +564,7 @@ void ViewportPanel::draw(EditorContext& ctx, const char* title, Selection& selec
     // Status overlay.
     char text[256];
     std::snprintf(text, sizeof text, "%.1f, %.1f, %.1f   speed %.0f m/s   models %zu/%zu (%zu failed)   textures %zu (%zu failed)   entities drawn %zu",
-                  cam.position.x, cam.position.y, cam.position.z, flySpeed_, scene.modelsLoaded(), scene.modelsTotal(), scene.modelsFailed(),
+                  cam.position.x, cam.position.y, cam.position.z, ctx.view.flySpeed, scene.modelsLoaded(), scene.modelsTotal(), scene.modelsFailed(),
                   scene.texturesLoaded(), scene.textureErrors().size(), scene.drawnEntities());
     const ImVec2 statusEnd(origin.x + ImGui::CalcTextSize(text).x + 12, origin.y + ImGui::GetFontSize() + 6);
     draw->AddRectFilled(ImVec2(origin.x, origin.y), statusEnd, IM_COL32(0, 0, 0, 140));
@@ -545,7 +590,7 @@ void ViewportPanel::draw(EditorContext& ctx, const char* title, Selection& selec
 
 void ViewportPanel::render(EditorContext& ctx, SDL_GPUCommandBuffer* commands, const Selection& selection) {
     if (!visible_ || !ctx.scene || !ctx.renderer) return;
-    applyOptions(*ctx.scene);
+    applyOptions(ctx.view, *ctx.scene);
     ctx.scene->queueDraws(selection);
     ctx.renderer->record(commands);
 }

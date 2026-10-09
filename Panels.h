@@ -80,17 +80,11 @@ public:
     virtual bool& snapToGround() = 0;
 };
 
+// Per-workspace viewport layers; everything else about the view is shared (EditorContext::view).
 struct ViewportOptions {
-    bool showTextures = true;
-    bool showTerrain = true;
-    bool showEntities = true;
-    bool showEffects = true;
-    bool showPlaceholders = true;
     bool showServer = false;
     bool showMissionAreas = false;
     bool showRegions = false;
-    bool dimEntities = false;
-    float drawDistance = 1200.0f;
 };
 
 class ViewportPanel {
@@ -105,11 +99,10 @@ public:
     // Flies the camera to the selection and brings the panel to the front.
     void focusOn(EditorContext& ctx, const Selection& selection);
 private:
-    void applyOptions(SceneView& scene) const;
+    void applyOptions(const ViewSettings& view, SceneView& scene) const;
     bool serverControls_;
     bool visible_ = false;
     bool raiseWindow_ = false;
-    float flySpeed_ = 40.0f;
     bool dragCandidate_ = false;
     bool dragging_ = false;
     tr::Vec3 dragOffset_;

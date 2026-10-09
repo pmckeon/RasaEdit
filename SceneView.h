@@ -3,6 +3,7 @@
 #include "Avatar.h"
 #include "Renderer.h"
 #include "assetlibrary.h"
+#include "sky.h"
 #include "WorldDatabase.h"
 
 #include <deque>
@@ -81,6 +82,8 @@ public:
     // pickEntities / pickServer choose which kinds of object can be hit.
     Selection pick(float ndcX, float ndcY, bool pickEntities = true, bool pickServer = true) const;
     void focusOn(const Selection& selection);
+    // What focusOn looks at and from how far; false if the selection is not in the scene.
+    bool focusTarget(const Selection& selection, tr::Vec3& target, float& distance) const;
 
     ViewCamera& camera() { return camera_; }
     float drawDistance = 1200.0f;
@@ -92,7 +95,29 @@ public:
     bool showServer = true;             // spawn pools, teleporters, links, objects
     bool showRegions = false;           // map regions (large outlines)
     bool showMissionAreas = true;
-    bool dimMapEntities = false;        // draw the static map greyed out (context only)
+    // Sky lighting (.sky of the map's regions). setRegionSkies gives (region id, .sky file name) pairs from the map's
+    // RegionSettings (MapRegion.sky resolved through the string table); each distinct sky is loaded once.
+    struct SkyChoice {
+        std::string name;                   // .sky file
+        std::vector<int32_t> regions;       // map regions that use it
+        bool loaded = false;
+        std::string error;                  // why it could not be used
+        tr::Sky sky;
+    };
+    void setRegionSkies(const std::vector<std::pair<int32_t, std::string>>& regionSkies);
+    const std::vector<SkyChoice>& skies() const { return skies_; }
+    size_t skyIndex = 0;                    // into skies(); the sky of region 0 by default
+    float timeOfDay = 0.5f;                 // fraction of the day; the map's starting sky time by default
+    float startTimeOfDay() const { return startTimeOfDay_; }
+    bool skyLighting = true;                // false: plain editor lighting
+    bool showFog = true;                    // distance fog in the sky colour (the .sky's own "Used" flag is false everywhere)
+    bool showMapLights = true;              // the map's lights.xml (up to 16 nearest the camera)
+    bool showSun = true;                    // the sky's sun/moon; off for caves (the game shadows it; no shadows here)
+    const std::vector<tr::PlacedLight>& mapLights() const { return mapLights_; }
+    const std::string& mapLightsError() const { return mapLightsError_; }
+    // The frame lighting for the current sky, time and toggles (also used by queueDraws).
+    SceneLighting lighting() const;
+
     // Why an entity draws the way it does: "model", "water", "effect (no geometry)", "failed: ...", etc.
     std::string modelStatus(size_t entityIndex) const;
     size_t drawnEntities() const { return drawnEntities_; }
@@ -104,6 +129,9 @@ private:
         bool alphaTest = false;
         bool water = false;                    // TRWater* effect: drawn as a translucent surface
         bool hued = false;                     // "Hue" effect: a colour is added, weighted by the diffuse alpha
+        float colourScale = 1;                 // 2 for "VertColor" effects (texture x vertex colour x 2)
+        SDL_GPUTexture* glow = nullptr;        // GlowTexture (owned by textures_), added after lighting
+        bool additive = false;                 // TRAdditive* effect: drawn additively with Effects on, not pickable
         bool flesh = false;                    // swap group "flesh": hued with the skin colour
         uint32_t swapId = 0;                   // avatar swap set (0: not swappable)
     };
@@ -114,7 +142,8 @@ private:
         tr::Bounds bounds{tr::Vec3{-0.5f, 0, -0.5f}, tr::Vec3{0.5f, 2, 0.5f}};   // from the geometry once loaded
         bool loaded = false;
         bool failed = false;
-        bool effectOnly = false;               // every piece is an additive effect quad (particles drawn by the game)
+        bool effectOnly = false;               // every piece is additive (glows, light cones, particle placeholders)
+        bool hasSolid = false;                 // at least one non-additive piece
         bool hasWater = false;
         std::string failure;
     };
@@ -146,7 +175,11 @@ private:
         bool area = false;              // region or mission area outline
         AreaShape shape;
     };
-    Model* modelFor(const std::string& mesh);
+    // poseAnimation: skin the model into the first frame of this .anm ("" = as authored, bind pose).
+    Model* modelFor(const std::string& mesh, const std::string& poseAnimation = "");
+    SceneLighting skyLightingAt() const;       // the sky part of lighting()
+    // Puts the camera distance metres from target, looking at it (see focusOn).
+    void frameTarget(const tr::Vec3& target, float distance);
     bool rayHitsModel(const Model& model, const tr::Vec3& origin, const tr::Vec3& dir, float& t) const;
     void buildTerrain(uint32_t step);
     void buildTerrainMaterial();
@@ -167,6 +200,10 @@ private:
     GpuMesh unitSquare_;                // -1..1 in the XZ plane (lines)
     GpuMesh arrow_;                     // along -z (the models' front), length 1 (lines)
     GpuMesh pole_;                      // 0..1 along +y (lines)
+    std::vector<SkyChoice> skies_;
+    float startTimeOfDay_ = 0.5f;
+    std::vector<tr::PlacedLight> mapLights_;
+    std::string mapLightsError_;
     std::vector<ServerPlacement> serverPlacements_;
     const WorldContent* serverContent_ = nullptr;
     const WorldDatabase* serverDatabase_ = nullptr;

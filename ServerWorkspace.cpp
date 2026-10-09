@@ -8,9 +8,6 @@
 ServerWorkspace::ServerWorkspace(EditorContext& ctx) : Workspace(ctx) {
     viewport_.options.showServer = true;             // the server layers are what this workspace is about
     viewport_.options.showMissionAreas = true;
-    viewport_.options.dimEntities = true;            // the static map is context only
-    viewport_.options.showPlaceholders = false;      // ... so its helper boxes are off by default
-    viewport_.options.showEffects = false;
 }
 
 void ServerWorkspace::buildDefaultLayout(ImGuiID dockspace) {

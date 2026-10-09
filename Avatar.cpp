@@ -8,6 +8,13 @@ AvatarLook resolveAvatar(tr::GameData& data, const WorldDatabase& database, cons
     const int32_t baseMeshId = data.classMeshId(creature.classId);
     if (baseMeshId < 0) return look;
     look.baseMesh = data.stringById(baseMeshId);
+    const int32_t skeleton = data.meshSkeletonId(baseMeshId);
+    std::vector<std::string> idles = data.familyAnimations(skeleton, 1);
+    if (idles.empty() && skeleton == 23) {
+        for (std::string& name : data.familyAnimations(1, 1))
+            if (name.rfind("m_", 0) == 0) idles.push_back("f_" + name.substr(2));
+    }
+    if (!idles.empty()) look.poseAnimation = idles.front();
     for (const AppearanceSlot& slot : database.appearance(creature.id)) {
         if (slot.slotId == 17) look.skinColour = slot.colour;
         for (const tr::SwapsetPart& sp : data.itemSwapsetParts(slot.classId, baseMeshId)) {
