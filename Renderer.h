@@ -39,6 +39,10 @@ struct TerrainMaterial {
     std::vector<float> tilings;                 // metres per repeat, per layer (up to 128)
 };
 
+// Creates the GPU device, preferring Vulkan (the same SPIR-V path on Windows, Linux and macOS via MoltenVK); falls back
+// to SDL's own choice (Direct3D 12 on Windows) if Vulkan is unavailable. SDL_GPU_DRIVER, when set, still wins.
+SDL_GPUDevice* createGpuDevice(SDL_GPUShaderFormat formats, bool debug);
+
 // Offscreen scene renderer for the viewport: colour + depth targets; textured-mesh, line and terrain pipelines.
 class Renderer {
 public:

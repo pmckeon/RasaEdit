@@ -1,5 +1,6 @@
 #include "RasaEdit.h"
 #include "Editor.h"
+#include "Renderer.h"
 
 // Main loop follows imgui 1.92.8's examples/example_sdl3_sdlgpu3.
 int main(int argc, char* argv[])
@@ -21,8 +22,8 @@ int main(int argc, char* argv[])
     SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
     SDL_ShowWindow(window);
 
-    SDL_GPUDevice* gpuDevice = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_SPIRV | SDL_GPU_SHADERFORMAT_DXIL | SDL_GPU_SHADERFORMAT_MSL |
-                                                   SDL_GPU_SHADERFORMAT_METALLIB, true, nullptr);
+    SDL_GPUDevice* gpuDevice = createGpuDevice(SDL_GPU_SHADERFORMAT_SPIRV | SDL_GPU_SHADERFORMAT_DXIL | SDL_GPU_SHADERFORMAT_MSL |
+                                               SDL_GPU_SHADERFORMAT_METALLIB, true);
     if (!gpuDevice) {
         std::cerr << "Failed to create GPU Device: " << SDL_GetError() << std::endl;
         return -1;

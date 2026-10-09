@@ -46,6 +46,14 @@ SDL_GPUSampler* createSampler(SDL_GPUDevice* device, bool linear) {
 
 }  // namespace
 
+SDL_GPUDevice* createGpuDevice(SDL_GPUShaderFormat formats, bool debug) {
+    // SDL_HINT_GPU_DRIVER takes precedence over the requested name inside SDL.
+    if (SDL_GPUDevice* device = SDL_CreateGPUDevice(formats, debug, "vulkan")) return device;
+    if (SDL_GetHint(SDL_HINT_GPU_DRIVER)) return nullptr;     // the user's choice failed; don't override it
+    SDL_Log("Vulkan unavailable (%s); using SDL's default GPU driver", SDL_GetError());
+    return SDL_CreateGPUDevice(formats, debug, nullptr);
+}
+
 Renderer::Renderer(SDL_GPUDevice* device) : device_(device) {
     sceneVertex_ = createShader(sceneVertexDxil, sizeof sceneVertexDxil, sceneVertexSpirv, sizeof sceneVertexSpirv, "vsMain",
                                 SDL_GPU_SHADERSTAGE_VERTEX, 0);
