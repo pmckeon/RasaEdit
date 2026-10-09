@@ -82,6 +82,15 @@ struct Creature {
     int32_t walkSpeed = 0;
 };
 
+// creature_appearance (id = creature id): one equipped item class per equipment slot (Rasa.NET EquipmentData:
+// 2 Shoes, 13 Weapon, 14 Hair, 15 Torso, 16 Legs, 17 Face, ...). colour is ABGR (red in the low byte), the hue
+// the client adds to the item's pieces; slot 17's colour is the skin tone.
+struct AppearanceSlot {
+    int32_t slotId = 0;
+    int32_t classId = 0;
+    uint32_t colour = 0;
+};
+
 struct Teleporter {
     int64_t id = 0;
     int32_t classId = 0;
@@ -177,6 +186,7 @@ public:
     int32_t contextIdForMap(const std::string& mapName) const;    // case-insensitive; -1 if unknown
     const Creature* creature(int32_t id) const;
     size_t creatureCount() const { return creatures_.size(); }
+    const std::vector<AppearanceSlot>& appearance(int32_t creatureId) const;     // empty if none, sorted by slot
     // From entityclass.aug_list: augmentation 52 = NPC, 12 = vendor.
     bool classIsNpc(int32_t classId) const { return npcClasses_.count(classId) != 0; }
     bool classIsVendor(int32_t classId) const { return vendorClasses_.count(classId) != 0; }
@@ -208,6 +218,7 @@ private:
     std::unordered_map<std::string, std::set<std::string>> columns_;    // table -> column names
     std::vector<MapInfo> maps_;
     std::unordered_map<int32_t, Creature> creatures_;
+    std::unordered_map<int32_t, std::vector<AppearanceSlot>> appearances_;   // creature id -> slots
     std::unordered_set<int32_t> npcClasses_;
     std::unordered_set<int32_t> vendorClasses_;
 };

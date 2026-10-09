@@ -466,7 +466,18 @@ struct GeoPiece {
     Bounds bounds;
     std::string boneName;              // bone this piece is attached to
     std::vector<std::string> skinBones;
+    // Avatar swap sets (GPCE v8+, verified over all 18,748 such pieces): the body region this piece belongs to
+    // (equipmentdata.swapset: 1 Torso, 2 Legs, 3 Boots, 4 Skin/Face, 5 Hair/Helm, 6 Gloves, 7 Face Hi, 8 Face Lo;
+    // 0 = not swappable, 99 = low-LOD stand-in), its group ("flesh", "undies", "hair", the suit's name) and name.
+    uint32_t swapId = 0;
+    std::string swapGroup;
+    std::string pieceName;             // e.g. "Torso", "Torso_LOD1"
+    std::vector<GeoParameter> userData;    // USDA key/value pairs, e.g. SwapID, LOD, LODPercentage
+    uint32_t lod = 0;                  // USDA "LOD" (any case); 0 = full detail
 };
+
+// Avatar skin/hair/clothing hueing: effects with "Hue" in the name add a colour weighted by the diffuse alpha.
+bool isHuedEffect(const std::string& effectName);
 
 struct GeoBone {
     std::string name;

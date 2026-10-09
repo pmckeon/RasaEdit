@@ -166,6 +166,10 @@ void WorldDatabase::loadGlobals() {
         }
         std::sort(creatureList_.begin(), creatureList_.end(), [](const Creature& a, const Creature& b) { return a.id < b.id; });
     }
+    if (requireColumns("creature_appearance", {"id", "slot_id", "class_id", "color"})) {
+        Statement s(db_, "SELECT id, slot_id, class_id, color FROM creature_appearance ORDER BY id, slot_id");
+        while (s.step()) appearances_[s.int32(0)].push_back(AppearanceSlot{s.int32(1), s.int32(2), uint32_t(s.integer(3))});
+    }
     if (requireColumns("entityclass", {"id", "aug_list"})) {
         Statement s(db_, "SELECT id, aug_list FROM entityclass");
         while (s.step()) {
@@ -196,6 +200,12 @@ int32_t WorldDatabase::contextIdForMap(const std::string& mapName) const {
 const Creature* WorldDatabase::creature(int32_t id) const {
     const auto it = creatures_.find(id);
     return it == creatures_.end() ? nullptr : &it->second;
+}
+
+const std::vector<AppearanceSlot>& WorldDatabase::appearance(int32_t creatureId) const {
+    static const std::vector<AppearanceSlot> none;
+    const auto it = appearances_.find(creatureId);
+    return it == appearances_.end() ? none : it->second;
 }
 
 WorldContent WorldDatabase::loadMap(int32_t mapContextId) {

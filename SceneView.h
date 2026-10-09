@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Avatar.h"
 #include "Renderer.h"
 #include "assetlibrary.h"
 #include "WorldDatabase.h"
@@ -59,8 +60,11 @@ public:
     size_t modelsTotal() const { return models_.size(); }
 
     // Server content (World database) for this map; nullptr removes it. The content and database
-    // must outlive the scene or be replaced first.
-    void setServerContent(const WorldContent* content, const WorldDatabase* database, std::function<std::string(int32_t)> meshForClass);
+    // must outlive the scene or be replaced first. avatarFor (optional) assembles swap-set creatures
+    // from their creature_appearance items; without it creatures draw as their class's bare mesh.
+    using AvatarResolver = std::function<AvatarLook(const Creature&)>;
+    void setServerContent(const WorldContent* content, const WorldDatabase* database, std::function<std::string(int32_t)> meshForClass,
+                          AvatarResolver avatarFor = nullptr);
     // Rebuilds the server placements after the content was edited (same content object).
     void refreshServerContent();
 
@@ -99,6 +103,9 @@ private:
         SDL_GPUTexture* texture = nullptr;     // owned by textures_; nullptr = untextured
         bool alphaTest = false;
         bool water = false;                    // TRWater* effect: drawn as a translucent surface
+        bool hued = false;                     // "Hue" effect: a colour is added, weighted by the diffuse alpha
+        bool flesh = false;                    // swap group "flesh": hued with the skin colour
+        uint32_t swapId = 0;                   // avatar swap set (0: not swappable)
     };
     struct Model {
         std::vector<ModelPiece> pieces;
@@ -121,11 +128,18 @@ private:
         bool hasBounds = false;
     };
 
+    struct AvatarDraw {                 // one suit's pieces of one swap set
+        Model* model = nullptr;
+        uint32_t swapsetId = 0;
+        Vec4f hue;                      // w: 1 = hue the non-flesh pieces
+    };
     struct ServerPlacement {
         Selection selection;
         tr::Vec3 position;
         Mat4 world;                     // position + yaw (unit scale)
-        Model* model = nullptr;
+        Model* model = nullptr;         // the base suit for avatars
+        std::vector<AvatarDraw> avatarParts;    // each replaces the base model's pieces of its swap set
+        Vec4f skinHue;                  // w: 1 = hue flesh pieces
         Vec4f colour;
         float ringRadius = 0;           // spawn radius / trigger radius (0: none)
         bool facing = false;            // draw a facing arrow
@@ -157,6 +171,7 @@ private:
     const WorldContent* serverContent_ = nullptr;
     const WorldDatabase* serverDatabase_ = nullptr;
     std::function<std::string(int32_t)> serverMeshForClass_;
+    AvatarResolver serverAvatarFor_;
     std::unordered_map<std::string, Model> models_;
     std::deque<std::string> pending_;
     std::vector<Placement> placements_;

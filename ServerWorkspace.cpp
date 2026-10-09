@@ -131,7 +131,16 @@ void ServerWorkspace::loadServerContent() {
         ctx_.setStatus(std::string("Could not read server content: ") + e.what(), true);
         return;
     }
-    if (ctx_.scene) ctx_.scene->setServerContent(&serverContent_, database_.get(), [this](int32_t id) { return ctx_.classInfo(id).mesh; });
+    if (ctx_.scene)
+        ctx_.scene->setServerContent(&serverContent_, database_.get(), [this](int32_t id) { return ctx_.classInfo(id).mesh; },
+                                     [this](const Creature& creature) {
+                                         if (!ctx_.gameData || !database_) return AvatarLook{};
+                                         try {
+                                             return resolveAvatar(*ctx_.gameData, *database_, creature);
+                                         } catch (const std::exception&) {
+                                             return AvatarLook{};     // incomplete game data: draw the bare class mesh
+                                         }
+                                     });
 }
 
 bool ServerWorkspace::selectionPosition(const Selection& s, tr::Vec3& position) const {

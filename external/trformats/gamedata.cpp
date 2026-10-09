@@ -750,4 +750,30 @@ bool GameData::radarInfo(int32_t contextId, int32_t regionId, RadarInfo& info) {
     return info.extentX > 0 && info.extentZ > 0;
 }
 
+std::vector<SwapsetPart> GameData::itemSwapsetParts(int32_t itemClassId, int32_t baseMeshId) {
+    std::vector<SwapsetPart> parts;
+    const py::Object* list = py::dictGetTuple(global("generated.client.equipmentdata", "equipableClassMeshSwapset"), {itemClassId, baseMeshId});
+    for (size_t k = 0; k < py::length(list); ++k) {
+        const py::Object* pair = py::item(list, k);
+        SwapsetPart part;
+        part.suitId = int32_t(py::asInt(py::item(pair, 0)));
+        part.swapsetId = int32_t(py::asInt(py::item(pair, 1)));
+        parts.push_back(part);
+    }
+    return parts;
+}
+
+std::string GameData::suitName(int32_t suitId) {
+    return py::asString(py::item(py::dictGet(global("generated.client.equipmentdata", "suit"), suitId), 0));
+}
+
+std::string GameData::suitMeshName(int32_t suitId) {
+    const py::Object* mesh = py::item(py::dictGet(global("generated.client.equipmentdata", "suit"), suitId), 1);
+    return py::isInt(mesh) ? stringById(int32_t(py::asInt(mesh))) : "";
+}
+
+std::string GameData::swapsetName(int32_t swapsetId) {
+    return py::asString(py::dictGet(global("generated.client.equipmentdata", "swapset"), swapsetId));
+}
+
 }  // namespace tr

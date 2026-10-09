@@ -4,8 +4,10 @@
 #include <zlib.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 
@@ -936,6 +938,14 @@ std::string formatFloat(float f) {
     return text;
 }
 
+}  // namespace
+
+bool isHuedEffect(const std::string& effectName) {
+    return effectName.find("Hue") != std::string::npos;
+}
+
+namespace {
+
 void readEfct(ByteReader& r, GeoPiece& piece) {
     const Chunk c = expectChunk(r, fourcc("EFCT"));
     if (c.version == 2) piece.effectName = r.cstr();
@@ -969,6 +979,22 @@ void readEfct(ByteReader& r, GeoPiece& piece) {
     r.seek(c.end);
 }
 
+// USDA: u32 count, then count pairs of (cstr key, cstr value).
+void readUserData(ByteReader& r, GeoPiece& piece) {
+    const Chunk c = expectChunk(r, fourcc("USDA"));
+    const uint32_t pairs = r.u32();
+    for (uint32_t k = 0; k < pairs && r.tell() < c.end; ++k) {
+        GeoParameter parameter;
+        parameter.key = r.cstr();
+        parameter.value = r.cstr();
+        std::string key = parameter.key;
+        for (char& ch : key) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+        if (key == "lod") piece.lod = uint32_t(std::strtoul(parameter.value.c_str(), nullptr, 10));
+        piece.userData.push_back(std::move(parameter));
+    }
+    r.seek(c.end);
+}
+
 GeoPiece readGpce(ByteReader& r) {
     const Chunk c = expectChunk(r, fourcc("GPCE"));
     GeoPiece piece;
@@ -985,7 +1011,14 @@ GeoPiece readGpce(ByteReader& r) {
     }
     piece.bounds = readBbox(r);
     piece.boneName = r.cstr();
-    r.seek(c.end);                             // remaining fields, USDA, extra index buffers: skipped
+    if (c.version >= 8 && r.tell() + 8 <= c.end) {
+        r.u32();                               // UNKNOWN, always 0
+        piece.swapId = r.u32();
+        piece.swapGroup = r.cstr();
+        piece.pieceName = r.cstr();
+        if (r.tell() + 16 <= c.end && r.peekU32() == fourcc("USDA")) readUserData(r, piece);
+    }
+    r.seek(c.end);                             // remaining fields, extra index buffers: skipped
     return piece;
 }
 

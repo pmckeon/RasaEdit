@@ -38,6 +38,7 @@ add_executable (RasaEdit
     "SceneView.cpp" "SceneView.h"
     "GpuMath.h" "ShaderBytecode.h"
     "WorldDatabase.cpp" "WorldDatabase.h"
+    "Avatar.cpp" "Avatar.h"
 )
 
 # Link everything together
@@ -53,13 +54,13 @@ set_property(TARGET RasaEdit PROPERTY CXX_STANDARD 20)
 # Headless rendering test (renders a map offscreen and writes raw RGBA; works on any Vulkan driver).
 option(RASAEDIT_BUILD_TESTS "Build the headless viewport test" OFF)
 if (RASAEDIT_BUILD_TESTS)
-    add_executable(viewport_test tests/viewport_test.cpp Renderer.cpp SceneView.cpp GpuTexture.cpp WorldDatabase.cpp)
+    add_executable(viewport_test tests/viewport_test.cpp Renderer.cpp SceneView.cpp GpuTexture.cpp WorldDatabase.cpp Avatar.cpp)
     target_include_directories(viewport_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(viewport_test PRIVATE SDL3::SDL3 trformats ${RASAEDIT_SQLITE})
 
     # Whole-editor smoke test: real ImGui frames and both workspaces, headless.
     add_executable(ui_smoke_test tests/ui_smoke_test.cpp Editor.cpp EditorContext.cpp ClientWorkspace.cpp ServerWorkspace.cpp Panels.cpp
-                   Renderer.cpp SceneView.cpp GpuTexture.cpp WorldDatabase.cpp TerrainOverview.cpp RadarMap.cpp)
+                   Renderer.cpp SceneView.cpp GpuTexture.cpp WorldDatabase.cpp Avatar.cpp TerrainOverview.cpp RadarMap.cpp)
     target_include_directories(ui_smoke_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(ui_smoke_test PRIVATE SDL3::SDL3 imgui::imgui trformats ${RASAEDIT_SQLITE})
     set_property(TARGET ui_smoke_test PROPERTY CXX_STANDARD 20)

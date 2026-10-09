@@ -1,6 +1,7 @@
 // Headless viewport test: renders a map with the editor's Renderer/SceneView into an offscreen
 // target and writes the frame as raw RGBA. Runs on any Vulkan driver, including Mesa's lavapipe.
 //   viewport_test <game root> <game.zip> <map> <out.rgba> <width> <height> <eye x y z> <target x y z>
+#include "Avatar.h"
 #include "SceneView.h"
 #include "gamedata.h"
 #include "WorldDatabase.h"
@@ -33,7 +34,21 @@ int main(int argc, char** argv) {
         if (const char* dbPath = std::getenv("RASA_DB")) {
             database = std::make_unique<WorldDatabase>(dbPath);
             content = database->loadMap(database->contextIdForMap(map.name));
-            scene.setServerContent(&content, database.get(), [&](int32_t id) { return data.classMeshName(id); });
+            scene.setServerContent(&content, database.get(), [&](int32_t id) { return data.classMeshName(id); },
+                                   [&](const Creature& c) { return resolveAvatar(data, *database, c); });
+            // Avatar assembly of the first few spawned creatures that wear swap-set items.
+            int listed = 0;
+            for (const SpawnPool& pool : content.spawnPools) {
+                const Creature* c = database->creature(pool.slot1.creatureId);
+                if (!c || listed >= 4) continue;
+                const AvatarLook look = resolveAvatar(data, *database, *c);
+                if (look.parts.empty()) continue;
+                ++listed;
+                std::printf("avatar %d %s: base %s, skin %08x\n", c->id, c->comment.c_str(), look.baseMesh.c_str(), look.skinColour);
+                for (const AvatarPart& part : look.parts)
+                    std::printf("    slot %d -> swap set %u (%s) from %s, colour %08x\n", part.slotId, part.swapsetId,
+                                data.swapsetName(int32_t(part.swapsetId)).c_str(), part.mesh.c_str(), part.colour);
+            }
             std::printf("server content: %zu spawn pools, %zu teleporters, %zu objects, %zu links\n", content.spawnPools.size(),
                         content.teleporters.size(), content.objects.size(), content.mapLinks.size());
         }

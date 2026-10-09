@@ -130,6 +130,13 @@ inline std::string radarTileName(int32_t mapTemplateId, int32_t regionId, int32_
     return "ui_radar_" + std::to_string(mapTemplateId) + "_" + std::to_string(regionId) + "_" + std::to_string(tileIndex + 1) + ".dds";
 }
 
+// One part an equipable item contributes to an avatar: the pieces of swap set swapsetId taken from suit suitId
+// (generated.client.equipmentdata.equipableClassMeshSwapset[(itemClassId, baseMeshId)] = [(suitId, swapsetId)]).
+struct SwapsetPart {
+    int32_t suitId = 0;
+    int32_t swapsetId = 0;
+};
+
 class GameData {
 public:
     explicit GameData(const std::string& gameZipPath);       // e.g. AssetLibrary::gameDataPath()
@@ -148,6 +155,13 @@ public:
     std::string mapTemplateName(int32_t templateId);          // generated.client.maptemplate
     std::vector<int32_t> contextIdsForMapTemplate(int32_t templateId);   // generated.client.gamecontext [3]
     bool radarInfo(int32_t contextId, int32_t regionId, RadarInfo& info); // false if the context has no radar
+
+    // Avatar swap sets (generated.client.equipmentdata). baseMeshId is the body's mesh string id
+    // (classMeshId of e.g. NPC_Human_Swapset_Male = 4257 avatar_hum_m_nude_caucasian_v01.geo).
+    std::vector<SwapsetPart> itemSwapsetParts(int32_t itemClassId, int32_t baseMeshId);
+    std::string suitName(int32_t suitId);                     // suit[id][0], e.g. "NPC Officer 1 Male"
+    std::string suitMeshName(int32_t suitId);                 // suit[id][1] via the string table; "" if none
+    std::string swapsetName(int32_t swapsetId);               // swapset[id], e.g. "Torso"
 
 private:
     ZipArchive zip_;

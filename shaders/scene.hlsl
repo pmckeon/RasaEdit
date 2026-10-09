@@ -18,6 +18,7 @@ cbuffer FragmentUniforms : register(b0, space3)
     float4 tint;              // multiplied with the vertex colour and the texture
     float4 lightDirection;    // xyz: towards the light (world space); w: 1 = lit, 0 = unlit
     float4 options;           // x: 1 = alpha test (discard below 0.5)
+    float4 hue;               // rgb added to the texel weighted by its alpha (the game's "Hue" effects); w: 1 = on
 };
 
 [[vk::combinedImageSampler]] Texture2D diffuseTexture : register(t0, space2);
@@ -55,7 +56,10 @@ float4 psMain(VertexOutput input) : SV_Target0
     const float4 texel = diffuseTexture.Sample(diffuseSampler, input.uv);
     if (options.x > 0.5 && texel.a < 0.5)
         discard;
-    const float4 base = input.colour * tint * float4(texel.rgb, 1.0);
+    // Hued textures (avatar skin, hair, clothing) are grey with the hue mask in alpha; the game's fallback
+    // shader computes diffuse.rgb + Hue.rgb * diffuse.a (decal maps not applied here).
+    const float3 albedo = hue.w > 0.5 ? saturate(texel.rgb + hue.rgb * texel.a) : texel.rgb;
+    const float4 base = input.colour * tint * float4(albedo, 1.0);
     if (lightDirection.w < 0.5)
         return base;
     const float3 n = normalize(input.normal);

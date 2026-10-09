@@ -61,7 +61,9 @@ public:
     // Frame: begin, queue draws, then record everything into a command buffer.
     void beginFrame(const Mat4& viewProjection, const tr::Vec3& towardsLight, SDL_FColor clearColour);
     // texture nullptr draws untextured (white); alphaTest discards texels with alpha below 0.5.
-    void draw(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, bool lit, SDL_GPUTexture* texture = nullptr, bool alphaTest = false);
+    // hue (w = 1) adds hue.rgb weighted by the texture alpha, as the game's "Hue" effects do (avatar skin, hair, clothing).
+    void draw(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, bool lit, SDL_GPUTexture* texture = nullptr, bool alphaTest = false,
+              const Vec4f& hue = Vec4f{0, 0, 0, 0});
     // Alpha-blended (tint.w is the opacity), drawn after all opaque draws, without depth writes.
     void drawTranslucent(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint);
     void drawTerrain(const GpuMesh& mesh, const TerrainMaterial& material);
@@ -78,6 +80,7 @@ private:
         bool alphaTest;
         const TerrainMaterial* terrain;          // non-null: terrain draw
         bool translucent;
+        Vec4f hue;
     };
     SDL_GPUShader* createShader(const unsigned char* dxil, size_t dxilSize, const unsigned char* spirv, size_t spirvSize,
                                 const char* entryPoint, SDL_GPUShaderStage stage, uint32_t samplers);

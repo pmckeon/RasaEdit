@@ -17,6 +17,7 @@ struct SceneFragmentUniforms {
     Vec4f tint;
     Vec4f lightDirection;          // w: 1 = lit, 0 = unlit
     Vec4f options;                 // x: alpha test
+    Vec4f hue;                     // rgb added, weighted by the texture alpha; w: 1 = on
 };
 
 struct TerrainFragmentUniforms {
@@ -249,19 +250,19 @@ void Renderer::beginFrame(const Mat4& viewProjection, const tr::Vec3& towardsLig
     translucentDraws_.clear();
 }
 
-void Renderer::draw(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, bool lit, SDL_GPUTexture* texture, bool alphaTest) {
+void Renderer::draw(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, bool lit, SDL_GPUTexture* texture, bool alphaTest, const Vec4f& hue) {
     if (!mesh.vertices || mesh.indexCount == 0) return;
-    draws_.push_back(DrawItem{&mesh, model, tint, lit, texture ? texture : white_, alphaTest, nullptr, false});
+    draws_.push_back(DrawItem{&mesh, model, tint, lit, texture ? texture : white_, alphaTest, nullptr, false, hue});
 }
 
 void Renderer::drawTranslucent(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint) {
     if (!mesh.vertices || mesh.indexCount == 0) return;
-    translucentDraws_.push_back(DrawItem{&mesh, model, tint, true, white_, false, nullptr, true});
+    translucentDraws_.push_back(DrawItem{&mesh, model, tint, true, white_, false, nullptr, true, Vec4f{0, 0, 0, 0}});
 }
 
 void Renderer::drawTerrain(const GpuMesh& mesh, const TerrainMaterial& material) {
     if (!mesh.vertices || mesh.indexCount == 0 || !material.layers || !material.layerIndices || !material.layerWeights) return;
-    draws_.push_back(DrawItem{&mesh, identityMatrix(), Vec4f{1, 1, 1, 1}, true, nullptr, false, &material, false});
+    draws_.push_back(DrawItem{&mesh, identityMatrix(), Vec4f{1, 1, 1, 1}, true, nullptr, false, &material, false, Vec4f{0, 0, 0, 0}});
 }
 
 void Renderer::record(SDL_GPUCommandBuffer* commands) {
@@ -321,7 +322,7 @@ void Renderer::recordItem(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pas
     } else {
         const SDL_GPUTextureSamplerBinding sampler = {item.texture, linearSampler_};
         SDL_BindGPUFragmentSamplers(pass, 0, &sampler, 1);
-        SceneFragmentUniforms u{item.tint, towardsLight_, Vec4f{item.alphaTest ? 1.0f : 0.0f, 0, 0, 0}};
+        SceneFragmentUniforms u{item.tint, towardsLight_, Vec4f{item.alphaTest ? 1.0f : 0.0f, 0, 0, 0}, item.hue};
         u.lightDirection.w = item.lit ? 1.0f : 0.0f;
         SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof u);
     }

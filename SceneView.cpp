@@ -32,6 +32,12 @@ uint32_t heightColour(float t) {
                       uint8_t(a.blue + (b.blue - a.blue) * u), 255);
 }
 
+// creature_appearance colour (ABGR, red in the low byte) as a shader hue; w = 0 when there is none.
+Vec4f hueFromAbgr(uint32_t colour) {
+    if (colour == 0) return Vec4f{0, 0, 0, 0};
+    return Vec4f{float(colour & 0xFF) / 255.0f, float((colour >> 8) & 0xFF) / 255.0f, float((colour >> 16) & 0xFF) / 255.0f, 1.0f};
+}
+
 void unitCube(std::vector<MeshVertex>& vertices, std::vector<uint32_t>& triangles, std::vector<uint32_t>& lines) {
     // Corner k of [0,1]^3: x = bit 0, y = bit 1, z = bit 2.
     for (uint32_t k = 0; k < 8; ++k) {
@@ -265,7 +271,12 @@ void SceneView::loadModel(const std::string& name, Model& model) {
     try {
         const tr::GeoModel geo = tr::readGeo(assets_.read(name));
         size_t effectPieces = 0;
+        // Only full detail is drawn: lower LODs (USDA "LOD" >= 1) and swap set 99 (a low-LOD stand-in) sit on top
+        // of the LOD 0 geometry. A model made only of such pieces is drawn whole.
+        auto lowDetail = [](const tr::GeoPiece& piece) { return piece.lod > 0 || piece.swapId == 99; };
+        const bool skipLowDetail = std::any_of(geo.pieces.begin(), geo.pieces.end(), [&](const tr::GeoPiece& piece) { return !lowDetail(piece); });
         for (const tr::GeoPiece& piece : geo.pieces) {
+            if (skipLowDetail && lowDetail(piece)) continue;
             // Additive quads (light cones, mist and splash emitters) are effect placeholders, not geometry:
             // the game draws particles for them. They are counted so the entity can be shown as an effect.
             const std::string effect = tr::toLowerAscii(piece.effectName);
@@ -307,6 +318,9 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 part.texture = water ? nullptr : texture(piece.diffuseTexture);    // water's diffuse map is a stand-in
                 for (const tr::GeoParameter& p : piece.parameters)
                     if (p.key == "AlphaTestEnable") part.alphaTest = p.value == "true";
+                part.hued = tr::isHuedEffect(piece.effectName);
+                part.flesh = tr::toLowerAscii(piece.swapGroup) == "flesh";
+                part.swapId = piece.swapId;
                 model.pieces.push_back(part);
                 const uint32_t base = uint32_t(model.positions.size());
                 for (const MeshVertex& v : vertices) model.positions.push_back(tr::Vec3{v.positionX, v.positionY, v.positionZ});
@@ -430,9 +444,25 @@ void SceneView::queueDraws(const Selection& selection) {
         const bool hasModel = s.model && s.model->loaded && !s.model->pieces.empty();
         if (hasModel) {
             const Vec4f tint = selected ? Vec4f{1.0f, 0.9f, 0.45f, 1} : Vec4f{1, 1, 1, 1};
-            for (const ModelPiece& piece : s.model->pieces) {
-                if (piece.water) renderer_.drawTranslucent(piece.mesh, s.world, Vec4f{0.22f, 0.42f, 0.58f, 0.55f});
-                else renderer_.draw(piece.mesh, s.world, tint, true, showTextures ? piece.texture : nullptr, showTextures && piece.alphaTest);
+            auto drawPiece = [&](const ModelPiece& piece, const Vec4f& partHue) {
+                if (piece.water) {
+                    renderer_.drawTranslucent(piece.mesh, s.world, Vec4f{0.22f, 0.42f, 0.58f, 0.55f});
+                    return;
+                }
+                const Vec4f hue = !showTextures || !piece.hued ? Vec4f{0, 0, 0, 0} : piece.flesh ? s.skinHue : partHue;
+                renderer_.draw(piece.mesh, s.world, tint, true, showTextures ? piece.texture : nullptr, showTextures && piece.alphaTest, hue);
+            };
+            // Avatars: the base suit minus the swap sets replaced by loaded parts, then each part's swap set
+            // from its suit (a part still loading, or failed, leaves the base pieces in place).
+            uint32_t replaced = 0;
+            for (const AvatarDraw& part : s.avatarParts)
+                if (part.model && part.model->loaded && !part.model->pieces.empty() && part.swapsetId < 32) replaced |= 1u << part.swapsetId;
+            for (const ModelPiece& piece : s.model->pieces)
+                if (piece.swapId >= 32 || ((replaced >> piece.swapId) & 0x1) == 0) drawPiece(piece, Vec4f{0, 0, 0, 0});
+            for (const AvatarDraw& part : s.avatarParts) {
+                if (!part.model || !part.model->loaded) continue;
+                for (const ModelPiece& piece : part.model->pieces)
+                    if (piece.swapId == part.swapsetId) drawPiece(piece, part.hue);
             }
         } else {
             renderer_.draw(unitBoxLines_, multiply(s.world, boxMatrix(tr::Bounds{tr::Vec3{-0.5f, 0, -0.5f}, tr::Vec3{0.5f, 2, 0.5f}})), colour, false);
@@ -634,7 +664,7 @@ SceneView::Model* SceneView::modelFor(const std::string& mesh) {
     return &inserted.first->second;
 }
 
-void SceneView::refreshServerContent() { setServerContent(serverContent_, serverDatabase_, serverMeshForClass_); }
+void SceneView::refreshServerContent() { setServerContent(serverContent_, serverDatabase_, serverMeshForClass_, serverAvatarFor_); }
 
 void SceneView::viewRay(float ndcX, float ndcY, tr::Vec3& origin, tr::Vec3& direction) const {
     const float aspect = float(renderer_.width()) / float(std::max<uint32_t>(1, renderer_.height()));
@@ -680,10 +710,12 @@ bool SceneView::groundPoint(const tr::Vec3& origin, const tr::Vec3& direction, f
     return true;
 }
 
-void SceneView::setServerContent(const WorldContent* content, const WorldDatabase* database, std::function<std::string(int32_t)> meshForClass) {
+void SceneView::setServerContent(const WorldContent* content, const WorldDatabase* database, std::function<std::string(int32_t)> meshForClass,
+                                 AvatarResolver avatarFor) {
     serverContent_ = content;
     serverDatabase_ = database;
     serverMeshForClass_ = meshForClass;
+    serverAvatarFor_ = avatarFor;
     serverPlacements_.clear();
     if (!content) return;
     auto yawPlacement = [](const tr::Vec3& position, float rotation) {
@@ -699,6 +731,12 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
         s.position = pool.position;
         s.world = yawPlacement(pool.position, pool.rotation);
         s.model = creature ? modelFor(meshForClass(creature->classId)) : nullptr;
+        if (creature && avatarFor) {
+            const AvatarLook look = avatarFor(*creature);
+            if (!look.baseMesh.empty()) s.model = modelFor(look.baseMesh);
+            s.skinHue = hueFromAbgr(look.skinColour);
+            for (const AvatarPart& part : look.parts) s.avatarParts.push_back(AvatarDraw{modelFor(part.mesh), part.swapsetId, hueFromAbgr(part.colour)});
+        }
         s.colour = vendor ? Vec4f{1.0f, 0.8f, 0.2f, 1} : npc ? Vec4f{0.35f, 1.0f, 0.45f, 1} : Vec4f{1.0f, 0.35f, 0.3f, 1};
         s.ringRadius = std::max(pool.radius, 1.5f);
         s.facing = true;
