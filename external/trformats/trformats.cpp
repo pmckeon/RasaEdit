@@ -1,0 +1,1145 @@
+// trformats.cpp - see trformats.h for the format notes.
+#include "trformats.h"
+
+#include <zlib.h>
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <fstream>
+
+namespace tr {
+
+// ------------------------------------------------------------------------------------------
+// Basic I/O
+// ------------------------------------------------------------------------------------------
+Bytes readFile(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) throw FormatError("cannot open " + path);
+    file.seekg(0, std::ios::end);
+    const std::streamoff size = file.tellg();
+    file.seekg(0);
+    Bytes data(static_cast<size_t>(size));
+    if (size > 0) file.read(reinterpret_cast<char*>(data.data()), size);
+    return data;
+}
+
+static uint32_t loadU32(const uint8_t* p) {
+    return uint32_t(p[0]) | (uint32_t(p[1]) << 8) | (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
+}
+
+ByteReader::ByteReader(const Bytes& data, size_t start, size_t end)
+    : data_(&data), pos_(start), end_(end == SIZE_MAX ? data.size() : end) {
+    if (end_ > data.size() || pos_ > end_) throw FormatError("reader window out of range");
+}
+
+void ByteReader::need(size_t count) const {
+    if (count > end_ - pos_) throw FormatError("unexpected end of data at offset " + std::to_string(pos_));
+}
+
+void ByteReader::seek(size_t pos) {
+    if (pos > end_) throw FormatError("seek past end (" + std::to_string(pos) + ")");
+    pos_ = pos;
+}
+
+uint8_t ByteReader::u8() {
+    need(1);
+    return (*data_)[pos_++];
+}
+
+uint16_t ByteReader::u16() {
+    need(2);
+    const uint8_t* p = data_->data() + pos_;
+    pos_ += 2;
+    return uint16_t(p[0] | (p[1] << 8));
+}
+
+uint32_t ByteReader::u32() {
+    need(4);
+    const uint32_t value = loadU32(data_->data() + pos_);
+    pos_ += 4;
+    return value;
+}
+
+int32_t ByteReader::i32() { return static_cast<int32_t>(u32()); }
+
+uint64_t ByteReader::u64() {
+    const uint64_t low = u32();
+    const uint64_t high = u32();
+    return low | (high << 32);
+}
+
+float ByteReader::f32() {
+    const uint32_t bits = u32();
+    float value;
+    std::memcpy(&value, &bits, sizeof value);
+    return value;
+}
+
+Vec3 ByteReader::vec3() {
+    Vec3 v;
+    v.x = f32();
+    v.y = f32();
+    v.z = f32();
+    return v;
+}
+
+std::string ByteReader::cstr() {
+    const size_t start = pos_;
+    while (pos_ < end_ && (*data_)[pos_] != 0) ++pos_;
+    if (pos_ >= end_) throw FormatError("unterminated string at offset " + std::to_string(start));
+    std::string text(reinterpret_cast<const char*>(data_->data() + start), pos_ - start);
+    ++pos_;
+    return text;
+}
+
+Bytes ByteReader::bytes(size_t count) {
+    need(count);
+    Bytes out(data_->begin() + pos_, data_->begin() + pos_ + count);
+    pos_ += count;
+    return out;
+}
+
+uint32_t ByteReader::peekU32() const {
+    if (end_ - pos_ < 4) return 0;
+    return loadU32(data_->data() + pos_);
+}
+
+const uint8_t* ByteReader::at(size_t pos) const {
+    if (pos > end_) throw FormatError("position out of range");
+    return data_->data() + pos;
+}
+
+// ------------------------------------------------------------------------------------------
+// .glm archive
+// ------------------------------------------------------------------------------------------
+std::string toLowerAscii(std::string text) {
+    for (char& ch : text)
+        if (ch >= 'A' && ch <= 'Z') ch = char(ch - 'A' + 'a');
+    return text;
+}
+
+GlmArchive::GlmArchive(const std::string& path) : path_(path), file_(path, std::ios::binary) {
+    if (!file_) throw FormatError("cannot open " + path);
+    file_.seekg(0, std::ios::end);
+    const uint64_t size = uint64_t(file_.tellg());
+    if (size < 8) throw FormatError(path + ": file too small");
+    auto readAt = [&](uint64_t offset, size_t count) {
+        if (offset + count > size) throw FormatError(path + ": read past end of archive");
+        Bytes buffer(count);
+        file_.seekg(std::streamoff(offset));
+        if (count && !file_.read(reinterpret_cast<char*>(buffer.data()), std::streamsize(count)))
+            throw FormatError(path + ": read failed");
+        return buffer;
+    };
+    const Bytes footer = readAt(size - 4, 4);
+    const uint32_t directoryOffset = loadU32(footer.data());
+    const Bytes header = readAt(directoryOffset, 20);
+    if (std::memcmp(header.data(), "CHNKBLXX", 8) != 0) throw FormatError(path + ": no CHNKBLXX directory");
+    const uint32_t nameTableOffset = loadU32(header.data() + 8);
+    const uint32_t nameTableLength = loadU32(header.data() + 12);
+    const uint32_t fileCount = loadU32(header.data() + 16);
+    const Bytes directory = readAt(uint64_t(directoryOffset) + 20, size_t(fileCount) * 22);
+    const Bytes names = readAt(nameTableOffset, nameTableLength);
+    ByteReader r(directory);
+    entries_.reserve(fileCount);
+    index_.reserve(fileCount);
+    for (uint32_t k = 0; k < fileCount; ++k) {
+        GlmEntry entry;
+        entry.offset = r.u32();
+        entry.storedSize = r.u32();
+        entry.rawSize = r.u32();
+        entry.nameOffset = r.u32();
+        entry.flags = r.u16();
+        entry.timestamp = r.u32();
+        if (entry.nameOffset >= names.size()) throw FormatError(path + ": bad name offset");
+        const char* text = reinterpret_cast<const char*>(names.data() + entry.nameOffset);
+        entry.name.assign(text, strnlen(text, names.size() - entry.nameOffset));
+        if (uint64_t(entry.offset) + entry.storedSize > size) throw FormatError(path + ": entry " + entry.name + " out of range");
+        index_.emplace(toLowerAscii(entry.name), entries_.size());
+        entries_.push_back(std::move(entry));
+    }
+}
+
+const GlmEntry* GlmArchive::find(const std::string& name) const {
+    const auto it = index_.find(toLowerAscii(name));
+    return it == index_.end() ? nullptr : &entries_[it->second];
+}
+
+Bytes GlmArchive::read(const GlmEntry& entry) const {
+    Bytes stored(entry.storedSize);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        file_.clear();
+        file_.seekg(std::streamoff(entry.offset));
+        if (entry.storedSize && !file_.read(reinterpret_cast<char*>(stored.data()), std::streamsize(entry.storedSize)))
+            throw FormatError(path_ + ": cannot read " + entry.name);
+    }
+    if (entry.flags == 0) return stored;
+    Bytes out(entry.rawSize);
+    if (entry.rawSize == 0) return out;
+    uLongf outLength = entry.rawSize;
+    const int rc = uncompress(out.data(), &outLength, stored.data(), entry.storedSize);
+    if (rc != Z_OK || outLength != entry.rawSize) throw FormatError(entry.name + ": zlib error " + std::to_string(rc));
+    return out;
+}
+
+Bytes GlmArchive::read(const std::string& name) const {
+    const GlmEntry* entry = find(name);
+    if (!entry) throw FormatError(path_ + " has no file named " + name);
+    return read(*entry);
+}
+
+static const GlmEntry* findSuffix(const GlmArchive& glm, const std::string& suffix) {
+    for (const GlmEntry& entry : glm.entries()) {
+        const std::string& n = entry.name;
+        if (n.size() >= suffix.size() && n.compare(n.size() - suffix.size(), suffix.size(), suffix) == 0)
+            return &entry;
+    }
+    return nullptr;
+}
+
+// ------------------------------------------------------------------------------------------
+// Terrain
+// ------------------------------------------------------------------------------------------
+float worldHeight(const TerrainHeader& header, uint16_t word) {
+    const float half = header.bounds.max.y;
+    return float(heightFixed13(word)) * (2.0f * half) / 8192.0f - half;
+}
+
+const LayerBlend& sampleLayer(const TerrainSample& sample, int index) {
+    switch (index) {
+        case 0: return sample.layer0;
+        case 1: return sample.layer1;
+        case 2: return sample.layer2;
+        default: return sample.layer3;
+    }
+}
+
+uint32_t Terrain::boundedRows() const {
+    const auto n = uint32_t(std::lround((header.bounds.max.z - header.bounds.min.z) / header.spacing)) + 1;
+    return std::min(n, rows);
+}
+
+uint32_t Terrain::boundedColumns() const {
+    const auto n = uint32_t(std::lround((header.bounds.max.x - header.bounds.min.x) / header.spacing)) + 1;
+    return std::min(n, columns);
+}
+
+bool Terrain::heightAtWorld(float x, float z, float& height) const {
+    const float fc = (x - header.bounds.min.x) / header.spacing;
+    const float fr = (z - header.bounds.min.z) / header.spacing;
+    if (!(fc >= 0.0f && fr >= 0.0f)) return false;
+    const auto c0 = static_cast<uint32_t>(fc);
+    const auto r0 = static_cast<uint32_t>(fr);
+    if (c0 + 1 >= columns || r0 + 1 >= rows) return false;
+    if (!hasData(r0, c0) || !hasData(r0 + 1, c0) || !hasData(r0, c0 + 1) || !hasData(r0 + 1, c0 + 1)) return false;
+    const float tc = fc - float(c0);
+    const float tr = fr - float(r0);
+    const float top = worldHeightAt(r0, c0) * (1.0f - tc) + worldHeightAt(r0, c0 + 1) * tc;
+    const float bottom = worldHeightAt(r0 + 1, c0) * (1.0f - tc) + worldHeightAt(r0 + 1, c0 + 1) * tc;
+    height = top * (1.0f - tr) + bottom * tr;
+    return true;
+}
+
+Terrain readTerrain(const GlmArchive& glm) {
+    const GlmEntry* thd = findSuffix(glm, ".thd");
+    if (!thd) throw FormatError("archive has no .thd terrain header");
+    const size_t underscore = thd->name.rfind('_');
+    const size_t dot = thd->name.rfind('.');
+    if (underscore == std::string::npos || dot == std::string::npos || dot <= underscore + 1)
+        throw FormatError("unexpected terrain header name " + thd->name);
+    const std::string prefix = thd->name.substr(0, underscore);
+
+    Terrain terrain;
+    terrain.terrainId = uint32_t(std::stoul(thd->name.substr(underscore + 1, dot - underscore - 1)));
+    const Bytes headerBytes = glm.read(*thd);
+    ByteReader r(headerBytes);
+    TerrainHeader& h = terrain.header;
+    h.version = r.u32();
+    h.terrainFormat = r.u32();
+    h.unknownGridX = r.u32();
+    h.unknownGridZ = r.u32();
+    h.bounds.min = r.vec3();
+    h.bounds.max = r.vec3();
+    h.spacing = r.f32();
+    h.samplesPerPatchX = r.u32();
+    h.samplesPerPatchZ = r.u32();
+    h.patchesX = r.u32();
+    h.patchesZ = r.u32();
+    if (h.samplesPerPatchX < 2 || h.samplesPerPatchZ < 2 || h.patchesX == 0 || h.patchesZ == 0 ||
+        h.patchesX > 1024 || h.patchesZ > 1024 || h.spacing <= 0.0f)
+        throw FormatError("implausible terrain header");
+
+    const uint32_t sx = h.samplesPerPatchX;
+    const uint32_t sz = h.samplesPerPatchZ;
+    // Patches do not share edge samples: patch n starts samplesPerPatch samples after its neighbour
+    // (confirmed by in-game heights: 11 of 12 Bootcamp readings within 0.03 m).
+    terrain.columns = h.patchesX * sx;
+    terrain.rows = h.patchesZ * sz;
+    const size_t count = size_t(terrain.rows) * terrain.columns;
+    terrain.samples.resize(count);
+    terrain.sampleHasData.assign(count, 0);
+    terrain.patchPresent.assign(size_t(h.patchesX) * h.patchesZ, 0);
+
+    char name[512];
+    for (uint32_t n = 0; n < h.patchesX * h.patchesZ; ++n) {
+        std::snprintf(name, sizeof name, "%s_%x_%u.tpc", prefix.c_str(), n, terrain.terrainId);
+        const GlmEntry* entry = glm.find(name);
+        if (!entry) continue;                                  // absent patches carry no data
+        const Bytes patch = glm.read(*entry);
+        if (patch.size() < 4 + size_t(sx) * sz * 12) throw FormatError(std::string(name) + ": too small");
+        terrain.patchPresent[n] = 1;
+        const uint32_t row0 = (n / h.patchesX) * sz;
+        const uint32_t column0 = (n % h.patchesX) * sx;
+        const uint8_t* p = patch.data() + 4;
+        for (uint32_t i = 0; i < sz; ++i) {
+            for (uint32_t j = 0; j < sx; ++j, p += 12) {
+                const size_t index = size_t(row0 + i) * terrain.columns + column0 + j;
+                TerrainSample& s = terrain.samples[index];
+                s.word = uint16_t(p[0] | (p[1] << 8));
+                s.layer0 = {p[2], p[3]};
+                s.layer1 = {p[4], p[5]};
+                s.layer2 = {p[6], p[7]};
+                s.layer3 = {p[8], p[9]};
+                terrain.sampleHasData[index] = 1;
+            }
+        }
+    }
+    return terrain;
+}
+
+void writeTerrainObj(const Terrain& terrain, const std::string& path, uint32_t step, bool rightHanded) {
+    if (step == 0) step = 1;
+    const uint32_t boundedRows = terrain.boundedRows();
+    const uint32_t boundedColumns = terrain.boundedColumns();
+    const uint32_t rows = (boundedRows - 1) / step + 1;
+    const uint32_t columns = (boundedColumns - 1) / step + 1;
+    FILE* f = std::fopen(path.c_str(), "w");
+    if (!f) throw FormatError("cannot write " + path);
+    const float zSign = rightHanded ? -1.0f : 1.0f;
+    std::fprintf(f, "# Tabula Rasa terrain, step %u, %ux%u vertices, %s-handed\n", step, rows, columns, rightHanded ? "right" : "left");
+    for (uint32_t i = 0; i < rows; ++i)
+        for (uint32_t j = 0; j < columns; ++j)
+            std::fprintf(f, "v %.3f %.3f %.3f\n", terrain.worldX(j * step), terrain.worldHeightAt(i * step, j * step),
+                         zSign * terrain.worldZ(i * step));
+    for (uint32_t i = 0; i < rows; ++i)
+        for (uint32_t j = 0; j < columns; ++j)
+            std::fprintf(f, "vt %.5f %.5f\n", double(j * step) / (boundedColumns - 1), double(i * step) / (boundedRows - 1));
+    for (uint32_t i = 0; i + 1 < rows; ++i) {
+        for (uint32_t j = 0; j + 1 < columns; ++j) {
+            if (!terrain.hasData(i * step, j * step) || !terrain.hasData((i + 1) * step, j * step) ||
+                !terrain.hasData(i * step, (j + 1) * step) || !terrain.hasData((i + 1) * step, (j + 1) * step))
+                continue;                                      // no geometry where patches are absent
+            const uint32_t a = i * columns + j + 1;            // OBJ indices are 1-based
+            const uint32_t b = a + 1;
+            const uint32_t c = a + columns;
+            const uint32_t d = c + 1;
+            if (rightHanded) {
+                std::fprintf(f, "f %u/%u %u/%u %u/%u\n", a, a, d, d, c, c);
+                std::fprintf(f, "f %u/%u %u/%u %u/%u\n", a, a, b, b, d, d);
+            } else {
+                std::fprintf(f, "f %u/%u %u/%u %u/%u\n", a, a, c, c, d, d);
+                std::fprintf(f, "f %u/%u %u/%u %u/%u\n", a, a, d, d, b, b);
+            }
+        }
+    }
+    std::fclose(f);
+}
+
+std::vector<TextureLayer> readTextureLayers(const GlmArchive& glm) {
+    const GlmEntry* entry = findSuffix(glm, "_texlayers.tab");
+    if (!entry) throw FormatError("archive has no _texlayers.tab");
+    const Bytes data = glm.read(*entry);
+    ByteReader r(data);
+    const uint32_t version = r.u32();
+    if (version < 3 || version > 4) throw FormatError("texlayers.tab: version " + std::to_string(version));
+    const uint32_t count = r.u32();
+    std::vector<TextureLayer> layers;
+    for (uint32_t k = 0; k < count; ++k) {
+        TextureLayer layer;
+        layer.name = r.cstr();
+        layer.texture = r.cstr();
+        if (version >= 4) {
+            layer.normalMap = r.cstr();
+            layer.extraMap = r.cstr();
+        }
+        layer.tiling = r.f32();
+        const uint32_t sets = r.u32();
+        for (uint32_t s = 0; s < sets; ++s) layer.tribbleSets.push_back(r.cstr());
+        layers.push_back(std::move(layer));
+    }
+    if (r.remaining() != 0) throw FormatError("texlayers.tab: trailing bytes");
+    return layers;
+}
+
+std::vector<TribbleSet> readTribbleSets(const GlmArchive& glm) {
+    const GlmEntry* entry = findSuffix(glm, "_tribbleset.tab");
+    if (!entry) return {};                     // optional: 16 of the 66 shipped terrains have none
+    const Bytes data = glm.read(*entry);
+    ByteReader r(data);
+    r.u32();                                   // version
+    const uint32_t count = r.u32();
+    std::vector<TribbleSet> sets;
+    for (uint32_t k = 0; k < count; ++k) {
+        TribbleSet set;
+        set.name = r.cstr();
+        set.unknown = r.u32();
+        const uint32_t models = r.u32();
+        for (uint32_t m = 0; m < models; ++m) {
+            TribbleModel model;
+            model.model = r.cstr();
+            const size_t block = r.tell();
+            model.raw = r.bytes(57);
+            ByteReader b(data, block, block + 57);
+            model.density = b.f32();
+            model.drawDistance = b.f32();
+            b.seek(block + 28);
+            model.rotationRange = b.f32();
+            model.scaleMin = b.f32();
+            model.scaleMax = b.f32();
+            b.seek(block + 44);
+            model.seed = b.u32();
+            set.models.push_back(std::move(model));
+        }
+        sets.push_back(std::move(set));
+    }
+    if (r.remaining() != 0) throw FormatError("tribbleset.tab: trailing bytes");
+    return sets;
+}
+
+// ------------------------------------------------------------------------------------------
+// .map
+// ------------------------------------------------------------------------------------------
+namespace {
+
+int32_t readCount(ByteReader& r, size_t minBytesEach, const char* what) {
+    const int32_t count = r.i32();
+    if (count < 0 || (minBytesEach != 0 && size_t(count) > r.remaining() / minBytesEach))
+        throw FormatError(std::string("map: implausible ") + what + " count " + std::to_string(count));
+    return count;
+}
+
+Quat readQuatWxyz(ByteReader& r) {
+    Quat q;
+    q.w = r.f32();
+    q.x = r.f32();
+    q.y = r.f32();
+    q.z = r.f32();
+    return q;
+}
+
+HueColour readHue(ByteReader& r) {
+    HueColour c;
+    c.red = r.u8();
+    c.green = r.u8();
+    c.blue = r.u8();
+    c.alpha = r.u8();
+    return c;
+}
+
+void readParticles(ByteReader& r, int32_t count, MapEntity& entity) {
+    if (count < 0 || size_t(count) > r.remaining() / 21) throw FormatError("map: implausible particle count");
+    for (int32_t k = 0; k < count; ++k) {
+        MapParticle p;
+        p.assetId = r.i32();
+        p.connectionPoint = r.i32();
+        p.direction = r.vec3();
+        p.type = r.u8();
+        entity.particles.push_back(p);
+    }
+}
+
+}  // namespace
+
+MapFile readMap(const Bytes& data) {
+    ByteReader r(data);
+    MapFile m;
+    m.fileSize = data.size();
+    m.minorVersion = r.u16();
+    m.majorVersion = r.u16();
+    if (m.majorVersion != 2 || m.minorVersion < 43 || m.minorVersion > 45)
+        throw FormatError("map format " + std::to_string(m.majorVersion) + "." + std::to_string(m.minorVersion) +
+                          " not supported (2.43 - 2.45 implemented; client/gamemap.py documents older ones)");
+    m.templateVersion = r.i32();
+    m.status = r.i32();                                                   // MapDesc
+
+    const int32_t terrains = readCount(r, 4, "terrain");                  // Terrain
+    for (int32_t k = 0; k < terrains; ++k) m.terrainIds.push_back(r.i32());
+
+    m.terrainVis.detailLevel = r.i32();                                   // TerrainVisSettings
+    m.terrainVis.algorithm = r.i32();
+    m.terrainVis.maxDistance = r.f32();
+    m.terrainVis.fadeDistance = r.f32();
+
+    if (m.minorVersion >= 45) {                                           // Entities, loader 11
+        const int32_t count = readCount(r, 88, "entity");
+        m.entities.reserve(size_t(count));
+        for (int32_t k = 0; k < count; ++k) {
+            MapEntity e;
+            e.classId = r.i32();
+            const uint32_t low = r.u32();
+            const uint32_t high = r.u32();
+            e.entityId = makeEntityId(low, high);
+            e.location = r.vec3();
+            e.orientation = readQuatWxyz(r);
+            e.hue1 = readHue(r);
+            e.hue2 = readHue(r);
+            e.scale = r.f32();
+            e.flags = r.i32();
+            e.cullLayer = r.i32();
+            const int32_t particles = r.i32();
+            readParticles(r, particles, e);
+            e.hasBounds = true;
+            e.bounds.min = r.vec3();
+            e.bounds.max = r.vec3();
+            m.entities.push_back(std::move(e));
+        }
+    } else {                                                              // Entities, loader 10
+        const int32_t entitySize = r.i32();
+        if (entitySize < 60) throw FormatError("map: entity record smaller than 60 bytes");
+        const int32_t count = readCount(r, size_t(entitySize), "entity");
+        m.entities.reserve(size_t(count));
+        for (int32_t k = 0; k < count; ++k) {
+            const size_t start = r.tell();
+            MapEntity e;
+            e.classId = r.i32();
+            const uint32_t low = r.u32();
+            const uint32_t high = r.u32();
+            e.entityId = makeEntityId(low, high);
+            e.location = r.vec3();
+            e.orientation = readQuatWxyz(r);
+            e.hue1 = readHue(r);
+            e.scale = r.f32();
+            e.flags = r.i32();
+            e.cullLayer = r.i32();
+            const int32_t particles = r.i32();
+            r.seek(start + size_t(entitySize));
+            readParticles(r, particles, e);
+            if (r.i32() != 0) {                                           // isWater (2.37+)
+                e.hasWater = true;
+                e.waterVersion = r.i32();
+                e.waterData = r.bytes(e.waterVersion == 1 ? 172 : e.waterVersion == 2 ? 44 : 0);
+            }
+            m.entities.push_back(std::move(e));
+        }
+    }
+
+    const int32_t abvs = readCount(r, 21, "generated ABV");               // GeneratedABVs
+    for (int32_t k = 0; k < abvs; ++k) {
+        MapGeneratedAbv a;
+        const uint32_t low = r.u32();
+        const uint32_t high = r.u32();
+        a.entityId = makeEntityId(low, high);
+        a.shape = r.u8();
+        a.extents = r.vec3();
+        m.generatedAbvs.push_back(a);
+    }
+
+    m.dayLengthSeconds = r.i32();                                         // TimeSettings
+    m.startingSkyTime = r.i32();
+
+    const int32_t scripts = readCount(r, 12, "camera script");            // CameraScripts (version 2)
+    for (int32_t k = 0; k < scripts; ++k) {
+        MapCameraScript s;
+        s.id = r.i32();
+        s.returnTimeMs = r.i32();
+        const int32_t frames = readCount(r, 44, "camera keyframe");
+        for (int32_t f = 0; f < frames; ++f) {
+            MapCameraKeyframe kf;
+            kf.frameNumber = r.i32();
+            kf.position = r.vec3();
+            kf.rotation = readQuatWxyz(r);
+            kf.focalLength = r.f32();
+            kf.arriveTimeMs = r.i32();
+            kf.holdTimeMs = r.i32();
+            s.keyframes.push_back(kf);
+        }
+        m.cameraScripts.push_back(std::move(s));
+    }
+
+    const bool regionV3 = m.minorVersion >= 44;                           // RegionSettings
+    const int32_t regions = readCount(r, regionV3 ? 32 : 40, "region");
+    for (int32_t k = 0; k < regions; ++k) {
+        MapRegion g;
+        g.regionId = r.i32();
+        g.priority = r.i32();
+        g.enabledFlags = r.i32();
+        g.ambient = r.i32();
+        g.music = r.i32();
+        if (!regionV3) {
+            g.music2 = r.i32();
+            g.music3 = r.i32();
+        }
+        g.environmentMap = r.i32();
+        g.sky = r.i32();
+        g.displayName = r.i32();
+        m.regions.push_back(g);
+    }
+    // PointLights and AudioEmitters read nothing (lights.xml / audioemitters.xml).
+    m.bytesConsumed = r.tell();
+    return m;
+}
+
+MapFile readMap(const std::string& path) { return readMap(readFile(path)); }
+
+// ------------------------------------------------------------------------------------------
+// .vis
+// ------------------------------------------------------------------------------------------
+namespace {
+
+// Inflate one PVS row. Tolerates streams that end early (zero-padded and flagged as damaged).
+std::vector<uint32_t> inflatePvsRow(const uint8_t* src, size_t size, size_t wordCount, bool& damaged) {
+    std::vector<uint8_t> out(wordCount * 4, 0);
+    z_stream zs{};
+    if (inflateInit(&zs) != Z_OK) throw FormatError("zlib init failed");
+    zs.next_in = const_cast<Bytef*>(src);
+    zs.avail_in = uInt(size);
+    zs.next_out = out.data();
+    zs.avail_out = uInt(out.size());
+    inflate(&zs, Z_FINISH);
+    const size_t produced = out.size() - zs.avail_out;
+    inflateEnd(&zs);
+    damaged = produced != out.size();
+    std::vector<uint32_t> words(wordCount);
+    for (size_t k = 0; k < wordCount; ++k) words[k] = loadU32(out.data() + k * 4);
+    return words;
+}
+
+}  // namespace
+
+VisFile readVis(const Bytes& data) {
+    ByteReader r(data);
+    VisFile v;
+    v.fileSize = data.size();
+    v.streamFlags = r.u8();
+    v.containerVersion = r.u32();
+    if (v.containerVersion != 1) throw FormatError("vis: container version " + std::to_string(v.containerVersion));
+    v.hasTree = r.u8() != 0;
+    if (v.hasTree) {
+        v.treeVersion = r.u32();
+        v.nodeFormatVersion = r.u32();
+        if (v.treeVersion < 1 || v.treeVersion > 3) throw FormatError("vis: tree version " + std::to_string(v.treeVersion));
+        if (v.treeVersion < 3) throw FormatError("vis: tree versions below 3 (extra build parameters) not supported");
+        if (v.nodeFormatVersion != 1) throw FormatError("vis: node format " + std::to_string(v.nodeFormatVersion));
+        const uint32_t count = r.u32();
+        if (size_t(count) > r.remaining() / 52) throw FormatError("vis: node count larger than file");
+        v.nodes.reserve(count);
+        for (uint32_t k = 0; k < count; ++k) {
+            VisNode n;
+            n.index = r.u32();
+            n.parent = r.i32();
+            n.child0 = r.i32();
+            n.child1 = r.i32();
+            n.leafIndex = r.u32();
+            n.bounds.min = r.vec3();
+            n.bounds.max = r.vec3();
+            n.splitAxis = r.u32();
+            n.planeD = r.f32();
+            v.nodes.push_back(n);
+        }
+    }
+    if (r.remaining() >= 1) v.hasPvs = r.u8() != 0;
+    if (v.hasPvs) {
+        v.pvsVersion = r.u32();
+        v.leafCount = r.u32();
+        if (v.pvsVersion < 1 || v.pvsVersion > 2) throw FormatError("vis: PVS version " + std::to_string(v.pvsVersion));
+        if (size_t(v.leafCount) > r.remaining() / 12) throw FormatError("vis: leaf count larger than file");
+        const size_t wordCount = (size_t(v.leafCount) + 31) / 32;
+        v.rows.resize(v.leafCount);
+        for (uint32_t k = 0; k < v.leafCount; ++k) {
+            VisPvsRow& row = v.rows[k];
+            row.dataSize = r.u32();
+            row.timestamp = r.u64();
+            row.compressed = v.pvsVersion == 2 ? r.u32() != 0 : true;
+            if (row.dataSize == 0) continue;
+            const size_t start = r.tell();
+            r.skip(row.dataSize);
+            const uint8_t* src = data.data() + start;
+            if (row.compressed) {
+                row.words = inflatePvsRow(src, row.dataSize, wordCount, row.damaged);
+            } else {
+                row.words.assign(wordCount, 0);
+                for (size_t w = 0; w < wordCount && w * 4 + 4 <= row.dataSize; ++w) row.words[w] = loadU32(src + w * 4);
+                row.damaged = row.dataSize < wordCount * 4;
+            }
+            if (row.damaged) ++v.damagedRows;
+        }
+        if (r.remaining() >= 1) {
+            v.hasTrailingFlag = true;
+            v.trailingFlag = r.u8();
+        }
+    }
+    v.bytesConsumed = r.tell();                // shipped files have one more byte the client never reads
+    return v;
+}
+
+VisFile readVis(const std::string& path) { return readVis(readFile(path)); }
+
+int32_t findLeafNode(const VisFile& vis, const Vec3& point) {
+    if (vis.nodes.empty()) return -1;
+    const Bounds& root = vis.nodes[0].bounds;
+    if (point.x < root.min.x || point.y < root.min.y || point.z < root.min.z ||
+        point.x > root.max.x || point.y > root.max.y || point.z > root.max.z)
+        return -1;
+    int32_t index = 0;
+    for (size_t guard = 0; guard <= vis.nodes.size(); ++guard) {
+        const VisNode& node = vis.nodes[size_t(index)];
+        if (node.isLeaf()) return index;
+        if (node.child0 < 0 || node.child1 < 0 || size_t(node.child0) >= vis.nodes.size() || size_t(node.child1) >= vis.nodes.size())
+            return -1;
+        const float split = node.splitPosition();
+        const bool child0IsLow = component(vis.nodes[size_t(node.child0)].bounds.max, node.splitAxis) <= split + 1e-3f;
+        const bool pointIsLow = component(point, node.splitAxis) <= split;
+        index = (pointIsLow == child0IsLow) ? node.child0 : node.child1;
+    }
+    return -1;
+}
+// ------------------------------------------------------------------------------------------
+// .geo chunk files
+// ------------------------------------------------------------------------------------------
+std::string tagName(uint32_t tag) {
+    const char text[5] = {char(tag >> 24), char(tag >> 16), char(tag >> 8), char(tag), 0};
+    return text;
+}
+
+namespace {
+
+struct Chunk {
+    uint32_t tag = 0;
+    uint32_t size = 0;
+    uint32_t version = 0;
+    size_t start = 0;
+    size_t end = 0;
+};
+
+Chunk readChunk(ByteReader& r) {
+    Chunk c;
+    c.start = r.tell();
+    c.tag = r.u32();
+    c.size = r.u32();
+    c.version = r.u32();
+    r.u32();                                   // reserved, 0
+    c.end = r.tell() + c.size;
+    if (c.end > r.end()) throw FormatError("chunk " + tagName(c.tag) + " runs past the end of its data");
+    return c;
+}
+
+Chunk expectChunk(ByteReader& r, uint32_t tag) {
+    const Chunk c = readChunk(r);
+    if (c.tag != tag)
+        throw FormatError("expected " + tagName(tag) + " but found " + tagName(c.tag) +
+                          " at offset " + std::to_string(c.start));
+    return c;
+}
+
+void skipChunk(ByteReader& r) {
+    const Chunk c = readChunk(r);
+    r.seek(c.end);
+}
+
+struct Value4 {
+    float x = 0, y = 0, z = 0, w = 0;
+};
+
+uint32_t elementSize(uint8_t type) {
+    switch (type) {
+        case 0: case 4: case 5: case 6: case 8: case 9: case 11: case 13: case 14: case 15: return 4;
+        case 1: case 7: case 10: case 12: case 16: return 8;
+        case 2: return 12;
+        case 3: return 16;
+        default: return 0;
+    }
+}
+
+float halfToFloat(uint16_t half) {
+    const uint32_t sign = uint32_t(half & 0x8000) << 16;
+    uint32_t exponent = (half >> 10) & 0x1F;
+    uint32_t mantissa = half & 0x3FF;
+    uint32_t bits;
+    if (exponent == 0) {
+        if (mantissa == 0) {
+            bits = sign;
+        } else {                               // subnormal: normalise
+            exponent = 127 - 15 + 1;
+            while ((mantissa & 0x400) == 0) { mantissa <<= 1; --exponent; }
+            bits = sign | (exponent << 23) | ((mantissa & 0x3FF) << 13);
+        }
+    } else if (exponent == 31) {
+        bits = sign | 0x7F800000 | (mantissa << 13);
+    } else {
+        bits = sign | ((exponent + 127 - 15) << 23) | (mantissa << 13);
+    }
+    float value;
+    std::memcpy(&value, &bits, sizeof value);
+    return value;
+}
+
+int16_t loadI16(const uint8_t* p) { return int16_t(uint16_t(p[0] | (p[1] << 8))); }
+uint16_t loadU16(const uint8_t* p) { return uint16_t(p[0] | (p[1] << 8)); }
+float loadF32(const uint8_t* p) {
+    const uint32_t bits = loadU32(p);
+    float value;
+    std::memcpy(&value, &bits, sizeof value);
+    return value;
+}
+
+// Decode one D3D9 vertex element (D3DDECLTYPE) into up to four floats.
+Value4 decodeElement(uint8_t type, const uint8_t* p) {
+    Value4 v;
+    switch (type) {
+        case 0: v.x = loadF32(p); break;
+        case 1: v.x = loadF32(p); v.y = loadF32(p + 4); break;
+        case 2: v.x = loadF32(p); v.y = loadF32(p + 4); v.z = loadF32(p + 8); break;
+        case 3: v.x = loadF32(p); v.y = loadF32(p + 4); v.z = loadF32(p + 8); v.w = loadF32(p + 12); break;
+        case 4:                                // D3DCOLOR: bytes B, G, R, A
+            v.x = p[2] / 255.0f; v.y = p[1] / 255.0f; v.z = p[0] / 255.0f; v.w = p[3] / 255.0f; break;
+        case 5: v.x = p[0]; v.y = p[1]; v.z = p[2]; v.w = p[3]; break;
+        case 6: v.x = loadI16(p); v.y = loadI16(p + 2); break;
+        case 7: v.x = loadI16(p); v.y = loadI16(p + 2); v.z = loadI16(p + 4); v.w = loadI16(p + 6); break;
+        case 8: v.x = p[0] / 255.0f; v.y = p[1] / 255.0f; v.z = p[2] / 255.0f; v.w = p[3] / 255.0f; break;
+        case 9: v.x = loadI16(p) / 32767.0f; v.y = loadI16(p + 2) / 32767.0f; break;
+        case 10:
+            v.x = loadI16(p) / 32767.0f; v.y = loadI16(p + 2) / 32767.0f;
+            v.z = loadI16(p + 4) / 32767.0f; v.w = loadI16(p + 6) / 32767.0f; break;
+        case 11: v.x = loadU16(p) / 65535.0f; v.y = loadU16(p + 2) / 65535.0f; break;
+        case 12:
+            v.x = loadU16(p) / 65535.0f; v.y = loadU16(p + 2) / 65535.0f;
+            v.z = loadU16(p + 4) / 65535.0f; v.w = loadU16(p + 6) / 65535.0f; break;
+        case 13: {                             // UDEC3: unsigned 10.10.10
+            const uint32_t w = loadU32(p);
+            v.x = float(w & 0x3FF); v.y = float((w >> 10) & 0x3FF); v.z = float((w >> 20) & 0x3FF); v.w = 1;
+            break;
+        }
+        case 14: {                             // DEC3N: signed normalised 10.10.10
+            const uint32_t w = loadU32(p);
+            auto s10 = [](uint32_t x) { return int32_t(x << 22) >> 22; };
+            v.x = float(s10(w & 0x3FF)) / 511.0f; v.y = float(s10((w >> 10) & 0x3FF)) / 511.0f;
+            v.z = float(s10((w >> 20) & 0x3FF)) / 511.0f;
+            v.w = 1;
+            break;
+        }
+        case 15: v.x = halfToFloat(loadU16(p)); v.y = halfToFloat(loadU16(p + 2)); break;
+        case 16:
+            v.x = halfToFloat(loadU16(p)); v.y = halfToFloat(loadU16(p + 2));
+            v.z = halfToFloat(loadU16(p + 4)); v.w = halfToFloat(loadU16(p + 6)); break;
+        default: break;
+    }
+    return v;
+}
+
+uint32_t packColour(const Value4& c) {
+    auto channel = [](float f) { return uint32_t(std::lround(std::min(std::max(f, 0.0f), 1.0f) * 255.0f)); };
+    return (channel(c.w) << 24) | (channel(c.x) << 16) | (channel(c.y) << 8) | channel(c.z);
+}
+
+std::vector<VertexElement> readDecl(ByteReader& r) {
+    const Chunk c = expectChunk(r, fourcc("DECL"));
+    static const uint8_t usageLookupV1[16] = {0, 1, 2, 3, 4, 0xA, 0xA, 5, 6, 7, 8, 9, 0xA, 0xB, 0xC, 0xD};
+    std::vector<VertexElement> layout;
+    const uint32_t count = r.u32();
+    uint32_t offset = 0;
+    for (uint32_t k = 0; k < count; ++k) {
+        VertexElement e;
+        if (c.version == 1) {
+            e.type = uint8_t(r.u16());
+            e.method = uint8_t(r.u16());
+            const uint16_t usage = r.u16();
+            e.usage = usage < 16 ? usageLookupV1[usage] : 0xFF;
+            e.usageIndex = uint8_t(r.u16());
+        } else {
+            e.type = r.u8();
+            e.method = r.u8();
+            e.usage = r.u8();
+            e.usageIndex = r.u8();
+        }
+        e.offset = offset;
+        offset += elementSize(e.type);
+        layout.push_back(e);
+    }
+    r.seek(c.end);
+    return layout;
+}
+
+void readVert(ByteReader& r, GeoPiece& piece) {
+    const Chunk c = expectChunk(r, fourcc("VERT"));
+    if (c.version == 3) r.u64();               // CRC (Auto Assault files)
+    piece.layout = readDecl(r);
+    const int32_t count = r.i32();
+    uint32_t declared = 0;
+    for (const VertexElement& e : piece.layout) declared += elementSize(e.type);
+    const size_t available = c.end - r.tell();
+    uint32_t stride = declared;
+    if (count > 0 && size_t(count) * declared != available && available % size_t(count) == 0)
+        stride = uint32_t(available / size_t(count));      // trust the chunk size over the layout
+    if (count < 0 || size_t(count) * stride > available) throw FormatError("VERT: vertex data larger than its chunk");
+    piece.stride = stride;
+    piece.vertices.resize(size_t(count));
+    const uint8_t* base = r.at(r.tell());
+    for (int32_t i = 0; i < count; ++i) {
+        GeoVertex& v = piece.vertices[size_t(i)];
+        const uint8_t* p = base + size_t(i) * stride;
+        for (const VertexElement& e : piece.layout) {
+            if (e.usageIndex != 0 || e.offset + elementSize(e.type) > stride) continue;
+            const Value4 value = decodeElement(e.type, p + e.offset);
+            switch (e.usage) {
+                case 0: v.position = {value.x, value.y, value.z}; break;           // POSITION
+                case 3: v.normal = {value.x, value.y, value.z}; break;             // NORMAL
+                case 5: v.uv = {value.x, value.y}; break;                          // TEXCOORD0
+                case 10: v.colour = e.type == 4 ? loadU32(p + e.offset) : packColour(value); break;  // COLOR0
+                default: break;
+            }
+        }
+    }
+    r.seek(c.end);
+}
+
+std::vector<uint32_t> readIndx(ByteReader& r) {
+    const Chunk c = expectChunk(r, fourcc("INDX"));
+    if (c.version == 2) r.u64();               // CRC (Auto Assault files)
+    const int32_t count = r.i32();
+    const size_t available = c.end - r.tell();
+    std::vector<uint32_t> indices;
+    if (count > 0) {
+        const bool wide = size_t(count) * 4 == available;   // 32-bit indices if the size says so
+        if (!wide && size_t(count) * 2 > available) throw FormatError("INDX: index data larger than its chunk");
+        indices.resize(size_t(count));
+        for (int32_t k = 0; k < count; ++k) indices[size_t(k)] = wide ? r.u32() : r.u16();
+    }
+    r.seek(c.end);
+    return indices;
+}
+
+Bounds readBbox(ByteReader& r) {
+    const Chunk c = expectChunk(r, fourcc("BBOX"));
+    if (c.version == 2) r.u8();                // isEmpty
+    Bounds b;
+    b.min = r.vec3();
+    b.max = r.vec3();
+    r.seek(c.end);                             // centre (vec3) and radius (f32) follow
+    return b;
+}
+
+std::string readAssetId(ByteReader& r) {
+    const Chunk c = readChunk(r);
+    std::string id;
+    if (c.tag == fourcc("ISTR")) id = r.cstr();
+    else if (c.tag == fourcc("IINT")) id = std::to_string(r.i32());
+    r.seek(c.end);                             // INON (no id) or an unknown kind
+    return id;
+}
+
+std::string formatFloat(float f) {
+    char text[32];
+    std::snprintf(text, sizeof text, "%g", f);
+    return text;
+}
+
+void readEfct(ByteReader& r, GeoPiece& piece) {
+    const Chunk c = expectChunk(r, fourcc("EFCT"));
+    if (c.version == 2) piece.effectName = r.cstr();
+    else if (c.version >= 3) piece.effectName = readAssetId(r);
+    while (r.tell() + 16 <= c.end && r.peekU32() == fourcc("PARM")) {
+        const Chunk pc = readChunk(r);
+        GeoParameter parameter;
+        parameter.key = r.cstr();
+        const int32_t type = r.i32();
+        if (pc.version == 2) {
+            switch (type) {
+                case 1: parameter.value = r.u32() == 1 ? "true" : "false"; break;
+                case 2: parameter.value = std::to_string(r.i32()); break;
+                case 3: {
+                    const int32_t n = r.i32();
+                    for (int32_t k = 0; k < n; ++k) {
+                        if (k) parameter.value += ' ';
+                        parameter.value += formatFloat(r.f32());
+                    }
+                    break;
+                }
+                case 4: parameter.value = r.cstr(); break;
+                case 5: case 8: parameter.value = readAssetId(r); break;
+                default: break;
+            }
+        }
+        r.seek(pc.end);
+        if (parameter.key == "DiffuseTexture") piece.diffuseTexture = parameter.value;
+        piece.parameters.push_back(std::move(parameter));
+    }
+    r.seek(c.end);
+}
+
+GeoPiece readGpce(ByteReader& r) {
+    const Chunk c = expectChunk(r, fourcc("GPCE"));
+    GeoPiece piece;
+    piece.version = c.version;
+    if (c.version >= 9) r.u8();                // hasMaterial
+    readEfct(r, piece);
+    piece.indices = readIndx(r);
+    if (c.version >= 10) {
+        readVert(r, piece);
+    } else {
+        const int32_t streams = r.i32();
+        readVert(r, piece);
+        if (streams == 2) skipChunk(r);        // second VERT (purpose UNKNOWN); the first is kept
+    }
+    piece.bounds = readBbox(r);
+    piece.boneName = r.cstr();
+    r.seek(c.end);                             // remaining fields, USDA, extra index buffers: skipped
+    return piece;
+}
+
+GeoPiece readGskn(ByteReader& r) {
+    const Chunk c = expectChunk(r, fourcc("GSKN"));
+    GeoPiece piece = readGpce(r);
+    piece.skinned = true;
+    const uint32_t bones = r.u32();
+    for (uint32_t k = 0; k < bones; ++k) piece.skinBones.push_back(r.cstr());
+    r.seek(c.end);
+    return piece;
+}
+
+std::vector<GeoBone> readSkeleton(ByteReader& r) {
+    const Chunk c = expectChunk(r, fourcc("PSKE"));
+    std::vector<GeoBone> bones;
+    const uint32_t count = r.u32();
+    for (uint32_t k = 0; k < count; ++k) {
+        const Chunk bone = expectChunk(r, fourcc("PBON"));
+        GeoBone b;
+        b.parent = r.i32();
+        r.i32();                               // UNKNOWN
+        r.i32();                               // UNKNOWN
+        r.f32();                               // UNKNOWN
+        const Chunk data = expectChunk(r, fourcc("BDAT"));
+        b.name = r.cstr();
+        b.rotation.x = r.f32();
+        b.rotation.y = r.f32();
+        b.rotation.z = r.f32();
+        b.rotation.w = r.f32();
+        b.translation = r.vec3();
+        if (data.version == 2) b.scale = r.vec3();
+        r.seek(data.end);                      // 4x4 matrix and optional bounding volume follow
+        r.seek(bone.end);
+        bones.push_back(std::move(b));
+    }
+    r.seek(c.end);
+    return bones;
+}
+
+GeoModel readGbod(ByteReader& r) {
+    const Chunk c = expectChunk(r, fourcc("GBOD"));
+    GeoModel model;
+    model.version = c.version;
+    if (c.version == 3) r.f32();               // UNKNOWN
+    if (r.peekU32() != fourcc("BBOX")) {       // shader name list (seen in Auto Assault files)
+        const uint32_t n = r.u32();
+        for (uint32_t k = 0; k < n; ++k) r.cstr();
+    }
+    model.bounds = readBbox(r);
+    skipChunk(r);                              // CPDG: contact point definitions
+    const uint32_t entries = r.u32();
+    for (uint32_t k = 0; k < entries; ++k) {
+        const int32_t id = r.i32();
+        const uint32_t pairs = r.u32();
+        for (uint32_t p = 0; p < pairs; ++p) {
+            GeoProperty property;
+            property.id = id;
+            property.key = r.cstr();
+            property.value = r.cstr();
+            model.properties.push_back(std::move(property));
+        }
+    }
+    model.bones = readSkeleton(r);
+    const int32_t morphs = r.i32();
+    if (morphs > 0) throw FormatError("GBOD: morph targets are not supported");
+    const int32_t pieces = r.i32();
+    for (int32_t k = 0; k < pieces; ++k) {
+        const uint32_t tag = r.peekU32();
+        if (tag == fourcc("GPCE")) model.pieces.push_back(readGpce(r));
+        else if (tag == fourcc("GSKN")) model.pieces.push_back(readGskn(r));
+        else skipChunk(r);
+    }
+    const int32_t shadows = r.i32();
+    for (int32_t k = 0; k < shadows; ++k) skipChunk(r);
+    model.shadowCount = uint32_t(std::max(shadows, 0));
+    r.seek(c.end);                             // version >= 2: LOD handler flag and chunk
+    return model;
+}
+
+Vec3 rotate(const Quat& q, const Vec3& v) {
+    // v' = v + 2w (q x v) + 2 q x (q x v)
+    const Vec3 t{2 * (q.y * v.z - q.z * v.y), 2 * (q.z * v.x - q.x * v.z), 2 * (q.x * v.y - q.y * v.x)};
+    return {v.x + q.w * t.x + (q.y * t.z - q.z * t.y),
+            v.y + q.w * t.y + (q.z * t.x - q.x * t.z),
+            v.z + q.w * t.z + (q.x * t.y - q.y * t.x)};
+}
+
+}  // namespace
+
+GeoModel readGeo(const Bytes& data) {
+    if (data.size() < 8 || std::memcmp(data.data(), "CHNK", 4) != 0) throw FormatError("not a chunk file (no CHNK header)");
+    if (data[4] != 'B') throw FormatError("text chunk files are not supported");
+    ByteReader r(data, 8);
+    while (r.remaining() >= 16) {
+        if (r.peekU32() == fourcc("GBOD")) return readGbod(r);
+        skipChunk(r);
+    }
+    throw FormatError("no GBOD chunk found");
+}
+
+void writeGeoObj(const GeoModel& model, const std::string& objPath, bool applyBoneTransforms, bool rightHanded) {
+    const float zSign = rightHanded ? -1.0f : 1.0f;
+    std::string mtlPath = objPath;
+    const size_t dot = mtlPath.rfind('.');
+    mtlPath = (dot == std::string::npos ? mtlPath : mtlPath.substr(0, dot)) + ".mtl";
+    const size_t slash = mtlPath.find_last_of("/\\");
+    const std::string mtlName = slash == std::string::npos ? mtlPath : mtlPath.substr(slash + 1);
+
+    FILE* mtl = std::fopen(mtlPath.c_str(), "w");
+    if (!mtl) throw FormatError("cannot write " + mtlPath);
+    for (size_t i = 0; i < model.pieces.size(); ++i) {
+        const GeoPiece& piece = model.pieces[i];
+        std::fprintf(mtl, "newmtl piece_%zu\nKd 1 1 1\n", i);
+        if (!piece.effectName.empty()) std::fprintf(mtl, "# effect %s\n", piece.effectName.c_str());
+        if (!piece.diffuseTexture.empty()) std::fprintf(mtl, "map_Kd %s\n", piece.diffuseTexture.c_str());
+        std::fprintf(mtl, "\n");
+    }
+    std::fclose(mtl);
+
+    FILE* f = std::fopen(objPath.c_str(), "w");
+    if (!f) throw FormatError("cannot write " + objPath);
+    std::fprintf(f, "mtllib %s\n", mtlName.c_str());
+    size_t base = 1;
+    for (size_t i = 0; i < model.pieces.size(); ++i) {
+        const GeoPiece& piece = model.pieces[i];
+        const GeoBone* bone = nullptr;
+        if (applyBoneTransforms && !piece.boneName.empty())
+            for (const GeoBone& b : model.bones)
+                if (b.name == piece.boneName) { bone = &b; break; }
+        std::fprintf(f, "o piece_%zu\nusemtl piece_%zu\n", i, i);
+        for (const GeoVertex& v : piece.vertices) {
+            Vec3 p = v.position;
+            if (bone) {
+                p = rotate(bone->rotation, p);
+                p = {p.x * bone->scale.x, p.y * bone->scale.y, p.z * bone->scale.z};
+                p = {p.x + bone->translation.x, p.y + bone->translation.y, p.z + bone->translation.z};
+            }
+            std::fprintf(f, "v %g %g %g\n", p.x, p.y, zSign * p.z);
+        }
+        for (const GeoVertex& v : piece.vertices) std::fprintf(f, "vt %g %g\n", v.uv.x, 1.0f - v.uv.y);
+        for (const GeoVertex& v : piece.vertices) {
+            const Vec3 n = bone ? rotate(bone->rotation, v.normal) : v.normal;
+            std::fprintf(f, "vn %g %g %g\n", n.x, n.y, zSign * n.z);
+        }
+        for (size_t k = 0; k + 2 < piece.indices.size(); k += 3) {
+            const size_t a = base + piece.indices[k];
+            const size_t b = base + piece.indices[k + 1];
+            const size_t c = base + piece.indices[k + 2];
+            std::fprintf(f, "f %zu/%zu/%zu %zu/%zu/%zu %zu/%zu/%zu\n", a, a, a, b, b, b, c, c, c);
+        }
+        base += piece.vertices.size();
+    }
+    std::fclose(f);
+}
+
+}  // namespace tr

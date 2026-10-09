@@ -1,0 +1,268 @@
+// assetlibrary.cpp - see assetlibrary.h.
+#include "assetlibrary.h"
+
+#include <algorithm>
+#include <filesystem>
+#include <fstream>
+#include <regex>
+
+namespace fs = std::filesystem;
+
+namespace tr {
+
+namespace {
+
+std::string trim(const std::string& text) {
+    const size_t begin = text.find_first_not_of(" \t\r\n");
+    if (begin == std::string::npos) return "";
+    const size_t end = text.find_last_not_of(" \t\r\n");
+    return text.substr(begin, end - begin + 1);
+}
+
+bool equalsIgnoreCase(const std::string& a, const std::string& b) { return toLowerAscii(a) == toLowerAscii(b); }
+
+// Case-insensitive lookup of one directory entry (Windows file names are case-insensitive).
+fs::path findChildIgnoreCase(const fs::path& directory, const std::string& name) {
+    std::error_code ec;
+    const fs::path direct = directory / name;
+    if (fs::exists(direct, ec)) return direct;
+    if (!fs::is_directory(directory, ec)) return {};
+    const std::string wanted = toLowerAscii(name);
+    for (const auto& entry : fs::directory_iterator(directory, ec))
+        if (toLowerAscii(entry.path().filename().string()) == wanted) return entry.path();
+    return {};
+}
+
+}  // namespace
+
+// ------------------------------------------------------------------------------------------
+// ConfigFile
+// ------------------------------------------------------------------------------------------
+ConfigFile::ConfigFile(const std::string& path) {
+    std::ifstream file(path);
+    if (!file) throw FormatError("cannot open " + path);
+    std::string line;
+    while (std::getline(file, line)) {
+        line = trim(line);
+        if (line.empty() || line[0] == '#' || line[0] == ';') continue;
+        if (line.front() == '[' && line.back() == ']') {
+            sections_.emplace_back(trim(line.substr(1, line.size() - 2)), std::vector<Item>());
+            continue;
+        }
+        const size_t eq = line.find('=');
+        if (eq == std::string::npos || sections_.empty()) continue;
+        Item item;
+        item.key = trim(line.substr(0, eq));
+        item.value = trim(line.substr(eq + 1));
+        if (item.value.size() >= 2 && item.value.front() == '"' && item.value.back() == '"')
+            item.value = item.value.substr(1, item.value.size() - 2);
+        sections_.back().second.push_back(std::move(item));
+    }
+}
+
+const std::vector<ConfigFile::Item>* ConfigFile::section(const std::string& name) const {
+    for (const auto& s : sections_)
+        if (equalsIgnoreCase(s.first, name)) return &s.second;
+    return nullptr;
+}
+
+std::string ConfigFile::value(const std::string& sectionName, const std::string& key, const std::string& fallback) const {
+    if (const auto* items = section(sectionName))
+        for (const Item& item : *items)
+            if (equalsIgnoreCase(item.key, key)) return item.value;
+    return fallback;
+}
+
+// ------------------------------------------------------------------------------------------
+// AssetLibrary
+// ------------------------------------------------------------------------------------------
+AssetLibrary::AssetLibrary(const std::string& gameRoot, const std::string& language) : root_(gameRoot) {
+    const fs::path cfgPath = findChildIgnoreCase(fs::path(root_), "tabula_rasa.cfg");
+    if (cfgPath.empty()) throw FormatError("no tabula_rasa.cfg in " + root_);
+    config_ = std::make_unique<ConfigFile>(cfgPath.string());
+    if (!equalsIgnoreCase(language, "English")) mountSection(*config_, "Paths." + language);
+    mountSection(*config_, "Paths");
+    for (uint32_t k = 0; k < loose_.size(); ++k)
+        if (loose_[k].indexed) indexLooseDirectory(k);
+}
+
+std::string AssetLibrary::resolve(const std::string& relative) const {
+    std::string r = relative;
+    std::replace(r.begin(), r.end(), '\\', '/');
+    return (fs::path(root_) / fs::path(r)).lexically_normal().string();
+}
+
+void AssetLibrary::mountSection(const ConfigFile& cfg, const std::string& name) {
+    const auto* items = cfg.section(name);
+    if (!items) return;
+    for (const ConfigFile::Item& item : *items) {
+        const std::string& value = item.value;
+        if (value.find(".glm") != std::string::npos) {                 // archive (client: rfind(".glm"))
+            const std::string path = resolve(value);
+            std::error_code ec;
+            if (!fs::exists(path, ec)) {
+                warnings_.push_back("[" + name + "] " + item.key + ": archive not found: " + path);
+                continue;
+            }
+            try {
+                MountedArchive mounted;
+                mounted.configKey = item.key;
+                mounted.archive = std::make_unique<GlmArchive>(path);
+                const auto archiveIndex = uint32_t(archives_.size());
+                for (const GlmEntry& entry : mounted.archive->entries()) {
+                    AssetLocation location;
+                    location.inArchive = true;
+                    location.archiveIndex = archiveIndex;
+                    location.entry = &entry;
+                    index_.emplace(toLowerAscii(entry.name), location);  // first registration wins
+                }
+                archives_.push_back(std::move(mounted));
+            } catch (const std::exception& e) {
+                warnings_.push_back("[" + name + "] " + item.key + ": " + e.what());
+            }
+        } else if (value.find('|') != std::string::npos) {               // "dir|.ext|.ext"
+            LooseDirectory dir;
+            dir.configKey = item.key;
+            const size_t bar = value.find('|');
+            dir.path = resolve(value.substr(0, bar));
+            size_t start = bar + 1;
+            while (start <= value.size()) {
+                const size_t next = value.find('|', start);
+                const std::string ext = toLowerAscii(trim(value.substr(start, next - start)));
+                if (!ext.empty()) dir.extensions.push_back(ext);
+                if (next == std::string::npos) break;
+                start = next + 1;
+            }
+            dir.indexed = std::find(dir.extensions.begin(), dir.extensions.end(), ".xxx") == dir.extensions.end();
+            loose_.push_back(std::move(dir));
+        }
+    }
+}
+
+void AssetLibrary::indexLooseDirectory(uint32_t directoryIndex) {
+    const LooseDirectory& dir = loose_[directoryIndex];
+    std::error_code ec;
+    if (!fs::is_directory(dir.path, ec)) {
+        warnings_.push_back(dir.configKey + ": directory not found: " + dir.path);
+        return;
+    }
+    for (auto it = fs::recursive_directory_iterator(dir.path, ec); it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        if (ec) break;
+        if (!it->is_regular_file(ec)) continue;
+        const std::string ext = toLowerAscii(it->path().extension().string());
+        if (std::find(dir.extensions.begin(), dir.extensions.end(), ext) == dir.extensions.end()) continue;
+        AssetLocation location;
+        location.filePath = it->path().string();
+        index_.emplace(toLowerAscii(it->path().filename().string()), location);   // archives keep priority
+    }
+}
+
+std::optional<AssetLocation> AssetLibrary::locate(const std::string& name) const {
+    const auto it = index_.find(toLowerAscii(name));
+    if (it == index_.end()) return std::nullopt;
+    return it->second;
+}
+
+Bytes AssetLibrary::read(const std::string& name) const {
+    const auto location = locate(name);
+    if (!location) throw FormatError("asset not found: " + name);
+    if (location->inArchive) return archives_[location->archiveIndex].archive->read(*location->entry);
+    return readFile(location->filePath);
+}
+
+bool AssetLibrary::tryRead(const std::string& name, Bytes& out) const {
+    const auto location = locate(name);
+    if (!location) return false;
+    out = location->inArchive ? archives_[location->archiveIndex].archive->read(*location->entry) : readFile(location->filePath);
+    return true;
+}
+
+std::vector<std::string> AssetLibrary::namesWithExtension(const std::string& extension) const {
+    const std::string ext = toLowerAscii(extension);
+    std::vector<std::string> names;
+    for (const auto& item : index_)
+        if (item.first.size() >= ext.size() && item.first.compare(item.first.size() - ext.size(), ext.size(), ext) == 0)
+            names.push_back(item.second.inArchive ? item.second.entry->name : fs::path(item.second.filePath).filename().string());
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
+std::vector<std::string> AssetLibrary::mapNames() const {
+    std::vector<std::string> names;
+    for (const LooseDirectory& dir : loose_) {
+        if (!equalsIgnoreCase(dir.configKey, "Maps")) continue;
+        std::error_code ec;
+        for (const auto& entry : fs::directory_iterator(dir.path, ec)) {
+            if (!entry.is_directory(ec)) continue;
+            const std::string name = entry.path().filename().string();
+            if (!findChildIgnoreCase(entry.path(), name + ".map").empty()) names.push_back(name);
+        }
+    }
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
+std::string AssetLibrary::mapFolder(const std::string& mapName) const {
+    for (const LooseDirectory& dir : loose_) {
+        if (!equalsIgnoreCase(dir.configKey, "Maps")) continue;
+        const fs::path folder = findChildIgnoreCase(fs::path(dir.path), mapName);
+        if (!folder.empty()) return folder.string();
+    }
+    return "";
+}
+
+std::string AssetLibrary::terrainArchivePath(const std::string& mapName) const {
+    const std::string folder = mapFolder(mapName);
+    if (folder.empty()) return "";
+    static const std::regex pattern("t[0-9a-fA-F]{8}_terrain\\.glm", std::regex::icase);
+    std::error_code ec;
+    for (const auto& entry : fs::directory_iterator(folder, ec))
+        if (std::regex_match(entry.path().filename().string(), pattern)) return entry.path().string();
+    return "";
+}
+
+std::string AssetLibrary::radarArchivePath(const std::string& mapName) const {
+    for (const LooseDirectory& dir : loose_) {
+        if (dir.indexed) continue;                                       // the ".xxx" load-by-name directory
+        const fs::path radar = findChildIgnoreCase(fs::path(dir.path), mapName + "_radar.glm");
+        if (!radar.empty()) return radar.string();
+    }
+    return "";
+}
+
+std::string AssetLibrary::gameDataPath() const {
+    const std::string value = config_->value("Data", "GameData");
+    return value.empty() ? "" : resolve(value);
+}
+
+// ------------------------------------------------------------------------------------------
+// MapBundle
+// ------------------------------------------------------------------------------------------
+MapBundle loadMap(const AssetLibrary& library, const std::string& mapName) {
+    MapBundle bundle;
+    bundle.folder = library.mapFolder(mapName);
+    if (bundle.folder.empty()) throw FormatError("map not found: " + mapName);
+    bundle.name = fs::path(bundle.folder).filename().string();
+    const fs::path folder(bundle.folder);
+    const fs::path mapPath = findChildIgnoreCase(folder, bundle.name + ".map");
+    if (mapPath.empty()) throw FormatError("map folder has no .map: " + bundle.folder);
+    bundle.map = readMap(mapPath.string());
+    const fs::path visPath = findChildIgnoreCase(folder, bundle.name + ".vis");
+    if (!visPath.empty()) bundle.vis = readVis(visPath.string());
+    const std::string terrainPath = library.terrainArchivePath(bundle.name);
+    if (!terrainPath.empty()) {
+        bundle.terrainArchive = std::make_unique<GlmArchive>(terrainPath);
+        bundle.terrain = readTerrain(*bundle.terrainArchive);
+        bundle.textureLayers = readTextureLayers(*bundle.terrainArchive);
+        bundle.tribbleSets = readTribbleSets(*bundle.terrainArchive);
+        bundle.hasTerrain = true;
+    }
+    const fs::path lights = findChildIgnoreCase(folder, "lights.xml");
+    if (!lights.empty()) bundle.lightsXml = readFile(lights.string());
+    const fs::path audio = findChildIgnoreCase(folder, "audioemitters.xml");
+    if (!audio.empty()) bundle.audioEmittersXml = readFile(audio.string());
+    bundle.radarArchivePath = library.radarArchivePath(bundle.name);
+    return bundle;
+}
+
+}  // namespace tr

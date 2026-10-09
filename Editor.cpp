@@ -1,0 +1,152 @@
+#include "Editor.h"
+
+#include "imgui_internal.h"   // DockBuilderGetNode
+
+Editor::Editor(SDL_Window* window, SDL_GPUDevice* device)
+    : context_(std::make_unique<EditorContext>(window, device)),
+      client_(std::make_unique<ClientWorkspace>(*context_)),
+      server_(std::make_unique<ServerWorkspace>(*context_)) {
+    active_ = context_->setting("workspace") == "client" ? static_cast<Workspace*>(client_.get()) : static_cast<Workspace*>(server_.get());
+    // Reopen the last game, server database and map on start-up.
+    const std::string root = context_->setting("gameRoot");
+    if (!root.empty()) context_->queueGameRoot(root);
+    const std::string database = context_->setting("database");
+    if (!database.empty()) context_->queueDatabase(database);
+    const std::string map = context_->setting("map");
+    if (!map.empty()) context_->queueMap(map);
+}
+
+Editor::~Editor() = default;
+
+void Editor::setActive(Workspace* workspace) {
+    active_ = workspace;
+    context_->setSetting("workspace", workspace == client_.get() ? "client" : "server");
+}
+
+// ------------------------------------------------------------------------------------------
+// Between frames
+// ------------------------------------------------------------------------------------------
+void Editor::processPendingActions() {
+    const EditorContext::Pending pending = context_->takePending();
+    // Loading a game, map or database replaces the server content: ask first if it has unsaved edits.
+    auto mayReplaceServerContent = [&](PromptAction action, const std::string& target) {
+        if (!server_->hasUnsavedChanges() || skipUnsavedCheck_) {
+            skipUnsavedCheck_ = false;
+            return true;
+        }
+        promptAction_ = action;
+        promptTarget_ = target;
+        return false;
+    };
+    if (!pending.gameRoot.empty() && mayReplaceServerContent(PromptAction::OpenGame, pending.gameRoot) && context_->openGame(pending.gameRoot)) {
+        client_->onGameOpened();
+        server_->onGameOpened();
+    }
+    if (!pending.database.empty() && mayReplaceServerContent(PromptAction::OpenDatabase, pending.database)) server_->openDatabase(pending.database);
+    if (!pending.map.empty() && mayReplaceServerContent(PromptAction::OpenMap, pending.map) && context_->openMap(pending.map)) {
+        client_->onMapLoaded();
+        server_->onMapLoaded();
+    }
+    if (context_->scene) context_->scene->loadPending(0.010);      // a few models per frame
+}
+
+// ------------------------------------------------------------------------------------------
+// Frame
+// ------------------------------------------------------------------------------------------
+void Editor::drawUi() {
+    active_->beginFrame();
+    active_->handleShortcuts();
+    drawMenuBar();
+    drawUnsavedPrompt();
+    const ImGuiID dockspace = ImGui::GetID(active_->dockspaceName());
+    if (ImGui::DockBuilderGetNode(dockspace) == nullptr) active_->buildDefaultLayout(dockspace);   // first use: no saved layout
+    ImGui::DockSpaceOverViewport(dockspace, ImGui::GetMainViewport());
+    active_->drawPanels();
+}
+
+void Editor::drawMenuBar() {
+    if (!ImGui::BeginMainMenuBar()) return;
+    // Workspace tabs.
+    for (Workspace* w : {static_cast<Workspace*>(client_.get()), static_cast<Workspace*>(server_.get())}) {
+        const bool current = w == active_;
+        if (current) ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_CheckMark));
+        if (ImGui::MenuItem(w->name(), nullptr, current) && !current) setActive(w);
+        if (current) ImGui::PopStyleColor();
+    }
+    ImGui::Separator();
+    if (ImGui::BeginMenu("File")) {
+        if (ImGui::MenuItem("Open Game Folder...")) context_->showGameFolderDialog();
+        if (ImGui::MenuItem("Open Server Database...")) server_->showDatabaseDialog();
+        if (ImGui::MenuItem("Save Server Changes", "Ctrl+S", false, server_->canEditServer() && server_->hasUnsavedChanges())) server_->saveChanges();
+        ImGui::Separator();
+        if (ImGui::MenuItem("Quit")) {
+            SDL_Event quit = {};
+            quit.type = SDL_EVENT_QUIT;
+            SDL_PushEvent(&quit);
+        }
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Edit")) {
+        active_->drawEditMenu();
+        if (active_ == client_.get()) ImGui::TextDisabled("The client workspace is read-only for now.");
+        ImGui::EndMenu();
+    }
+    if (server_->hasUnsavedChanges()) {
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "unsaved server changes");
+    }
+    if (!context_->statusText.empty()) {
+        ImGui::Separator();
+        if (context_->statusIsError) ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.4f, 1.0f), "%s", context_->statusText.c_str());
+        else ImGui::TextDisabled("%s", context_->statusText.c_str());
+    }
+    ImGui::EndMainMenuBar();
+}
+
+void Editor::renderViewport(SDL_GPUCommandBuffer* commands) { active_->renderViewport(commands); }
+
+void Editor::releaseGpuResources() { context_->releaseGpuResources(); }
+
+// ------------------------------------------------------------------------------------------
+// Unsaved changes
+// ------------------------------------------------------------------------------------------
+bool Editor::requestQuit() {
+    if (!server_->hasUnsavedChanges()) return true;
+    promptAction_ = PromptAction::Quit;
+    return false;
+}
+
+void Editor::drawUnsavedPrompt() {
+    if (promptAction_ == PromptAction::None) return;
+    if (!ImGui::IsPopupOpen("Unsaved server changes")) ImGui::OpenPopup("Unsaved server changes");
+    if (!ImGui::BeginPopupModal("Unsaved server changes", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+    ImGui::Text("The server content of %s has unsaved changes.", context_->currentMapName.c_str());
+    ImGui::Spacing();
+    auto proceed = [&]() {
+        switch (promptAction_) {
+            case PromptAction::OpenGame: context_->queueGameRoot(promptTarget_); skipUnsavedCheck_ = true; break;
+            case PromptAction::OpenMap: context_->queueMap(promptTarget_); skipUnsavedCheck_ = true; break;
+            case PromptAction::OpenDatabase: context_->queueDatabase(promptTarget_); skipUnsavedCheck_ = true; break;
+            case PromptAction::Quit: quitApproved_ = true; break;
+            default: break;
+        }
+        promptAction_ = PromptAction::None;
+        ImGui::CloseCurrentPopup();
+    };
+    if (ImGui::Button("Save")) {
+        if (server_->saveChanges()) {
+            proceed();
+        } else {
+            promptAction_ = PromptAction::None;              // keep the changes; the status bar shows why
+            ImGui::CloseCurrentPopup();
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Discard")) proceed();
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel")) {
+        promptAction_ = PromptAction::None;
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
