@@ -20,6 +20,7 @@ struct ClassInfo {
     std::string name;
     std::string mesh;            // .geo file name; empty if the class has no mesh
     bool known = false;          // false: the class id is not in the shipped tables
+    int32_t cullingLayer = 3;    // vizsetting culling layer type (6 = never drawn)
 };
 
 // How the 3D viewport shows the map, shared by both workspaces so switching keeps the same view
@@ -29,6 +30,7 @@ struct ViewSettings {
     bool showTerrain = true;
     bool showEntities = true;
     bool showEffects = true;
+    bool showParticles = true;   // particle systems (.pfx) on models' contact points
     bool showPlaceholders = true;
     float drawDistance = 1200.0f;
     float flySpeed = 20.0f;      // metres per second

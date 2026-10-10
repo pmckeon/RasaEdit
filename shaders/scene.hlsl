@@ -19,7 +19,7 @@ cbuffer FragmentUniforms : register(b0, space3)
 {
     float4 tint;              // multiplied with the vertex colour and the texture
     float4 lightDirection;    // xyz: towards the light (world space); w: 1 = lit, 0 = unlit
-    float4 options;           // x: 1 = alpha test (discard below 0.5); z: 1 = additive; w: 1 = aniso additive (holograms)
+    float4 options;           // x: 1 = alpha test (discard below 0.5); y: 1 = alpha-blended particle; z: 1 = additive; w: 1 = aniso additive
     float4 hue;               // rgb added to the texel weighted by its alpha (the game's "Hue" effects); w: 1 = on
     float4 sunFront;          // rgb: directional light on surfaces facing it
     float4 sunBack;           // rgb: directional light's back colour (surfaces facing away)
@@ -33,6 +33,7 @@ cbuffer FragmentUniforms : register(b0, space3)
     float4 localColour[MAX_LOCAL_LIGHTS];
     float4 localSpot[MAX_LOCAL_LIGHTS];
     float4 localSpotInner[MAX_LOCAL_LIGHTS];
+    float4 localRotation[MAX_LOCAL_LIGHTS];
     row_major float4x4 shadowMatrix;   // world -> sun shadow map clip space
     float4 shadowParams;              // x: 1 = sun shadows on, y: opacity, z: 1 / map size
     float4 specular;          // aniso additive: MatSpecular
@@ -50,6 +51,8 @@ cbuffer FragmentUniforms : register(b0, space3)
 [[vk::combinedImageSampler]] Texture2D lightTexture : register(t4, space2);
 [[vk::combinedImageSampler]] SamplerState lightSampler : register(s4, space2);
 [[vk::combinedImageSampler]] Texture2D<float> shadowMap : register(t5, space2);
+[[vk::combinedImageSampler]] TextureCubeArray globeMaps : register(t6, space2);
+[[vk::combinedImageSampler]] SamplerState globeSampler : register(s6, space2);
 [[vk::combinedImageSampler]] SamplerComparisonState shadowSampler : register(s5, space2);
 
 struct VertexInput
@@ -106,7 +109,7 @@ float3 anisoAdditive(VertexOutput input)
 
 float4 psMain(VertexOutput input) : SV_Target0
 {
-    if (fogRange.z > 0.5 && (options.w > 0.5 || options.z > 0.5))
+    if (fogRange.z > 0.5 && (options.w > 0.5 || options.z > 0.5 || options.y > 0.5))
         return float4(0, 0, 0, 1);             // light-buffer view: additive effects are not lit geometry
     if (options.w > 0.5)
     {
@@ -129,6 +132,12 @@ float4 psMain(VertexOutput input) : SV_Target0
         const float3 black = applyFog(added, length(cameraPosition.xyz - input.world), float4(0, 0, 0, fogColour.w), fogRange);
         return float4(black, 1.0);
     }
+    if (options.y > 0.5)
+    {
+        // Alpha-blended particles (the game's PalParticleSystem pixel shader: texture x vertex colour, alpha x fog).
+        const float visibility = applyFog(float3(1, 1, 1), length(cameraPosition.xyz - input.world), float4(0, 0, 0, fogColour.w), fogRange).x;
+        return float4(base.rgb, base.a * texel.a * visibility);
+    }
     if (lightDirection.w < 0.5)
         return base;
     // Two-sided: the normal is turned towards the camera (mesh winding and thin geometry are not relied on).
@@ -145,7 +154,8 @@ float4 psMain(VertexOutput input) : SV_Target0
     // Glow maps add after lighting (the game's glow buffer, added in trhdrcomposite before fog).
     const float3 glow = glowTexture.Sample(glowSampler, input.uv1).rgb;
     s.sunVisibility = sunShadow(shadowMap, shadowSampler, shadowMatrix, shadowParams, input.world, n);
-    const float3 light = skyLight(n, s) + localLights(input.world, n, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner);
+    const float3 light = skyLight(n, s) + localLights(input.world, n, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner, localRotation,
+                                                         globeMaps, globeSampler);
     if (fogRange.z > 0.5)
         return float4(light * 0.2, 1.0);       // the game's light buffer (x OO_LIGHT_MULTIPLIER), as /dl_showlight shows it
     const float3 lit = base.rgb * light + glow;

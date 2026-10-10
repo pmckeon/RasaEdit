@@ -1,6 +1,7 @@
 #pragma once
 
 #include "GpuMath.h"
+#include "dds.h"
 
 #include <SDL3/SDL.h>
 
@@ -79,7 +80,8 @@ struct SceneLighting {
     Vec4f localPosition[maxLocalLights] = {};
     Vec4f localColour[maxLocalLights] = {};
     Vec4f localSpot[maxLocalLights] = {};
-    Vec4f localSpotInner[maxLocalLights] = {};
+    Vec4f localSpotInner[maxLocalLights] = {};    // x: cos(inner half angle), y: globe cube index (0 = none)
+    Vec4f localRotation[maxLocalLights] = {};     // light orientation quaternion x y z w (for the globe lookup)
 };
 
 // Creates the GPU device, preferring Vulkan (the same SPIR-V path on Windows, Linux and macOS via MoltenVK); falls back
@@ -110,8 +112,13 @@ public:
     // texture nullptr draws untextured (white); alphaTest discards texels with alpha below 0.5.
     // hue (w = 1) adds hue.rgb weighted by the texture alpha, as the game's "Hue" effects do (avatar skin, hair, clothing).
     // glow (sampled with the second UV set) is added after lighting, as the game's glow buffer is.
+    // twoSided: no back-face culling for this draw (effects whose passes set CULLMODE = NONE, see SceneView).
     void draw(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, bool lit, SDL_GPUTexture* texture = nullptr, bool alphaTest = false,
-              const Vec4f& hue = Vec4f{0, 0, 0, 0}, SDL_GPUTexture* glow = nullptr);
+              const Vec4f& hue = Vec4f{0, 0, 0, 0}, SDL_GPUTexture* glow = nullptr, bool twoSided = false);
+    // Back faces of opaque lit draws are culled when true, as in the game: PalGlobalEffect.fx sets CULLMODE = CCW and
+    // is begun without state saving (D3DXFX_DONOTSAVESTATE), so it is the baseline; material effects leave it alone
+    // except the few that set NONE. false draws everything two-sided (comparison / debugging).
+    bool cullBackFaces = true;
     // Alpha-blended (tint.w is the opacity), drawn after all opaque draws, without depth writes.
     void drawTranslucent(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint);
     // Additive (one, one), unlit, faded by fog, drawn last without depth writes: the game's TRAdditive* effects.
@@ -119,8 +126,16 @@ public:
     // The game's TRAdditiveAnisoSpec* effects (holograms): additive, with detail/decal layers and a view-angle light ramp.
     void drawAnisoAdditive(const GpuMesh& mesh, const Mat4& model, const AnisoMaterial& material);
     void drawTerrain(const GpuMesh& mesh, const TerrainMaterial& material);
+    // Particle quads (world-space triangle list, see ParticleSim.h). blendType as tr::particleBlendType: 0 additive (the
+    // game's SRCALPHA/ONE/ADD), 3 subtractive (reverse subtract); 1 multiply and 2 diffuse are alpha blended. Unlit,
+    // faded by fog, drawn last in queue order without depth writes.
+    void drawParticles(const std::vector<MeshVertex>& vertices, SDL_GPUTexture* texture, uint32_t blendType);
+    // Placed lights' globe maps (GlobeMapFile cube maps), cube k at index k + 1 (index 0 = white = no globe); 6 faces
+    // per cube. Call between frames (releases the previous texture).
+    void setGlobeMaps(const std::vector<std::vector<tr::Rgba8>>& faces, uint32_t size);
     void record(SDL_GPUCommandBuffer* commands);
-    size_t queuedDraws() const { return draws_.size() + translucentDraws_.size() + additiveDraws_.size(); }
+    size_t queuedDraws() const { return draws_.size() + translucentDraws_.size() + additiveDraws_.size() + particleBatches_.size(); }
+    size_t queuedParticleVertices() const { return particleVertices_.size(); }
 
 private:
     struct DrawItem {
@@ -141,11 +156,12 @@ private:
         Vec4f specular = Vec4f{0, 0, 0, 0};
         Vec4f layers = Vec4f{0, 0, 0, 0};
         bool aniso = false;
+        bool twoSided = false;
     };
     SDL_GPUShader* createShader(const unsigned char* dxil, size_t dxilSize, const unsigned char* spirv, size_t spirvSize,
                                 const char* entryPoint, SDL_GPUShaderStage stage, uint32_t samplers);
     SDL_GPUGraphicsPipeline* createPipeline(SDL_GPUShader* vertexShader, SDL_GPUShader* fragmentShader, SDL_GPUPrimitiveType primitive,
-                                            int blend = 0);
+                                            int blend = 0, bool cullBack = false);
     void recordItem(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const DrawItem& item, SDL_GPUGraphicsPipeline*& bound);
 
     SDL_GPUDevice* device_;
@@ -154,10 +170,26 @@ private:
     SDL_GPUShader* terrainVertex_ = nullptr;
     SDL_GPUShader* terrainFragment_ = nullptr;
     SDL_GPUGraphicsPipeline* trianglePipeline_ = nullptr;
+    SDL_GPUGraphicsPipeline* culledTrianglePipeline_ = nullptr;   // back faces culled
     SDL_GPUGraphicsPipeline* linePipeline_ = nullptr;
     SDL_GPUGraphicsPipeline* terrainPipeline_ = nullptr;
     SDL_GPUGraphicsPipeline* translucentPipeline_ = nullptr;
     SDL_GPUGraphicsPipeline* additivePipeline_ = nullptr;
+    SDL_GPUGraphicsPipeline* subtractivePipeline_ = nullptr;   // particles: destination - source
+    // Particles: this frame's vertices (uploaded in record()) and their draws.
+    struct ParticleBatch {
+        uint32_t first = 0;
+        uint32_t count = 0;
+        SDL_GPUTexture* texture = nullptr;
+        uint32_t blendType = 0;
+    };
+    std::vector<MeshVertex> particleVertices_;
+    std::vector<ParticleBatch> particleBatches_;
+    SDL_GPUBuffer* particleBuffer_ = nullptr;
+    SDL_GPUTransferBuffer* particleTransfer_ = nullptr;
+    uint32_t particleCapacity_ = 0;            // vertices
+    void uploadParticles(SDL_GPUCommandBuffer* commands);
+    void recordParticles(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass);
     // Sun shadow map (depth from the sun, orthographic, centred on the camera, texel-snapped).
     static constexpr uint32_t shadowSize = 2048;
     static constexpr float shadowExtent = 120.0f;   // half width in metres
@@ -165,6 +197,7 @@ private:
     SDL_GPUShader* shadowFragment_ = nullptr;
     SDL_GPUGraphicsPipeline* shadowPipeline_ = nullptr;
     SDL_GPUTexture* shadowMap_ = nullptr;
+    SDL_GPUTexture* globes_ = nullptr;            // cube map array; cube 0 white
     SDL_GPUSampler* shadowSampler_ = nullptr;     // comparison sampler
     Mat4 shadowMatrix_;
     bool shadowsActive_ = false;

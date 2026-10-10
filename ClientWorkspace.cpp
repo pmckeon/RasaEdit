@@ -136,7 +136,10 @@ void ClientWorkspace::drawEntityPanel() {
     ImGui::SameLine(); ImGui::Text("Hue 1  %02X%02X%02X%02X", e.hue1.red, e.hue1.green, e.hue1.blue, e.hue1.alpha);
     ImGui::ColorButton("##hue2", ImGui::ColorConvertU32ToFloat4(hueColour(e.hue2)), ImGuiColorEditFlags_NoTooltip);
     ImGui::SameLine(); ImGui::Text("Hue 2  %02X%02X%02X%02X", e.hue2.red, e.hue2.green, e.hue2.blue, e.hue2.alpha);
-    ImGui::Text("Flags %d, cull layer %d", e.flags, e.cullLayer);
+    ImGui::Text("Flags %d, cull layer %d (class %d)", e.flags, e.cullLayer, ctx_.classInfo(e.classId).cullingLayer);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("The map's cull layer (0 = use the class's vizsetting layer). Layer 6 is never drawn in game:\n"
+                          "World::AddToWorld does not add such bodies to the graphics scene.");
     if (e.hasBounds)
         ImGui::Text("Local bounds (%.1f %.1f %.1f) - (%.1f %.1f %.1f)", e.bounds.min.x, e.bounds.min.y, e.bounds.min.z,
                     e.bounds.max.x, e.bounds.max.y, e.bounds.max.z);

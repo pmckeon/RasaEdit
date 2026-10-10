@@ -89,7 +89,8 @@ struct PlacedLight {
     float intensity = 1;
     float range = 10;
     float falloffPercent = 1;
-    Quat worldOrientation;            // spot / plane
+    Quat worldOrientation;            // WorldOrientation (spot / plane), else LocalOrientation (point lights), x y z w
+    std::string globeMap;             // GlobeMapFile: a cube map the light projects around itself ("" = none)
     float coneAngle = 45;             // spot, degrees
     float penumbraAngle = 60;         // spot, degrees
     Vec3 direction() const;           // spot: the direction it shines

@@ -516,9 +516,22 @@ struct GeoProperty {
     std::string value;
 };
 
+// Contact point (GBOD CPDG chunk; verified 2026-10-10 on all 7,238 models, 36,840 points): CPDG v1 { u32 count,
+// count x CPDF v1 { u32 id, i32 bone (PSKE index, -1 = model space), quaternion x y z w, position, u32 pairCount,
+// pairCount x (cstr key, cstr value) } }. Keys: cpName, lsys "<cp>,<light>.ltmp", psys "<cp>,<system>.pfx", light
+// parameters (Range, ConeAngle, ...).
+struct GeoContactPoint {
+    uint32_t id = 0;
+    int32_t bone = -1;
+    Quat rotation;
+    Vec3 position;
+    std::vector<GeoParameter> values;
+};
+
 struct GeoModel {
     uint32_t version = 0;
     Bounds bounds;
+    std::vector<GeoContactPoint> contactPoints;
     std::vector<GeoProperty> properties;
     std::vector<GeoBone> bones;
     std::vector<GeoPiece> pieces;

@@ -1,3 +1,4 @@
+#include "MarkerColours.h"
 #include "Panels.h"
 
 #include "imgui_internal.h"   // IsMouseDragPastThreshold
@@ -17,6 +18,38 @@ bool containsIgnoreCase(const std::string& text, const std::string& needleLower)
 float yawDegrees(const tr::Quat& q) { return 2.0f * std::atan2(q.y, q.w) * 57.29578f; }
 
 ImU32 hueColour(const tr::HueColour& c) { return IM_COL32(c.red, c.green, c.blue, 255); }
+
+ImU32 toU32(const Vec4f& c) { return ImGui::ColorConvertFloat4ToU32(ImVec4(c.x, c.y, c.z, c.w)); }
+
+// A "Legend" label; hovering it lists what the marker colours mean (viewport and overview share them).
+void drawMarkerLegend() {
+    ImGui::TextDisabled("Legend");
+    if (!ImGui::BeginItemTooltip()) return;
+    auto row = [](const Vec4f& c, const char* text) {
+        ImGui::ColorButton(text, ImVec4(c.x, c.y, c.z, 1.0f), ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoPicker, ImVec2(14, 14));
+        ImGui::SameLine();
+        ImGui::TextUnformatted(text);
+    };
+    ImGui::SeparatorText("Server (boxes, rings, overview dots)");
+    row(markerColour::selected, "Selected (any kind)");
+    row(markerColour::hostileCreature, "Spawn pool: creatures");
+    row(markerColour::npc, "Spawn pool: NPC");
+    row(markerColour::vendor, "Spawn pool: vendor");
+    row(markerColour::teleporter, "Teleporter / waypoint / hospital");
+    row(markerColour::object, "Object (logos, shrine, ...)");
+    row(markerColour::mapLink, "Map link");
+    row(markerColour::mapLinkDisabled, "Map link (disabled)");
+    row(markerColour::missionArea, "Mission area");
+    row(markerColour::region, "Region");
+    row(markerColour::regionUnderground, "Region (underground)");
+    ImGui::SeparatorText("Map entities");
+    row(markerColour::placeholder, "Box: no model, or an effect (Placeholders)");
+    row(markerColour::entityModel, "Overview dot: entity with a model");
+    row(markerColour::entityNoMesh, "Overview dot: class without a mesh");
+    row(markerColour::entityUnknown, "Overview dot: unknown class");
+    ImGui::TextDisabled("Rings mark a marker's position / radius;\nclick a model, a box edge or a ring to select.");
+    ImGui::EndTooltip();
+}
 
 // ------------------------------------------------------------------------------------------
 // Game, Maps, Map info, Assets
@@ -174,6 +207,8 @@ void OverviewPanel::draw(EditorContext& ctx, const char* title, const OverviewLa
         if (!ctx.overview) ImGui::EndDisabled();
         ImGui::SameLine();
         if (ImGui::SmallButton("Fit")) fitPending_ = true;
+        ImGui::SameLine();
+        drawMarkerLegend();
     }
     const bool showRadar = backgroundMode_ == 0 && ctx.radar;
     const bool showRelief = backgroundMode_ == 1 && ctx.overview;
@@ -257,7 +292,7 @@ void OverviewPanel::draw(EditorContext& ctx, const char* title, const OverviewLa
         const ImVec2 p = toScreen(entities[k].location.x, entities[k].location.z);
         if (p.x < origin.x - 5 || p.y < origin.y - 5 || p.x > corner.x + 5 || p.y > corner.y + 5) continue;
         const ClassInfo& info = ctx.classInfo(entities[k].classId);
-        ImU32 colour = !info.known ? IM_COL32(255, 80, 70, 255) : info.mesh.empty() ? IM_COL32(120, 160, 255, 220) : IM_COL32(235, 235, 235, 200);
+        ImU32 colour = toU32(!info.known ? markerColour::entityUnknown : info.mesh.empty() ? markerColour::entityNoMesh : markerColour::entityModel);
         if (layers.dimEntities) colour = IM_COL32(170, 170, 170, 90);
         draw->AddCircleFilled(p, layers.dimEntities ? radius * 0.7f : radius, colour, 8);
         if (hovered && layers.selectEntities) {
@@ -283,7 +318,7 @@ void OverviewPanel::draw(EditorContext& ctx, const char* title, const OverviewLa
                 const SpawnPool& pool = server.spawnPools[k];
                 const Creature* creature = database ? database->creature(pool.slot1.creatureId) : nullptr;
                 const bool npc = creature && database->classIsNpc(creature->classId), vendor = creature && database->classIsVendor(creature->classId);
-                const ImU32 colour = vendor ? IM_COL32(255, 205, 50, 255) : npc ? IM_COL32(90, 255, 115, 255) : IM_COL32(255, 90, 75, 255);
+                const ImU32 colour = toU32(vendor ? markerColour::vendor : npc ? markerColour::npc : markerColour::hostileCreature);
                 const ImVec2 p = toScreen(pool.position.x, pool.position.z);
                 draw->AddCircleFilled(p, radius + 1.0f, colour, 10);
                 if (pool.radius * zoom_ > 6.0f) draw->AddCircle(p, pool.radius * zoom_, colour & 0x80FFFFFF, 32);
@@ -291,18 +326,18 @@ void OverviewPanel::draw(EditorContext& ctx, const char* title, const OverviewLa
             }
             for (size_t k = 0; k < server.teleporters.size(); ++k) {
                 const ImVec2 p = toScreen(server.teleporters[k].position.x, server.teleporters[k].position.z);
-                draw->AddRectFilled(ImVec2(p.x - 4, p.y - 4), ImVec2(p.x + 4, p.y + 4), IM_COL32(80, 230, 255, 255));
+                draw->AddRectFilled(ImVec2(p.x - 4, p.y - 4), ImVec2(p.x + 4, p.y + 4), toU32(markerColour::teleporter));
                 consider(p, Selection{SelectionKind::Teleporter, k});
             }
             for (size_t k = 0; k < server.objects.size(); ++k) {
                 const ImVec2 p = toScreen(server.objects[k].position.x, server.objects[k].position.z);
-                draw->AddQuadFilled(ImVec2(p.x, p.y - 5), ImVec2(p.x + 5, p.y), ImVec2(p.x, p.y + 5), ImVec2(p.x - 5, p.y), IM_COL32(255, 240, 80, 255));
+                draw->AddQuadFilled(ImVec2(p.x, p.y - 5), ImVec2(p.x + 5, p.y), ImVec2(p.x, p.y + 5), ImVec2(p.x - 5, p.y), toU32(markerColour::object));
                 consider(p, Selection{SelectionKind::Object, k});
             }
             for (size_t k = 0; k < server.mapLinks.size(); ++k) {
                 const MapLink& l = server.mapLinks[k];
                 const ImVec2 p = toScreen(l.position.x, l.position.z);
-                draw->AddCircle(p, std::max(5.0f, l.radius * zoom_), IM_COL32(255, 90, 255, 255), 24, 2.0f);
+                draw->AddCircle(p, std::max(5.0f, l.radius * zoom_), toU32(l.enabled ? markerColour::mapLink : markerColour::mapLinkDisabled), 24, 2.0f);
                 consider(p, Selection{SelectionKind::MapLink, k});
             }
         }
@@ -315,15 +350,15 @@ void OverviewPanel::draw(EditorContext& ctx, const char* title, const OverviewLa
         };
         if (layers.showMissionAreas)
             for (size_t k = 0; k < server.missionAreas.size(); ++k)
-                drawArea(server.missionAreas[k].area, IM_COL32(255, 155, 50, 255), Selection{SelectionKind::MissionArea, k});
+                drawArea(server.missionAreas[k].area, toU32(markerColour::missionArea), Selection{SelectionKind::MissionArea, k});
         if (layers.showRegions)
             for (size_t k = 0; k < server.regions.size(); ++k)
-                drawArea(server.regions[k].area, IM_COL32(110, 220, 110, 200), Selection{SelectionKind::Region, k});
+                drawArea(server.regions[k].area, toU32(server.regions[k].underground ? markerColour::regionUnderground : markerColour::region), Selection{SelectionKind::Region, k});
     }
 
     if (hasSelectedPosition) {
         const ImVec2 p = toScreen(selectedPosition.x, selectedPosition.z);
-        draw->AddCircle(p, radius + 4.0f, IM_COL32(255, 220, 40, 255), 16, 2.0f);
+        draw->AddCircle(p, radius + 4.0f, toU32(markerColour::selected), 16, 2.0f);
     }
     // Cursor read-out.
     char text[160];
@@ -360,6 +395,7 @@ void ViewportPanel::applyOptions(const ViewSettings& view, SceneView& scene) con
     scene.showTerrain = view.showTerrain;
     scene.showEntities = view.showEntities;
     scene.showEffects = view.showEffects;
+    scene.showParticles = view.showParticles;
     scene.showPlaceholders = view.showPlaceholders;
     scene.showServer = options.showServer;
     scene.showMissionAreas = options.showMissionAreas;
@@ -397,6 +433,11 @@ void ViewportPanel::draw(EditorContext& ctx, const char* title, Selection& selec
     ImGui::Checkbox(serverControls_ ? "Map entities" : "Entities", &ctx.view.showEntities);
     ImGui::SameLine();
     ImGui::Checkbox("Effects", &ctx.view.showEffects);
+    ImGui::SameLine();
+    ImGui::Checkbox("Particles", &ctx.view.showParticles);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Particle systems (.pfx) on models' contact points, within %.0f m: %zu running, %zu particles", scene.particleDistance,
+                          scene.liveParticleSystems(), scene.liveParticles());
     ImGui::SameLine();
     ImGui::Checkbox("Placeholders", &ctx.view.showPlaceholders);
     if (serverControls_) {
@@ -472,6 +513,8 @@ void ViewportPanel::draw(EditorContext& ctx, const char* title, Selection& selec
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("The map's placed lights (lights.xml): %zu, up to 16 nearest the camera are used%s%s", scene.mapLights().size(),
                           scene.mapLightsError().empty() ? "" : "\n", scene.mapLightsError().c_str());
+    ImGui::SameLine();
+    drawMarkerLegend();
     applyOptions(ctx.view, scene);
 
     // Canvas: an invisible button for input, the render target drawn underneath it.
@@ -603,6 +646,7 @@ void ViewportPanel::draw(EditorContext& ctx, const char* title, Selection& selec
 void ViewportPanel::render(EditorContext& ctx, SDL_GPUCommandBuffer* commands, const Selection& selection) {
     if (!visible_ || !ctx.scene || !ctx.renderer) return;
     applyOptions(ctx.view, *ctx.scene);
+    ctx.scene->advanceParticles(ImGui::GetIO().DeltaTime);
     ctx.scene->queueDraws(selection);
     ctx.renderer->record(commands);
 }

@@ -50,8 +50,18 @@ float sunShadow(Texture2D<float> map, SamplerComparisonState cmp, float4x4 m, fl
     return lerp(1.0, lit / 9.0, params.y);
 }
 
+// q^-1 v for a unit quaternion q (x y z w).
+float3 rotateInverse(float4 q, float3 v)
+{
+    const float3 u = -q.xyz;
+    return 2.0 * dot(u, v) * u + (q.w * q.w - dot(u, u)) * v + 2.0 * q.w * cross(u, v);
+}
+
+// Globe maps (GlobeMapFile): the game's trpointlight globe variant samples a cube map with the pixel's position in the
+// light's own frame (Proj2LightView) and multiplies the light colour by it (disassembled from effects.glm).
 float3 localLights(float3 world, float3 n, int count, float4 position[MAX_LOCAL_LIGHTS], float4 colour[MAX_LOCAL_LIGHTS],
-                   float4 spot[MAX_LOCAL_LIGHTS], float4 spotInner[MAX_LOCAL_LIGHTS])
+                   float4 spot[MAX_LOCAL_LIGHTS], float4 spotInner[MAX_LOCAL_LIGHTS], float4 rotation[MAX_LOCAL_LIGHTS],
+                   TextureCubeArray globes, SamplerState globeSampler)
 {
     float3 sum = float3(0, 0, 0);
     for (int i = 0; i < count; ++i)
@@ -76,7 +86,10 @@ float3 localLights(float3 world, float3 n, int count, float4 position[MAX_LOCAL_
             const float cosCone = spotInner[i].x, cosPenumbra = spot[i].w;
             cone = c >= cosCone ? 1.0 : (c >= cosPenumbra ? 1.0 - (cosCone - c) / max(cosCone - cosPenumbra, 0.000001) : 0.0);
         }
-        sum += colour[i].rgb * saturate(dot(n, l)) * fade * cone;
+        float3 globe = float3(1, 1, 1);
+        if (spotInner[i].y > 0.5)
+            globe = globes.SampleLevel(globeSampler, float4(rotateInverse(rotation[i], -toLight), spotInner[i].y), 0).rgb;
+        sum += colour[i].rgb * globe * saturate(dot(n, l)) * fade * cone;
     }
     return sum;
 }

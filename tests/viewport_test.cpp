@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <memory>
 #include <string>
 
@@ -34,7 +35,7 @@ int main(int argc, char** argv) {
         tr::GameData data(argv[2]);
         const tr::MapBundle map = tr::loadMap(assets, argv[3]);
         SceneView scene(renderer, assets, map, [&](int32_t id) { return data.classMeshName(id); },
-                        [&](int32_t id) { return !data.className(id).empty(); });
+                        [&](int32_t id) { return !data.className(id).empty(); }, [&](int32_t id) { return data.classCullingLayer(id); });
         {
             std::vector<std::pair<int32_t, std::string>> regionSkies;
             for (const tr::MapRegion& r : map.map.regions)
@@ -47,6 +48,7 @@ int main(int argc, char** argv) {
             if (envValue("RASA_NOFOG")) scene.showFog = false;
             if (envValue("RASA_NOSUN")) scene.showSun = false;
             if (envValue("RASA_NOSHADOWS")) scene.showShadows = false;
+            if (const char* g = envValue("RASA_LIGHTGAMMA")) scene.lightColourGamma = float(std::atof(g));
             if (envValue("RASA_NOLIGHTS")) scene.showMapLights = false;
             if (envValue("RASA_SHOWLIGHT")) scene.showLightBuffer = true;     // like the game's /dl_showlight
             if (const char* a = envValue("RASA_AMBIENT")) scene.ambientScale = float(std::atof(a));   // scales the sky hemi light
@@ -60,6 +62,94 @@ int main(int argc, char** argv) {
             std::printf("time %.3f: hemi top %.2f %.2f %.2f bottom %.2f %.2f %.2f, sun %.2f %.2f %.2f towards %.2f %.2f %.2f, fog %s from %.0f m density %.4f, %d placed lights in use\n",
                         scene.timeOfDay, l.hemiTop.x, l.hemiTop.y, l.hemiTop.z, l.hemiBottom.x, l.hemiBottom.y, l.hemiBottom.z, l.sunFront.x,
                         l.sunFront.y, l.sunFront.z, l.towardsLight.x, l.towardsLight.y, l.towardsLight.z, l.fog ? "on" : "off", l.fogStart, l.fogDensity, l.localCount);
+        }
+        // RASA_GEOINFO=<model.geo>: per piece its vertex elements, vertex colour range (ARGB bytes) and material parameters.
+        if (const char* geoName = envValue("RASA_GEOINFO")) {
+            const tr::GeoModel geo = tr::readGeo(assets.read(geoName));
+            for (size_t k = 0; k < geo.pieces.size(); ++k) {
+                const tr::GeoPiece& piece = geo.pieces[k];
+                uint32_t lo[4] = {255, 255, 255, 255}, hi[4] = {0, 0, 0, 0};
+                tr::Vec3 pmin{1e30f, 1e30f, 1e30f}, pmax{-1e30f, -1e30f, -1e30f};
+                for (const tr::GeoVertex& v : piece.vertices) {
+                    pmin = tr::Vec3{std::min(pmin.x, v.position.x), std::min(pmin.y, v.position.y), std::min(pmin.z, v.position.z)};
+                    pmax = tr::Vec3{std::max(pmax.x, v.position.x), std::max(pmax.y, v.position.y), std::max(pmax.z, v.position.z)};
+                }
+                for (const tr::GeoVertex& v : piece.vertices)
+                    for (int c = 0; c < 4; ++c) {
+                        const uint32_t byte = (v.colour >> (24 - 8 * c)) & 0xFF;
+                        lo[c] = std::min(lo[c], byte);
+                        hi[c] = std::max(hi[c], byte);
+                    }
+                std::printf("piece %zu %s (%zu vertices): colour A %u-%u R %u-%u G %u-%u B %u-%u; elements", k, piece.effectName.c_str(),
+                            piece.vertices.size(), lo[0], hi[0], lo[1], hi[1], lo[2], hi[2], lo[3], hi[3]);
+                for (const tr::VertexElement& e : piece.layout) std::printf(" usage%u.%u type%u", e.usage, e.usageIndex, e.type);
+                std::printf("\n    bone %s, stored positions (%.2f %.2f %.2f) - (%.2f %.2f %.2f)\n", piece.boneName.c_str(), pmin.x, pmin.y, pmin.z,
+                            pmax.x, pmax.y, pmax.z);
+                // Winding: Direct3D's default cull (CCW) keeps triangles that are clockwise on screen, whose face normal
+                // in this left-handed space is cross(b - a, c - a). Count those facing away from the piece's centre and
+                // those agreeing with the stored vertex normals.
+                const tr::Vec3 centre = scaled(add(pmin, pmax), 0.5f);
+                size_t outward = 0, agree = 0, triangles = 0;
+                for (size_t t = 0; t + 2 < piece.indices.size(); t += 3) {
+                    const uint32_t i0 = piece.indices[t], i1 = piece.indices[t + 1], i2 = piece.indices[t + 2];
+                    if (i0 >= piece.vertices.size() || i1 >= piece.vertices.size() || i2 >= piece.vertices.size()) continue;
+                    const tr::Vec3& a = piece.vertices[i0].position;
+                    const tr::Vec3& b = piece.vertices[i1].position;
+                    const tr::Vec3& c = piece.vertices[i2].position;
+                    const tr::Vec3 n = cross(subtract(b, a), subtract(c, a));
+                    const tr::Vec3 mid = scaled(add(add(a, b), c), 1.0f / 3.0f);
+                    const tr::Vec3 stored = add(add(piece.vertices[i0].normal, piece.vertices[i1].normal), piece.vertices[i2].normal);
+                    ++triangles;
+                    if (dot(n, subtract(mid, centre)) > 0) ++outward;
+                    if (dot(n, stored) > 0) ++agree;
+                }
+                std::printf("    triangles %zu: %zu face away from the centre, %zu agree with the vertex normals\n", triangles, outward, agree);
+                for (const tr::GeoParameter& p : piece.parameters) std::printf("    %s = %s\n", p.key.c_str(), p.value.c_str());
+            }
+        }
+        // RASA_GEOSCAN=1: every model's pieces whose vertex colours are all zero (colour and alpha), with names.
+        if (envValue("RASA_GEOSCAN")) {
+            std::map<std::string, size_t> byName;
+            for (const std::string& name : assets.namesWithExtension(".geo")) {
+                tr::GeoModel geo;
+                try {
+                    geo = tr::readGeo(assets.read(name));
+                } catch (const std::exception&) {
+                    continue;
+                }
+                for (const tr::GeoPiece& piece : geo.pieces) {
+                    if (piece.vertices.empty()) continue;
+                    bool hasColour = false, allZero = true;
+                    for (const tr::VertexElement& e : piece.layout) hasColour = hasColour || (e.usage == 10 && e.usageIndex == 0);
+                    for (const tr::GeoVertex& v : piece.vertices) allZero = allZero && v.colour == 0;
+                    if (!hasColour || !allZero) continue;
+                    ++byName[tr::toLowerAscii(piece.boneName) + " | " + piece.effectName];
+                    std::printf("zero-colour piece: %s bone '%s' group '%s' %s (%zu vertices)\n", name.c_str(), piece.boneName.c_str(),
+                                piece.swapGroup.c_str(), piece.effectName.c_str(), piece.vertices.size());
+                }
+            }
+            for (const auto& n : byName) std::printf("zero-colour summary: %4zu  %s\n", n.second, n.first.c_str());
+        }
+        // RASA_LISTPARTICLES=1: the map entities whose models carry particle systems, with their positions.
+        if (envValue("RASA_LISTPARTICLES")) {
+            std::map<std::string, std::vector<tr::ParticleAttachment>> byMesh;
+            for (const tr::MapEntity& e : map.map.entities) {
+                const std::string mesh = data.classMeshName(e.classId);
+                if (mesh.empty() || byMesh.count(mesh)) continue;
+                try {
+                    byMesh[mesh] = tr::particleAttachments(tr::readGeo(assets.read(mesh)));
+                } catch (const std::exception&) {
+                    byMesh[mesh] = {};
+                }
+            }
+            for (size_t k = 0; k < map.map.entities.size(); ++k) {
+                const tr::MapEntity& e = map.map.entities[k];
+                const auto found = byMesh.find(data.classMeshName(e.classId));
+                if (found == byMesh.end()) continue;
+                for (const tr::ParticleAttachment& a : found->second)
+                    std::printf("particles: entity %zu %s at %.1f %.1f %.1f: cp %u %s\n", k, found->first.c_str(), e.location.x, e.location.y,
+                                e.location.z, a.contactPoint, a.file.c_str());
+            }
         }
         // Optional server content: set RASA_DB to a Rasa.NET World database.
         std::unique_ptr<WorldDatabase> database;
@@ -87,6 +177,11 @@ int main(int argc, char** argv) {
                         content.teleporters.size(), content.objects.size(), content.mapLinks.size());
         }
         scene.loadPending(1e9);
+        {
+            size_t layer6 = 0;
+            for (size_t k = 0; k < map.map.entities.size(); ++k) layer6 += scene.entityCullingLayer(k) == 6 ? 1 : 0;
+            std::printf("entities on culling layer 6 (never drawn): %zu\n", layer6);
+        }
         std::printf("models: %zu loaded, %zu failed, %zu total; textures %zu\n", scene.modelsLoaded(), scene.modelsFailed(), scene.modelsTotal(), scene.texturesLoaded());
         ViewCamera& cam = scene.camera();
         cam.position = tr::Vec3{float(std::atof(argv[7])), float(std::atof(argv[8])), float(std::atof(argv[9]))};
@@ -99,8 +194,19 @@ int main(int argc, char** argv) {
             std::printf("sky at the camera: %s%s; hemi top %.2f %.2f %.2f, sun %.2f %.2f %.2f\n", scene.skies()[std::min(scene.activeSkyIndex(), scene.skies().size() - 1)].name.c_str(),
                         scene.skyFromRegion() ? " (by region)" : "", active.hemiTop.x, active.hemiTop.y, active.hemiTop.z, active.sunFront.x, active.sunFront.y, active.sunFront.z);
         }
+        // Particle systems: started (with their warm-up) and run for RASA_PARTICLES seconds more (default 0.5);
+        // RASA_NOPARTICLES=1 leaves them out.
+        if (envValue("RASA_NOPARTICLES")) scene.showParticles = false;
+        if (envValue("RASA_NOTERRAIN")) scene.showTerrain = false;
+        if (envValue("RASA_TWOSIDED")) renderer.cullBackFaces = false;
+        if (envValue("RASA_NOENTITIES")) scene.showEntities = false;
+        const float particleSeconds = envValue("RASA_PARTICLES") ? float(std::atof(envValue("RASA_PARTICLES"))) : 0.5f;
+        scene.advanceParticles(0.0f);
+        for (float t = 0; t < particleSeconds; t += 1.0f / 30.0f) scene.advanceParticles(1.0f / 30.0f);
+        std::printf("particle systems running: %zu, %zu particles\n", scene.liveParticleSystems(), scene.liveParticles());
+        for (const auto& e : scene.textureErrors()) std::printf("texture error: %s: %s\n", e.first.c_str(), e.second.c_str());
         scene.queueDraws(Selection{});
-        std::printf("draws queued: %zu (entities drawn %zu)\n", renderer.queuedDraws(), scene.drawnEntities());
+        std::printf("draws queued: %zu (entities drawn %zu), particle vertices %zu\n", renderer.queuedDraws(), scene.drawnEntities(), renderer.queuedParticleVertices());
         {
             tr::Vec3 rayOrigin, rayDirection, ground;
             scene.viewRay(0.0f, 0.0f, rayOrigin, rayDirection);

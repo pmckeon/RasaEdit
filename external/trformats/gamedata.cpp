@@ -726,6 +726,11 @@ std::string GameData::classMeshName(int32_t classId) {
     return meshId < 0 ? "" : stringById(meshId);
 }
 
+int32_t GameData::classCullingLayer(int32_t classId) {
+    const py::Object* layer = py::item(py::dictGet(global("generated.client.vizsetting", "lookup"), classId), 2);
+    return py::isInt(layer) ? int32_t(py::asInt(layer)) : 3;
+}
+
 std::string GameData::mapTemplateName(int32_t templateId) {
     return py::asString(py::dictGet(global("generated.client.maptemplate", "lookup"), templateId));
 }

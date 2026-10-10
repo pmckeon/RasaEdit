@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Avatar.h"
+#include "ParticleSim.h"
 #include "Renderer.h"
 #include "assetlibrary.h"
 #include "sky.h"
@@ -9,6 +10,7 @@
 #include <deque>
 #include <map>
 #include <functional>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -44,15 +46,25 @@ inline bool sameSelection(const Selection& a, const Selection& b) { return a.kin
 class SceneView {
 public:
     // meshForClass returns the .geo name for an entity class ("" if none / unknown);
-    // classKnown says whether the class exists in the game data.
+    // classKnown says whether the class exists in the game data; cullingLayerForClass gives the class's vizsetting
+    // culling layer (nullptr: 3). An entity's layer is the map's cullLayer when non-zero, else its class's; layer 6 is
+    // never drawn by the game (World::AddToWorld skips the graphics scene), so such entities get only their box.
     SceneView(Renderer& renderer, const tr::AssetLibrary& assets, const tr::MapBundle& map,
-              std::function<std::string(int32_t)> meshForClass, std::function<bool(int32_t)> classKnown, uint32_t terrainStep = 2);
+              std::function<std::string(int32_t)> meshForClass, std::function<bool(int32_t)> classKnown,
+              std::function<int32_t(int32_t)> cullingLayerForClass = nullptr, uint32_t terrainStep = 2);
+    // The culling layer an entity ends up on (see above).
+    int32_t entityCullingLayer(size_t entityIndex) const { return entityIndex < placements_.size() ? placements_[entityIndex].cullingLayer : 0; }
     ~SceneView();
     SceneView(const SceneView&) = delete;
     SceneView& operator=(const SceneView&) = delete;
 
     // Loads queued models for up to budgetSeconds (call between frames).
     void loadPending(double budgetSeconds);
+    // Runs the particle systems of map entities within particleDistance of the camera for dt seconds (call once per
+    // frame). New ones are warmed up first so steady effects do not start empty.
+    void advanceParticles(float dt);
+    size_t liveParticleSystems() const { return liveParticles_.size(); }
+    size_t liveParticles() const;
     size_t modelsLoaded() const { return modelsLoaded_; }
     size_t texturesLoaded() const;
     // Textures that could not be used, with the reason (missing from the archives, unsupported format...).
@@ -92,6 +104,8 @@ public:
     bool showEntities = true;
     bool showPlaceholders = true;
     bool showEffects = true;
+    bool showParticles = true;          // particle systems attached to models (.pfx on "psys" contact points)
+    float particleDistance = 200.0f;
     bool showServer = true;             // spawn pools, teleporters, links, objects
     bool showRegions = false;           // map regions (large outlines)
     bool showMissionAreas = true;
@@ -119,6 +133,10 @@ public:
     bool showFog = true;                    // distance fog in the sky colour (the .sky's own "Used" flag is false everywhere)
     bool showMapLights = true;              // the map's lights.xml (up to 16 nearest the camera)
     bool showLightBuffer = false;
+    std::unordered_map<std::string, int> globeIndex_;    // lower-case GlobeMapFile -> cube index (1-based; 0 = none)
+    std::string globeErrors_;
+    void loadGlobeMaps();
+    float lightColourGamma = 1;             // experiment: placed light colours raised to this power (2.2 = sRGB -> linear)
     float ambientScale = 1;                 // debug/experiment: multiplies the sky's hemisphere light           // debug: draw 0.2 x light like the game's /dl_showlight
     bool showSun = true;                    // the sky's sun/moon
     bool showShadows = true;                // sun shadows
@@ -144,12 +162,14 @@ private:
         bool flesh = false;                    // swap group "flesh": hued with the skin colour
         uint32_t swapId = 0;                   // avatar swap set (0: not swappable)
         bool aniso = false;                    // TRAdditiveAnisoSpec* effect (holograms): drawn with anisoMaterial
+        bool twoSided = false;                 // the effect sets CULLMODE = NONE (PalDiffMap, TRDiffMapNoLight, TRLava, TRBeam)
         AnisoMaterial anisoMaterial;           // textures owned by textures_
     };
     struct Model {
         std::vector<ModelPiece> pieces;
         std::vector<tr::Vec3> positions;        // CPU copy of all pieces (model space) for picking
         std::vector<uint32_t> triangles;
+        std::vector<uint8_t> triangleTwoSided;  // per triangle: hit from either side (two-sided effect)
         tr::Bounds bounds{tr::Vec3{-0.5f, 0, -0.5f}, tr::Vec3{0.5f, 2, 0.5f}};   // from the geometry once loaded
         bool loaded = false;
         bool failed = false;
@@ -157,6 +177,11 @@ private:
         bool hasSolid = false;                 // at least one non-additive piece
         bool hasWater = false;
         std::string failure;
+        struct ParticleMount {                 // a .pfx on a contact point
+            Mat4 local;                        // contact point frame in model space (bone bind pose x point)
+            std::string file;
+        };
+        std::vector<ParticleMount> particles;
     };
     struct Placement {
         Mat4 world;                 // entity placement
@@ -166,6 +191,8 @@ private:
         Model* model = nullptr;     // nullptr: no mesh
         bool classKnown = true;
         bool hasBounds = false;
+        int32_t cullingLayer = 3;   // map cullLayer, else the class's vizsetting layer
+        bool neverDrawn = false;    // culling layer 6
     };
 
     struct AvatarDraw {                 // one suit's pieces of one swap set
@@ -223,6 +250,20 @@ private:
     std::function<std::string(int32_t)> serverMeshForClass_;
     AvatarResolver serverAvatarFor_;
     std::unordered_map<std::string, Model> models_;
+    struct ParticleFile {
+        bool loaded = false;
+        std::string error;
+        tr::ParticleSystem system;
+    };
+    std::unordered_map<std::string, ParticleFile> particleFiles_;   // lower-case .pfx name
+    const tr::ParticleSystem* particleSystem(const std::string& file);
+    struct LiveParticles {
+        size_t placement = 0;
+        size_t mount = 0;
+        std::unique_ptr<ParticleInstance> instance;
+    };
+    std::vector<LiveParticles> liveParticles_;
+    std::vector<MeshVertex> particleScratch_;
     std::deque<std::string> pending_;
     std::vector<Placement> placements_;
     size_t modelsLoaded_ = 0;

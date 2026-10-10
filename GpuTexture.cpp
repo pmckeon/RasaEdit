@@ -190,6 +190,17 @@ SDL_GPUTexture* uploadDdsTexture(SDL_GPUDevice* device, const tr::Bytes& dds) {
     return uploadRgbaTextureMipmapped(device, pixels, decoded.width, decoded.height);
 }
 
+SDL_GPUTexture* uploadRgbaCubeArray(SDL_GPUDevice* device, const std::vector<std::vector<tr::Rgba8>>& faces, uint32_t size) {
+    const uint32_t count = uint32_t(faces.size());
+    SDL_GPUTexture* texture = createTexture(device, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, SDL_GPU_TEXTURETYPE_CUBE_ARRAY, size, size, count,
+                                            mipCount(size, size));
+    std::vector<uint8_t> blob;
+    std::vector<Region> regions;
+    for (uint32_t layer = 0; layer < count; ++layer) appendMipChain(blob, regions, faces[layer], size, size, layer);
+    uploadRegions(device, texture, blob, regions);
+    return texture;
+}
+
 SDL_GPUTexture* uploadRgbaArray(SDL_GPUDevice* device, const std::vector<std::vector<tr::Rgba8>>& layers, uint32_t size) {
     const uint32_t count = std::max<uint32_t>(1, uint32_t(layers.size()));
     SDL_GPUTexture* texture = createTexture(device, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, SDL_GPU_TEXTURETYPE_2D_ARRAY, size, size, count,

@@ -1,5 +1,7 @@
 #include "SceneView.h"
 #include "GpuTexture.h"
+#include "dds.h"
+#include "MarkerColours.h"
 
 #include <algorithm>
 #include <chrono>
@@ -165,7 +167,8 @@ void unitCube(std::vector<MeshVertex>& vertices, std::vector<uint32_t>& triangle
 }  // namespace
 
 SceneView::SceneView(Renderer& renderer, const tr::AssetLibrary& assets, const tr::MapBundle& map,
-                     std::function<std::string(int32_t)> meshForClass, std::function<bool(int32_t)> classKnown, uint32_t terrainStep)
+                     std::function<std::string(int32_t)> meshForClass, std::function<bool(int32_t)> classKnown,
+                     std::function<int32_t(int32_t)> cullingLayerForClass, uint32_t terrainStep)
     : renderer_(renderer), assets_(assets), map_(map) {
     std::vector<MeshVertex> vertices;
     std::vector<uint32_t> triangles, lines;
@@ -216,7 +219,9 @@ SceneView::SceneView(Renderer& renderer, const tr::AssetLibrary& assets, const t
         p.centre = transformPoint(p.world, localCentre);
         p.radius = std::max(0.5f, length(subtract(bounds.max, bounds.min)) * 0.5f * e.scale);
         p.classKnown = classKnown(e.classId);
-        const std::string mesh = meshForClass(e.classId);
+        p.cullingLayer = e.cullLayer != 0 ? e.cullLayer : cullingLayerForClass ? cullingLayerForClass(e.classId) : 3;
+        p.neverDrawn = p.cullingLayer == 6;
+        const std::string mesh = p.neverDrawn ? std::string() : meshForClass(e.classId);
         // Animated objects ship an animation named like their model (npc_eloh_hologram_large.geo/.anm,
         // arch_eloh_hologram_platform_v01.geo/.anm, ...): pose them in its first frame. Without it the hologram's
         // skinned pieces collapse into a column.
@@ -244,6 +249,7 @@ SceneView::SceneView(Renderer& renderer, const tr::AssetLibrary& assets, const t
     if (!map_.lightsXml.empty()) {
         try {
             mapLights_ = tr::readLights(map_.lightsXml);
+            loadGlobeMaps();
         } catch (const std::exception& e) {
             mapLightsError_ = e.what();
         }
@@ -369,7 +375,8 @@ SceneLighting SceneView::lighting() const {
         // Fade start distance: the engine sets LightFalloff = (1 - falloff) * LightRange (tabula_rasa.exe FUN_00879150 /
         // FUN_00875360), i.e. FalloffPercent is the outer part of the range that fades (0.25: full to 75%, then fade).
         // That the field is FalloffPercent is inferred from its name and use (the serializer's offsets are unclear).
-        l.localColour[i] = Vec4f{light.colour.x * light.intensity, light.colour.y * light.intensity, light.colour.z * light.intensity,
+        const tr::Vec3 c{std::pow(light.colour.x, lightColourGamma), std::pow(light.colour.y, lightColourGamma), std::pow(light.colour.z, lightColourGamma)};
+        l.localColour[i] = Vec4f{c.x * light.intensity, c.y * light.intensity, c.z * light.intensity,
                                  (1.0f - std::clamp(light.falloffPercent, 0.0f, 1.0f)) * light.range};
         if (light.kind == tr::PlacedLight::Kind::Spot) {
             const tr::Vec3 d = normalized(light.direction());
@@ -379,8 +386,46 @@ SceneLighting SceneView::lighting() const {
         } else {
             l.localSpot[i] = Vec4f{0, -1, 0, -2.0f};       // point (plane lights approximated as points)
         }
+        const auto globe = light.globeMap.empty() ? globeIndex_.end() : globeIndex_.find(tr::toLowerAscii(light.globeMap));
+        l.localSpotInner[i].y = globe == globeIndex_.end() ? 0.0f : float(globe->second);
+        const tr::Quat& q = light.worldOrientation;
+        l.localRotation[i] = Vec4f{q.x, q.y, q.z, q.w};
     }
     return l;
+}
+
+// The globe cube maps the map's lights use: each DDS cube (6 faces of mip chains, DXT) decoded face by face to RGBA,
+// resized to 64 x 64, uploaded as one cube map array.
+void SceneView::loadGlobeMaps() {
+    constexpr uint32_t size = 64;
+    std::vector<std::vector<tr::Rgba8>> faces;
+    for (const tr::PlacedLight& light : mapLights_) {
+        if (light.globeMap.empty()) continue;
+        const std::string name = tr::toLowerAscii(light.globeMap);
+        if (globeIndex_.count(name)) continue;
+        try {
+            const tr::Bytes file = assets_.read(name);
+            const tr::DdsHeader header = tr::readDdsHeader(file);
+            const std::vector<tr::DdsLevel> levels = tr::ddsCompressedLevels(file, header);
+            if (levels.empty()) throw std::runtime_error("not a block-compressed DDS");
+            size_t faceBytes = 0;
+            for (const tr::DdsLevel& level : levels) faceBytes += level.size;
+            if (file.size() < 128 + 6 * faceBytes) throw std::runtime_error("not a cube map");
+            for (uint32_t face = 0; face < 6; ++face) {
+                tr::Bytes one(file.begin(), file.begin() + 128);
+                one.insert(one.end(), file.begin() + 128 + face * faceBytes, file.begin() + 128 + (face + 1) * faceBytes);
+                tr::DdsHeader h;
+                std::vector<tr::Rgba8> rgba = tr::decodeDds(one, h);
+                if (h.width != size || h.height != size) rgba = resizeRgba(rgba, h.width, h.height, size, size);
+                faces.push_back(std::move(rgba));
+            }
+            globeIndex_[name] = int(faces.size() / 6);
+        } catch (const std::exception& e) {
+            globeErrors_ += name + ": " + e.what() + "\n";
+            globeIndex_[name] = 0;
+        }
+    }
+    renderer_.setGlobeMaps(faces, size);
 }
 
 SceneLighting SceneView::skyLightingAt() const {
@@ -719,6 +764,10 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 part.flesh = tr::toLowerAscii(piece.swapGroup) == "flesh";
                 part.swapId = piece.swapId;
                 part.additive = additive;
+                // Effects whose (non-debug) passes set CULLMODE = NONE, from the compiled effects in effects.glm (fx_2_0
+                // state tables, 2026-10-10): every other model effect keeps PalGlobalEffect's CCW (back faces culled).
+                part.twoSided = effect.rfind("paldiffmap.", 0) == 0 || effect.rfind("trdiffmapnolight.", 0) == 0 ||
+                                effect.rfind("trlava.", 0) == 0 || effect.rfind("trbeam.", 0) == 0;
                 if (aniso) {
                     part.aniso = true;
                     AnisoMaterial& m = part.anisoMaterial;
@@ -739,9 +788,29 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 const uint32_t base = uint32_t(model.positions.size());
                 for (const MeshVertex& v : vertices) model.positions.push_back(tr::Vec3{v.positionX, v.positionY, v.positionZ});
                 for (size_t k = 0; k + 2 < piece.indices.size(); k += 3)
-                    if (piece.indices[k] < vertices.size() && piece.indices[k + 1] < vertices.size() && piece.indices[k + 2] < vertices.size())
+                    if (piece.indices[k] < vertices.size() && piece.indices[k + 1] < vertices.size() && piece.indices[k + 2] < vertices.size()) {
                         model.triangles.insert(model.triangles.end(), {base + piece.indices[k], base + piece.indices[k + 1], base + piece.indices[k + 2]});
+                        model.triangleTwoSided.push_back(part.twoSided ? 1 : 0);
+                    }
             }
+        }
+        // Particle systems on contact points ("psys" "<cp>,<file>.pfx"): the point's frame, on its bone's bind pose.
+        for (const tr::ParticleAttachment& a : tr::particleAttachments(geo)) {
+            const tr::GeoContactPoint* cp = tr::findContactPoint(geo, a.contactPoint);
+            if (!cp) continue;                 // 7 of the shipped references name a point the model lacks
+            Mat4 local = rotationMatrix(cp->rotation);
+            local.row0.w = cp->position.x;
+            local.row1.w = cp->position.y;
+            local.row2.w = cp->position.z;
+            if (cp->bone >= 0 && size_t(cp->bone) < geo.bones.size()) {
+                Mat4 bind = identityMatrix();
+                for (int32_t b = cp->bone; b >= 0 && size_t(b) < geo.bones.size(); b = geo.bones[size_t(b)].parent >= b ? -1 : geo.bones[size_t(b)].parent) {
+                    const tr::GeoBone& bone = geo.bones[size_t(b)];
+                    bind = multiply(boneLocal(bone.translation, bone.rotation, bone.scale), bind);
+                }
+                local = multiply(bind, local);
+            }
+            model.particles.push_back(Model::ParticleMount{local, a.file});
         }
         model.effectOnly = !model.hasSolid && effectPieces > 0;
         if (!model.positions.empty()) {
@@ -768,6 +837,62 @@ void SceneView::loadPending(double budgetSeconds) {
         loadModel(name, models_[name]);
         if (std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() > budgetSeconds) break;
     }
+}
+
+const tr::ParticleSystem* SceneView::particleSystem(const std::string& file) {
+    ParticleFile& f = particleFiles_[tr::toLowerAscii(file)];
+    if (!f.loaded && f.error.empty()) {
+        try {
+            f.system = tr::readParticleSystem(assets_.read(file));
+            f.loaded = true;
+        } catch (const std::exception& e) {
+            f.error = e.what();
+            SDL_Log("particle system %s: %s", file.c_str(), e.what());
+        }
+    }
+    return f.loaded ? &f.system : nullptr;
+}
+
+size_t SceneView::liveParticles() const {
+    size_t n = 0;
+    for (const LiveParticles& l : liveParticles_) n += l.instance->particleCount();
+    return n;
+}
+
+void SceneView::advanceParticles(float dt) {
+    if (!showParticles || !showEntities) {
+        liveParticles_.clear();
+        return;
+    }
+    dt = std::clamp(dt, 0.0f, 0.1f);
+    // Drop systems the camera has left behind (with some slack so they do not flicker at the edge).
+    const float keep = particleDistance * 1.25f;
+    liveParticles_.erase(std::remove_if(liveParticles_.begin(), liveParticles_.end(), [&](const LiveParticles& l) {
+                             const tr::Vec3 d = subtract(placements_[l.placement].centre, camera_.position);
+                             return dot(d, d) > keep * keep;
+                         }),
+                         liveParticles_.end());
+    std::vector<uint8_t> live(placements_.size(), 0);
+    for (const LiveParticles& l : liveParticles_) live[l.placement] = 1;
+    for (size_t k = 0; k < placements_.size(); ++k) {
+        const Placement& p = placements_[k];
+        if (live[k] || !p.model || !p.model->loaded || p.model->particles.empty()) continue;
+        const tr::Vec3 d = subtract(p.centre, camera_.position);
+        if (dot(d, d) > particleDistance * particleDistance) continue;
+        for (size_t m = 0; m < p.model->particles.size(); ++m) {
+            const tr::ParticleSystem* system = particleSystem(p.model->particles[m].file);
+            if (!system) continue;
+            LiveParticles l;
+            l.placement = k;
+            l.mount = m;
+            l.instance = std::make_unique<ParticleInstance>(*system, multiply(p.world, p.model->particles[m].local), uint32_t(k * 7919u + m * 104729u + 1u));
+            // Warm-up: 3 s at 30 steps per second, so looping effects are already running (the files' own warm-up
+            // fields are not understood).
+            for (int step = 0; step < 90; ++step) l.instance->update(1.0f / 30.0f);
+            liveParticles_.push_back(std::move(l));
+        }
+    }
+    for (LiveParticles& l : liveParticles_) l.instance->update(dt);
 }
 
 // ------------------------------------------------------------------------------------------
@@ -830,11 +955,11 @@ void SceneView::queueDraws(const Selection& selection) {
                     if (piece.additive) continue;
                     if (piece.water) renderer_.drawTranslucent(piece.mesh, p.world, waterTint(selected));
                     else renderer_.draw(piece.mesh, p.world, scaledTint(tint, piece.colourScale), true, showTextures ? piece.texture : nullptr, showTextures && piece.alphaTest,
-                                        Vec4f{0, 0, 0, 0}, showTextures ? piece.glow : nullptr);
+                                        Vec4f{0, 0, 0, 0}, showTextures ? piece.glow : nullptr, piece.twoSided);
                 }
             } else if (p.model && p.model->loaded && p.model->effectOnly) {
                 // Effect-only entity (particle emitters, light cones): with Placeholders on, a cyan wireframe of its bounds.
-                if (showEffects && showPlaceholders && p.hasBounds && !selected) renderer_.draw(unitBoxLines_, p.boxWorld, Vec4f{0.3f, 0.9f, 1.0f, 1}, false);
+                if (showEffects && showPlaceholders && p.hasBounds && !selected) renderer_.draw(unitBoxLines_, p.boxWorld, markerColour::placeholder, false);
             } else if (showPlaceholders && p.hasBounds) {
                 // Wireframe, so large invisible volumes don't hide the scene.
                 // Red: unknown class; orange: model failed to load or is missing; blue: class has no model.
@@ -845,8 +970,25 @@ void SceneView::queueDraws(const Selection& selection) {
         }
     }
 
+    // Particle systems (camera-facing sprites need the view's axes).
+    if (showEntities && showParticles) {
+        const tr::Vec3 right = camera_.right(), up = camera_.up();
+        for (const LiveParticles& l : liveParticles_) {
+            const Placement& p = placements_[l.placement];
+            if (!visible(p.centre, p.radius + 30.0f)) continue;          // effects reach beyond the model's bounds
+            const tr::ParticleSystem& system = l.instance->system();
+            for (size_t g = 0; g < system.groups.size(); ++g) {
+                particleScratch_.clear();
+                l.instance->buildQuads(g, right, up, particleScratch_);
+                if (particleScratch_.empty()) continue;
+                const tr::ParticleGroup& group = system.groups[g];
+                renderer_.drawParticles(particleScratch_, showTextures && !group.texture.empty() ? texture(group.texture) : nullptr, tr::particleBlendType(group));
+            }
+        }
+    }
+
     // Server content (World database).
-    const Vec4f highlight{1.0f, 0.85f, 0.1f, 1};
+    const Vec4f highlight = markerColour::selected;
     const float maxDistance2 = drawDistance * drawDistance;
     for (const ServerPlacement& s : serverPlacements_) {
         const SelectionKind kind = s.selection.kind;
@@ -886,7 +1028,7 @@ void SceneView::queueDraws(const Selection& selection) {
                 }
                 const Vec4f hue = !showTextures || !piece.hued ? Vec4f{0, 0, 0, 0} : piece.flesh ? s.skinHue : partHue;
                 renderer_.draw(piece.mesh, s.world, scaledTint(tint, piece.colourScale), true, showTextures ? piece.texture : nullptr, showTextures && piece.alphaTest, hue,
-                               showTextures ? piece.glow : nullptr);
+                               showTextures ? piece.glow : nullptr, piece.twoSided);
             };
             // Avatars: the base suit minus the swap sets replaced by loaded parts, then each part's swap set
             // from its suit (a part still loading, or failed, leaves the base pieces in place).
@@ -943,6 +1085,50 @@ float rayTriangle(const tr::Vec3& origin, const tr::Vec3& direction, const tr::V
     const float v = dot(direction, q) * inverse;
     if (v < 0.0f || u + v > 1.0f) return -1.0f;
     return dot(edge2, q) * inverse;
+}
+
+}  // namespace
+
+namespace {
+
+// Picking a drawn box outline: the ray must pass within a few pixels of one of the box's 12 edges (front or back - the
+// back edges are drawn too). Clicks inside the outline go through to whatever is behind it, so a marker box never hides
+// the model it stands on. origin/dir are in the box's local space with |dir| = 1 / scale, so the ray parameter t is the
+// world distance and local lengths x scale are world lengths; tolerance: 1.2 % of the distance, at least 5 cm.
+bool rayHitsBoxOutline(const tr::Vec3& origin, const tr::Vec3& dir, const tr::Vec3& lo, const tr::Vec3& hi, float scale, float& t) {
+    bool hit = false;
+    float best = 1e30f;
+    const float dd = dot(dir, dir);
+    if (dd < 1e-18f) return false;
+    for (uint32_t axis = 0; axis < 3; ++axis) {               // edges along this axis: 4 per axis
+        const uint32_t a1 = (axis + 1) % 3, a2 = (axis + 2) % 3;
+        for (uint32_t corner = 0; corner < 4; ++corner) {
+            float start[3], end[3];
+            start[axis] = tr::component(lo, axis);
+            end[axis] = tr::component(hi, axis);
+            start[a1] = end[a1] = (corner & 1) ? tr::component(hi, a1) : tr::component(lo, a1);
+            start[a2] = end[a2] = (corner & 2) ? tr::component(hi, a2) : tr::component(lo, a2);
+            const tr::Vec3 q0{start[0], start[1], start[2]};
+            const tr::Vec3 e = subtract(tr::Vec3{end[0], end[1], end[2]}, q0);
+            // Closest points of the ray origin + s dir (s > 0) and the segment q0 + u e (u in 0..1).
+            const tr::Vec3 w0 = subtract(origin, q0);
+            const float b = dot(dir, e), c = dot(e, e), d = dot(dir, w0), f = dot(e, w0);
+            const float denom = dd * c - b * b;
+            float sRay = denom > 1e-12f ? (b * f - c * d) / denom : 0.0f;
+            float u = c > 1e-12f ? (b * sRay + f) / c : 0.0f;
+            u = std::clamp(u, 0.0f, 1.0f);
+            sRay = std::max(0.0f, (dot(e, scaled(dir, 1.0f)) * u - d) / dd);
+            const tr::Vec3 gap = subtract(add(origin, scaled(dir, sRay)), add(q0, scaled(e, u)));
+            const float distance = length(gap) * scale;
+            const float tolerance = std::max(0.05f, sRay * 0.012f);
+            if (sRay > 0.0f && distance <= tolerance && sRay < best) {
+                best = sRay;
+                hit = true;
+            }
+        }
+    }
+    if (hit) t = best;
+    return hit;
 }
 
 }  // namespace
@@ -1012,8 +1198,13 @@ Selection SceneView::pick(float ndcX, float ndcY, bool pickEntities, bool pickSe
                 }
             }
         } else {
-            bestT = c.t;
-            best = int(c.index);
+            // Placeholder / effect boxes: by their outline (see rayHitsBoxOutline).
+            const tr::MapEntity& e = map_.map.entities[c.index];
+            float t = 0;
+            if (rayHitsBoxOutline(c.origin, c.dir, e.bounds.min, e.bounds.max, e.scale != 0 ? e.scale : 1.0f, t) && t < bestT) {
+                bestT = t;
+                best = int(c.index);
+            }
         }
     }
     Selection result;
@@ -1044,7 +1235,29 @@ Selection SceneView::pick(float ndcX, float ndcY, bool pickEntities, bool pickSe
             };
             hit = rayHitsModel(*s.model, toLocal(subtract(camera_.position, s.position)), toLocal(direction), t);
         } else {
-            hit = raySphere(tr::Vec3{s.position.x, s.position.y + 1.0f, s.position.z}, std::max(1.5f, std::min(s.ringRadius, 3.0f)), t);
+            // Model-less markers: their drawn box (1 x 2 x 1 m) by its outline, so a marker on top of an NPC (the
+            // Bootcamp hospital respawn point on Doctor Maisha) does not take the clicks meant for the NPC.
+            const Mat4& w = s.world;
+            auto toLocal = [&](const tr::Vec3& v) {
+                return tr::Vec3{w.row0.x * v.x + w.row1.x * v.y + w.row2.x * v.z, w.row0.y * v.x + w.row1.y * v.y + w.row2.y * v.z,
+                                w.row0.z * v.x + w.row1.z * v.y + w.row2.z * v.z};
+            };
+            hit = rayHitsBoxOutline(toLocal(subtract(camera_.position, s.position)), toLocal(direction), tr::Vec3{-0.5f, 0, -0.5f},
+                                    tr::Vec3{0.5f, 2, 0.5f}, 1.0f, t);
+        }
+        // The ring at the marker's foot (drawn at +0.15 m): a click within a few pixels of it selects the marker too.
+        if (!s.area && s.ringRadius > 0 && std::fabs(direction.y) > 1e-6f) {
+            const float ringY = s.position.y + 0.15f;
+            const float tRing = (ringY - camera_.position.y) / direction.y;
+            if (tRing > 0.0f && tRing < t) {
+                const tr::Vec3 p = add(camera_.position, scaled(direction, tRing));
+                const float dx = p.x - s.position.x, dz = p.z - s.position.z;
+                const float tolerance = std::max(0.05f, tRing * 0.012f);
+                if (std::fabs(std::sqrt(dx * dx + dz * dz) - s.ringRadius) <= tolerance) {
+                    t = tRing;
+                    hit = true;
+                }
+            }
         }
         if (hit && t < bestT && t < drawDistance) {
             bestT = t;
@@ -1074,6 +1287,10 @@ bool SceneView::rayHitsModel(const Model& model, const tr::Vec3& origin, const t
     const std::vector<tr::Vec3>& v = model.positions;
     const std::vector<uint32_t>& tri = model.triangles;
     for (size_t k = 0; k + 2 < tri.size(); k += 3) {
+        // With back-face culling, only what is drawn can be hit (e.g. not the outward-facing light barrier box around
+        // the Caves of Donn room, seen from inside).
+        const bool twoSided = k / 3 < model.triangleTwoSided.size() && model.triangleTwoSided[k / 3] != 0;
+        if (renderer_.cullBackFaces && !twoSided && dot(cross(subtract(v[tri[k + 1]], v[tri[k]]), subtract(v[tri[k + 2]], v[tri[k]])), dir) >= 0.0f) continue;
         const float hitT = rayTriangle(origin, dir, v[tri[k]], v[tri[k + 1]], v[tri[k + 2]]);
         if (hitT > 0.0f && hitT < t) {
             t = hitT;
@@ -1222,7 +1439,7 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
             for (const AvatarPart& part : look.parts)
                 s.avatarParts.push_back(AvatarDraw{modelFor(part.mesh, look.poseAnimation, look.baseMesh), part.swapsetId, hueFromAbgr(part.colour)});
         }
-        s.colour = vendor ? Vec4f{1.0f, 0.8f, 0.2f, 1} : npc ? Vec4f{0.35f, 1.0f, 0.45f, 1} : Vec4f{1.0f, 0.35f, 0.3f, 1};
+        s.colour = vendor ? markerColour::vendor : npc ? markerColour::npc : markerColour::hostileCreature;
         s.ringRadius = std::max(pool.radius, 1.5f);
         s.facing = true;
         serverPlacements_.push_back(s);
@@ -1234,7 +1451,7 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
         s.position = t.position;
         s.world = yawPlacement(t.position, t.rotation);
         s.model = modelFor(meshForClass(t.classId));
-        s.colour = Vec4f{0.3f, 0.9f, 1.0f, 1};
+        s.colour = markerColour::teleporter;
         s.ringRadius = 2.0f;
         s.facing = true;
         serverPlacements_.push_back(s);
@@ -1246,7 +1463,7 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
         s.position = o.position;
         s.world = yawPlacement(o.position, o.rotation);
         s.model = modelFor(meshForClass(o.classId));
-        s.colour = Vec4f{1.0f, 0.95f, 0.3f, 1};
+        s.colour = markerColour::object;
         s.ringRadius = 1.5f;
         s.facing = o.kind != ObjectKind::Logos;
         serverPlacements_.push_back(s);
@@ -1257,7 +1474,7 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
         s.selection = Selection{SelectionKind::MapLink, k};
         s.position = l.position;
         s.world = yawPlacement(l.position, 0);
-        s.colour = l.enabled ? Vec4f{1.0f, 0.35f, 1.0f, 1} : Vec4f{0.6f, 0.4f, 0.6f, 1};
+        s.colour = l.enabled ? markerColour::mapLink : markerColour::mapLinkDisabled;
         s.ringRadius = std::max(l.radius, 1.0f);
         serverPlacements_.push_back(s);
     }
@@ -1267,7 +1484,7 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
         s.area = true;
         s.shape = content->regions[k].area;
         s.position = s.shape.position;
-        s.colour = content->regions[k].underground ? Vec4f{0.6f, 0.5f, 0.95f, 1} : Vec4f{0.4f, 0.85f, 0.4f, 1};
+        s.colour = content->regions[k].underground ? markerColour::regionUnderground : markerColour::region;
         serverPlacements_.push_back(s);
     }
     for (size_t k = 0; k < content->missionAreas.size(); ++k) {
@@ -1276,7 +1493,7 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
         s.area = true;
         s.shape = content->missionAreas[k].area;
         s.position = s.shape.position;
-        s.colour = Vec4f{1.0f, 0.6f, 0.2f, 1};
+        s.colour = markerColour::missionArea;
         serverPlacements_.push_back(s);
     }
 }
@@ -1285,6 +1502,7 @@ std::string SceneView::modelStatus(size_t entityIndex) const {
     if (entityIndex >= placements_.size()) return "";
     const Placement& p = placements_[entityIndex];
     if (!p.classKnown) return "unknown class (not in the game data)";
+    if (p.neverDrawn) return "never drawn in game (culling layer 6: sound emitters, stand-ins)";
     if (!p.model) return "class has no model";
     const Model& m = *p.model;
     if (m.failed) return "model failed to load: " + m.failure;

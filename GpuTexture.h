@@ -19,6 +19,8 @@ SDL_GPUTexture* uploadRgbaTextureMipmapped(SDL_GPUDevice* device, const std::vec
 SDL_GPUTexture* uploadDdsTexture(SDL_GPUDevice* device, const tr::Bytes& dds);
 // A 2D array of square RGBA8 layers (each size x size), mipmapped.
 SDL_GPUTexture* uploadRgbaArray(SDL_GPUDevice* device, const std::vector<std::vector<tr::Rgba8>>& layers, uint32_t size);
+// Cube map array: 6 faces per cube (+X, -X, +Y, -Y, +Z, -Z, as DDS stores them), each size x size RGBA8.
+SDL_GPUTexture* uploadRgbaCubeArray(SDL_GPUDevice* device, const std::vector<std::vector<tr::Rgba8>>& faces, uint32_t size);
 
 // CPU helpers.
 std::vector<tr::Rgba8> resizeRgba(const std::vector<tr::Rgba8>& source, uint32_t sourceWidth, uint32_t sourceHeight,

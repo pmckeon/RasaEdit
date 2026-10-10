@@ -1093,7 +1093,31 @@ GeoModel readGbod(ByteReader& r) {
         for (uint32_t k = 0; k < n; ++k) r.cstr();
     }
     model.bounds = readBbox(r);
-    skipChunk(r);                              // CPDG: contact point definitions
+    {
+        const Chunk points = expectChunk(r, fourcc("CPDG"));     // contact points
+        const uint32_t count = r.u32();
+        for (uint32_t k = 0; k < count; ++k) {
+            const Chunk point = expectChunk(r, fourcc("CPDF"));
+            GeoContactPoint cp;
+            cp.id = r.u32();
+            cp.bone = r.i32();
+            cp.rotation.x = r.f32();
+            cp.rotation.y = r.f32();
+            cp.rotation.z = r.f32();
+            cp.rotation.w = r.f32();
+            cp.position = r.vec3();
+            const uint32_t pairs = r.u32();
+            for (uint32_t p = 0; p < pairs; ++p) {
+                GeoParameter value;
+                value.key = r.cstr();
+                value.value = r.cstr();
+                cp.values.push_back(std::move(value));
+            }
+            r.seek(point.end);
+            model.contactPoints.push_back(std::move(cp));
+        }
+        r.seek(points.end);
+    }
     const uint32_t entries = r.u32();
     for (uint32_t k = 0; k < entries; ++k) {
         const int32_t id = r.i32();

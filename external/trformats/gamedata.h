@@ -152,6 +152,10 @@ public:
     std::string className(int32_t classId);                   // generated.client.entityclass [0]
     int32_t classMeshId(int32_t classId);                     // entityclass [1]; -1 if none
     std::string classMeshName(int32_t classId);               // mesh file name via the string table; "" if none
+    // generated.client.vizsetting [2] (cullingLayerType); 3 when the class has no row, as client/classmanager.py does.
+    // Layer 6 is never drawn: TRasa::World::AddToWorld (FUN_00543940) skips registering the body with the graphics
+    // scene (PalantirApp + 0x240, FUN_007fd5e0) when the body's culling layer is 6.
+    int32_t classCullingLayer(int32_t classId);
     std::string mapTemplateName(int32_t templateId);          // generated.client.maptemplate
     std::vector<int32_t> contextIdsForMapTemplate(int32_t templateId);   // generated.client.gamecontext [3]
     bool radarInfo(int32_t contextId, int32_t regionId, RadarInfo& info); // false if the context has no radar
