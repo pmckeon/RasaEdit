@@ -369,6 +369,7 @@ void ViewportPanel::applyOptions(const ViewSettings& view, SceneView& scene) con
     scene.showFog = view.fog;
     scene.showMapLights = view.mapLights;
     scene.showSun = view.sun;
+    scene.showShadows = view.shadows;
 }
 
 void ViewportPanel::focusOn(EditorContext& ctx, const Selection& selection) {
@@ -430,9 +431,17 @@ void ViewportPanel::draw(EditorContext& ctx, const char* title, Selection& selec
         for (int32_t r : c.regions) regions += (regions.empty() ? "" : ", ") + std::to_string(r);
         return c.name + "  (region " + regions + ")" + (c.loaded ? "" : "  - not usable");
     };
-    if (ImGui::BeginCombo("##sky", scene.skies().empty() ? "no region skies" : skyLabel(std::min(scene.skyIndex, scene.skies().size() - 1)).c_str())) {
+    const std::string comboLabel = scene.skies().empty() ? std::string("no region skies")
+                                 : scene.skyFromRegion() ? "by region: " + skyLabel(std::min(scene.activeSkyIndex(), scene.skies().size() - 1))
+                                                         : skyLabel(std::min(scene.skyIndex, scene.skies().size() - 1));
+    if (ImGui::BeginCombo("##sky", comboLabel.c_str())) {
+        if (ImGui::Selectable("By region (server regions at the camera)", scene.skyByRegion)) scene.skyByRegion = true;
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("As the game: the highest-priority region the camera is in that has a sky.\nNeeds the server's map_region volumes (a loaded World database).");
         for (size_t k = 0; k < scene.skies().size(); ++k) {
-            if (ImGui::Selectable(skyLabel(k).c_str(), k == scene.skyIndex)) scene.skyIndex = k;
+            if (ImGui::Selectable(skyLabel(k).c_str(), !scene.skyByRegion && k == scene.skyIndex)) {
+                scene.skyIndex = k;
+                scene.skyByRegion = false;
+            }
             if (!scene.skies()[k].loaded && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", scene.skies()[k].error.c_str());
         }
         ImGui::EndCombo();
@@ -453,7 +462,10 @@ void ViewportPanel::draw(EditorContext& ctx, const char* title, Selection& selec
     ImGui::Checkbox("Fog", &ctx.view.fog);
     ImGui::SameLine();
     ImGui::Checkbox("Sun", &ctx.view.sun);
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("The sky's sun or moon. The game shadows it; turn it off in caves.");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("The sky's sun or moon (caves get their own sky by region).");
+    ImGui::SameLine();
+    ImGui::Checkbox("Shadows", &ctx.view.shadows);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Sun shadows within 120 m of the camera; like the game they block 64%% of the sun.");
     if (!ctx.view.skyLighting || scene.skies().empty()) ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::Checkbox("Lights", &ctx.view.mapLights);

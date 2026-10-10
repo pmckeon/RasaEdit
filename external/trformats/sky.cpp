@@ -348,7 +348,10 @@ float sampleLayerAlpha(const SkyLayer& layer, float time) {
 }
 
 Vec3 skyLayerDirection(const SkyLayer& layer, const Vec3& direction, float time) {
-    Vec3 v = rotateAbout(direction, Vec3{0, 0, 1}, layer.initialRoll);
+    // InitialRoll turns the other way to the other angles here (fitted to in-game shadows: Concordia Wilderness'
+    // sun layer, roll -30 deg, puts the 12:00 sun east at (0.5, 0.87, 0); the opposite sign put it west and lit
+    // faces that are dark in game). The engine's own rotation code is not decoded.
+    Vec3 v = rotateAbout(direction, Vec3{0, 0, 1}, -layer.initialRoll);
     v = rotateAbout(v, Vec3{1, 0, 0}, layer.initialPitch);
     v = rotateAbout(v, Vec3{0, 1, 0}, layer.initialYaw);
     const float turns = layer.rotationsPerDay * (time - std::floor(time));

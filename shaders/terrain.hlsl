@@ -33,6 +33,8 @@ cbuffer FragmentUniforms : register(b0, space3)
     float4 localColour[MAX_LOCAL_LIGHTS];
     float4 localSpot[MAX_LOCAL_LIGHTS];
     float4 localSpotInner[MAX_LOCAL_LIGHTS];
+    row_major float4x4 shadowMatrix;   // world -> sun shadow map clip space
+    float4 shadowParams;              // x: 1 = sun shadows on, y: opacity, z: 1 / map size
     float4 tilings[32];       // metres per repeat for layers 0..127 (four per entry)
 };
 
@@ -42,6 +44,8 @@ cbuffer FragmentUniforms : register(b0, space3)
 [[vk::combinedImageSampler]] SamplerState indexSampler : register(s1, space2);
 [[vk::combinedImageSampler]] Texture2D layerWeights : register(t2, space2);
 [[vk::combinedImageSampler]] SamplerState weightSampler : register(s2, space2);
+[[vk::combinedImageSampler]] Texture2D<float> shadowMap : register(t3, space2);
+[[vk::combinedImageSampler]] SamplerComparisonState shadowSampler : register(s3, space2);
 
 struct VertexInput
 {
@@ -112,6 +116,7 @@ float4 psMain(VertexOutput input) : SV_Target0
     s.sunBack = sunBack.rgb;
     s.hemiTop = hemiTop.rgb;
     s.hemiBottom = hemiBottom.rgb;
+    s.sunVisibility = sunShadow(shadowMap, shadowSampler, shadowMatrix, shadowParams, input.world, n);
     const float3 light = skyLight(n, s) + localLights(input.world, n, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner);
     if (fogRange.z > 0.5)
         return float4(light * 0.2, 1.0);       // the game's light buffer (x OO_LIGHT_MULTIPLIER), as /dl_showlight shows it

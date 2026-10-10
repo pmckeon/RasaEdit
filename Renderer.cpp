@@ -27,6 +27,8 @@ struct LightingUniforms {
     Vec4f localColour[SceneLighting::maxLocalLights];
     Vec4f localSpot[SceneLighting::maxLocalLights];
     Vec4f localSpotInner[SceneLighting::maxLocalLights];
+    Mat4 shadowMatrix;             // world -> sun shadow map clip space
+    Vec4f shadowParams;            // x: 1 = sun shadows on, y: opacity, z: 1 / map size
 };
 
 struct SceneFragmentUniforms {
@@ -47,8 +49,10 @@ struct TerrainFragmentUniforms {
     Vec4f tilings[32];             // 128 layers
 };
 
-LightingUniforms lightingUniforms(const SceneLighting& l, const Vec4f& cameraPosition) {
+LightingUniforms lightingUniforms(const SceneLighting& l, const Vec4f& cameraPosition, const Mat4& shadowMatrix, bool shadows, float mapSize) {
     LightingUniforms u;
+    u.shadowMatrix = shadowMatrix;
+    u.shadowParams = Vec4f{shadows ? 1.0f : 0.0f, l.shadowOpacity, 1.0f / mapSize, 0};
     u.sunFront = l.sunFront;
     u.sunBack = l.sunBack;
     u.hemiTop = l.hemiTop;
@@ -97,11 +101,13 @@ Renderer::Renderer(SDL_GPUDevice* device) : device_(device) {
     sceneVertex_ = createShader(sceneVertexDxil, sizeof sceneVertexDxil, sceneVertexSpirv, sizeof sceneVertexSpirv, "vsMain",
                                 SDL_GPU_SHADERSTAGE_VERTEX, 0);
     sceneFragment_ = createShader(sceneFragmentDxil, sizeof sceneFragmentDxil, sceneFragmentSpirv, sizeof sceneFragmentSpirv, "psMain",
-                                  SDL_GPU_SHADERSTAGE_FRAGMENT, 5);
+                                  SDL_GPU_SHADERSTAGE_FRAGMENT, 6);
     terrainVertex_ = createShader(terrainVertexDxil, sizeof terrainVertexDxil, terrainVertexSpirv, sizeof terrainVertexSpirv, "vsMain",
                                   SDL_GPU_SHADERSTAGE_VERTEX, 0);
     terrainFragment_ = createShader(terrainFragmentDxil, sizeof terrainFragmentDxil, terrainFragmentSpirv, sizeof terrainFragmentSpirv,
-                                    "psMain", SDL_GPU_SHADERSTAGE_FRAGMENT, 3);
+                                    "psMain", SDL_GPU_SHADERSTAGE_FRAGMENT, 4);
+    shadowFragment_ = createShader(shadowFragmentDxil, sizeof shadowFragmentDxil, shadowFragmentSpirv, sizeof shadowFragmentSpirv, "psShadow",
+                                   SDL_GPU_SHADERSTAGE_FRAGMENT, 1);
     if (!SDL_GPUTextureSupportsFormat(device_, depthFormat_, SDL_GPU_TEXTURETYPE_2D, SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET))
         depthFormat_ = SDL_GPU_TEXTUREFORMAT_D24_UNORM;
     trianglePipeline_ = createPipeline(sceneVertex_, sceneFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST);
@@ -112,6 +118,65 @@ Renderer::Renderer(SDL_GPUDevice* device) : device_(device) {
     linearSampler_ = createSampler(device_, true, true);
     pointSampler_ = createSampler(device_, false, false);
     clampSampler_ = createSampler(device_, true, false);
+    {
+        SDL_GPUSamplerCreateInfo s = {};
+        s.min_filter = SDL_GPU_FILTER_LINEAR;
+        s.mag_filter = SDL_GPU_FILTER_LINEAR;
+        s.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
+        s.address_mode_u = s.address_mode_v = s.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+        s.enable_compare = true;
+        s.compare_op = SDL_GPU_COMPAREOP_LESS_OR_EQUAL;
+        shadowSampler_ = SDL_CreateGPUSampler(device_, &s);
+        if (!shadowSampler_) fail("SDL_CreateGPUSampler (shadow)");
+        SDL_GPUTextureCreateInfo t = {};
+        t.type = SDL_GPU_TEXTURETYPE_2D;
+        t.width = t.height = shadowSize;
+        t.layer_count_or_depth = 1;
+        t.num_levels = 1;
+        t.sample_count = SDL_GPU_SAMPLECOUNT_1;
+        t.format = depthFormat_;
+        t.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+        shadowMap_ = SDL_CreateGPUTexture(device_, &t);
+        if (!shadowMap_) fail("SDL_CreateGPUTexture (shadow map)");
+        // Depth only, no colour target; alpha-tested foliage casts dappled shadows; slope-scaled bias against acne.
+        SDL_GPUVertexBufferDescription buffer = {};
+        buffer.slot = 0;
+        buffer.pitch = sizeof(MeshVertex);
+        buffer.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+        SDL_GPUVertexAttribute attributes[5] = {};
+        const uint32_t offsets[5] = {uint32_t(offsetof(MeshVertex, positionX)), uint32_t(offsetof(MeshVertex, normalX)), uint32_t(offsetof(MeshVertex, colour)),
+                                     uint32_t(offsetof(MeshVertex, texU)), uint32_t(offsetof(MeshVertex, texU1))};
+        const SDL_GPUVertexElementFormat formats[5] = {SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM,
+                                                       SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2};
+        for (uint32_t k = 0; k < 5; ++k) {
+            attributes[k].location = k;
+            attributes[k].format = formats[k];
+            attributes[k].offset = offsets[k];
+        }
+        SDL_GPUGraphicsPipelineCreateInfo info = {};
+        info.vertex_shader = sceneVertex_;
+        info.fragment_shader = shadowFragment_;
+        info.vertex_input_state.vertex_buffer_descriptions = &buffer;
+        info.vertex_input_state.num_vertex_buffers = 1;
+        info.vertex_input_state.vertex_attributes = attributes;
+        info.vertex_input_state.num_vertex_attributes = 5;
+        info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+        info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+        info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+        info.rasterizer_state.front_face = SDL_GPU_FRONTFACE_CLOCKWISE;
+        info.rasterizer_state.enable_depth_bias = true;
+        info.rasterizer_state.depth_bias_constant_factor = 2.0f;
+        info.rasterizer_state.depth_bias_slope_factor = 2.0f;
+        info.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
+        info.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS_OR_EQUAL;
+        info.depth_stencil_state.enable_depth_test = true;
+        info.depth_stencil_state.enable_depth_write = true;
+        info.target_info.num_color_targets = 0;
+        info.target_info.depth_stencil_format = depthFormat_;
+        info.target_info.has_depth_stencil_target = true;
+        shadowPipeline_ = SDL_CreateGPUGraphicsPipeline(device_, &info);
+        if (!shadowPipeline_) fail("SDL_CreateGPUGraphicsPipeline (shadow)");
+    }
     const uint32_t white = 0xFFFFFFFF;
     white_ = uploadRgbaTexture(device_, &white, 1, 1);
     const uint32_t black = 0xFF000000;
@@ -127,6 +192,10 @@ Renderer::~Renderer() {
     if (linearSampler_) SDL_ReleaseGPUSampler(device_, linearSampler_);
     if (pointSampler_) SDL_ReleaseGPUSampler(device_, pointSampler_);
     if (clampSampler_) SDL_ReleaseGPUSampler(device_, clampSampler_);
+    if (shadowSampler_) SDL_ReleaseGPUSampler(device_, shadowSampler_);
+    if (shadowMap_) SDL_ReleaseGPUTexture(device_, shadowMap_);
+    if (shadowPipeline_) SDL_ReleaseGPUGraphicsPipeline(device_, shadowPipeline_);
+    if (shadowFragment_) SDL_ReleaseGPUShader(device_, shadowFragment_);
     for (SDL_GPUGraphicsPipeline* p : {trianglePipeline_, linePipeline_, terrainPipeline_, translucentPipeline_, additivePipeline_})
         if (p) SDL_ReleaseGPUGraphicsPipeline(device_, p);
     for (SDL_GPUShader* s : {sceneVertex_, sceneFragment_, terrainVertex_, terrainFragment_})
@@ -303,6 +372,28 @@ void Renderer::beginFrame(const Mat4& viewProjection, const tr::Vec3& cameraPosi
     towardsLight_ = Vec4f{lighting.towardsLight.x, lighting.towardsLight.y, lighting.towardsLight.z, 1.0f};
     clearColour_ = lighting.clearColour;
     lighting_ = lighting;
+    // Sun shadow map: orthographic from the sun around the camera, snapped to whole texels so it does not shimmer.
+    shadowsActive_ = lighting.sunShadows && lighting.towardsLight.y > 0.02f;
+    if (shadowsActive_) {
+        const tr::Vec3 toward = normalized(lighting.towardsLight);
+        const tr::Vec3 forward = scaled(toward, -1.0f);
+        const tr::Vec3 right = normalized(cross(std::fabs(forward.y) > 0.99f ? tr::Vec3{0, 0, 1} : tr::Vec3{0, 1, 0}, forward));
+        const tr::Vec3 up = cross(forward, right);
+        const float texel = 2.0f * shadowExtent / float(shadowSize);
+        float cx = dot(cameraPosition, right), cy = dot(cameraPosition, up);
+        cx = std::floor(cx / texel) * texel;
+        cy = std::floor(cy / texel) * texel;
+        const float cz = dot(cameraPosition, forward);
+        const tr::Vec3 centre = add(add(scaled(right, cx), scaled(up, cy)), scaled(forward, cz));
+        const Mat4 view = viewLH(subtract(centre, scaled(forward, shadowDepth * 0.5f)), right, up, forward);
+        Mat4 ortho = identityMatrix();
+        ortho.row0 = {1.0f / shadowExtent, 0, 0, 0};
+        ortho.row1 = {0, 1.0f / shadowExtent, 0, 0};
+        ortho.row2 = {0, 0, 1.0f / shadowDepth, 0};
+        shadowMatrix_ = multiply(ortho, view);
+    } else {
+        shadowMatrix_ = identityMatrix();
+    }
     cameraPosition_ = Vec4f{cameraPosition.x, cameraPosition.y, cameraPosition.z, 1.0f};
     draws_.clear();
     translucentDraws_.clear();
@@ -348,6 +439,7 @@ void Renderer::drawTerrain(const GpuMesh& mesh, const TerrainMaterial& material)
 
 void Renderer::record(SDL_GPUCommandBuffer* commands) {
     if (!colour_) return;
+    if (shadowsActive_) recordShadows(commands);
     SDL_GPUColorTargetInfo colour = {};
     colour.texture = colour_;
     colour.clear_color = clearColour_;
@@ -370,6 +462,37 @@ void Renderer::record(SDL_GPUCommandBuffer* commands) {
     SDL_EndGPURenderPass(pass);
 }
 
+// Shadow casters: the opaque lit draws (models and terrain) into the sun's depth map.
+void Renderer::recordShadows(SDL_GPUCommandBuffer* commands) {
+    SDL_GPUDepthStencilTargetInfo depth = {};
+    depth.texture = shadowMap_;
+    depth.clear_depth = 1.0f;
+    depth.load_op = SDL_GPU_LOADOP_CLEAR;
+    depth.store_op = SDL_GPU_STOREOP_STORE;
+    depth.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
+    depth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
+    SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, nullptr, 0, &depth);
+    SDL_BindGPUGraphicsPipeline(pass, shadowPipeline_);
+    for (const DrawItem& item : draws_) {
+        if (item.mesh->lines || !item.lit) continue;
+        SDL_GPUBufferBinding vertexBinding = {item.mesh->vertices, 0};
+        SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
+        SDL_GPUBufferBinding indexBinding = {item.mesh->indices, 0};
+        SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_32BIT);
+        const VertexUniforms vertexUniforms{shadowMatrix_, item.model};
+        SDL_PushGPUVertexUniformData(commands, 0, &vertexUniforms, sizeof vertexUniforms);
+        const bool alphaTest = !item.terrain && item.alphaTest;
+        const SDL_GPUTextureSamplerBinding sampler = {alphaTest && item.texture ? item.texture : white_, linearSampler_};
+        SDL_BindGPUFragmentSamplers(pass, 0, &sampler, 1);
+        const Vec4f options{alphaTest ? 1.0f : 0.0f, 0, 0, 0};
+        SceneFragmentUniforms u{Vec4f{1, 1, 1, 1}, towardsLight_, options, Vec4f{0, 0, 0, 0},
+                                lightingUniforms(lighting_, cameraPosition_, shadowMatrix_, false, float(shadowSize))};
+        SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof u);
+        SDL_DrawGPUIndexedPrimitives(pass, item.mesh->indexCount, 1, 0, 0, 0);
+    }
+    SDL_EndGPURenderPass(pass);
+}
+
 void Renderer::recordItem(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const DrawItem& item, SDL_GPUGraphicsPipeline*& bound) {
     SDL_GPUGraphicsPipeline* pipeline = item.terrain ? terrainPipeline_ : item.additive ? additivePipeline_ : item.translucent ? translucentPipeline_
                                         : item.mesh->lines ? linePipeline_ : trianglePipeline_;
@@ -385,13 +508,14 @@ void Renderer::recordItem(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pas
     SDL_PushGPUVertexUniformData(commands, 0, &vertexUniforms, sizeof vertexUniforms);
     if (item.terrain) {
         const TerrainMaterial& m = *item.terrain;
-        const SDL_GPUTextureSamplerBinding samplers[3] = {{m.layers, linearSampler_}, {m.layerIndices, pointSampler_}, {m.layerWeights, pointSampler_}};
-        SDL_BindGPUFragmentSamplers(pass, 0, samplers, 3);
+        const SDL_GPUTextureSamplerBinding samplers[4] = {{m.layers, linearSampler_}, {m.layerIndices, pointSampler_}, {m.layerWeights, pointSampler_},
+                                                          {shadowMap_, shadowSampler_}};
+        SDL_BindGPUFragmentSamplers(pass, 0, samplers, 4);
         TerrainFragmentUniforms u = {};
         u.grid = Vec4f{m.originX, m.originZ, m.inverseSpacing, 0};
         u.gridSize = Vec4f{float(m.columns), float(m.rows), 1.0f / float(m.columns), 1.0f / float(m.rows)};
         u.lightDirection = towardsLight_;
-        u.lighting = lightingUniforms(lighting_, cameraPosition_);
+        u.lighting = lightingUniforms(lighting_, cameraPosition_, shadowMatrix_, shadowsActive_, float(shadowSize));
         for (size_t k = 0; k < m.tilings.size() && k < 128; ++k) {
             Vec4f& entry = u.tilings[k >> 2];
             switch (k & 0x3) {
@@ -404,13 +528,14 @@ void Renderer::recordItem(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pas
         SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof u);
     } else {
         // Unused detail/decal slots are switched off by layers.z/w; the light ramp defaults to opaque white.
-        const SDL_GPUTextureSamplerBinding samplers[5] = {{item.texture, linearSampler_}, {item.glow ? item.glow : black_, linearSampler_},
+        const SDL_GPUTextureSamplerBinding samplers[6] = {{item.texture, linearSampler_}, {item.glow ? item.glow : black_, linearSampler_},
                                                           {item.detail ? item.detail : black_, linearSampler_},
                                                           {item.decal ? item.decal : black_, linearSampler_},
-                                                          {item.light ? item.light : white_, clampSampler_}};
-        SDL_BindGPUFragmentSamplers(pass, 0, samplers, 5);
+                                                          {item.light ? item.light : white_, clampSampler_},
+                                                          {shadowMap_, shadowSampler_}};
+        SDL_BindGPUFragmentSamplers(pass, 0, samplers, 6);
         SceneFragmentUniforms u{item.tint, towardsLight_, Vec4f{item.alphaTest ? 1.0f : 0.0f, 0, item.additive ? 1.0f : 0.0f, item.aniso ? 1.0f : 0.0f},
-                                item.hue, lightingUniforms(lighting_, cameraPosition_), item.specular, item.layers};
+                                item.hue, lightingUniforms(lighting_, cameraPosition_, shadowMatrix_, shadowsActive_, float(shadowSize)), item.specular, item.layers};
         u.lightDirection.w = item.lit ? 1.0f : 0.0f;
         SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof u);
     }

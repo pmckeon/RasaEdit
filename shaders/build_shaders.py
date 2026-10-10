@@ -12,6 +12,7 @@ OUTPUT = os.path.join(HERE, '..', 'ShaderBytecode.h')
 SHADERS = [   # (array name prefix, source, entry point, profile)
     ('sceneVertex', 'scene.hlsl', 'vsMain', 'vs_6_0'),
     ('sceneFragment', 'scene.hlsl', 'psMain', 'ps_6_0'),
+    ('shadowFragment', 'scene.hlsl', 'psShadow', 'ps_6_0'),
     ('terrainVertex', 'terrain.hlsl', 'vsMain', 'vs_6_0'),
     ('terrainFragment', 'terrain.hlsl', 'psMain', 'ps_6_0'),
 ]

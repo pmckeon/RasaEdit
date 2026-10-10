@@ -33,6 +33,8 @@ cbuffer FragmentUniforms : register(b0, space3)
     float4 localColour[MAX_LOCAL_LIGHTS];
     float4 localSpot[MAX_LOCAL_LIGHTS];
     float4 localSpotInner[MAX_LOCAL_LIGHTS];
+    row_major float4x4 shadowMatrix;   // world -> sun shadow map clip space
+    float4 shadowParams;              // x: 1 = sun shadows on, y: opacity, z: 1 / map size
     float4 specular;          // aniso additive: MatSpecular
     float4 layers;            // aniso additive: x detail on UV set 1, y decal on UV set 1, z has detail, w has decal
 };
@@ -47,6 +49,8 @@ cbuffer FragmentUniforms : register(b0, space3)
 [[vk::combinedImageSampler]] SamplerState decalSampler : register(s3, space2);
 [[vk::combinedImageSampler]] Texture2D lightTexture : register(t4, space2);
 [[vk::combinedImageSampler]] SamplerState lightSampler : register(s4, space2);
+[[vk::combinedImageSampler]] Texture2D<float> shadowMap : register(t5, space2);
+[[vk::combinedImageSampler]] SamplerComparisonState shadowSampler : register(s5, space2);
 
 struct VertexInput
 {
@@ -140,9 +144,17 @@ float4 psMain(VertexOutput input) : SV_Target0
     s.hemiBottom = hemiBottom.rgb;
     // Glow maps add after lighting (the game's glow buffer, added in trhdrcomposite before fog).
     const float3 glow = glowTexture.Sample(glowSampler, input.uv1).rgb;
+    s.sunVisibility = sunShadow(shadowMap, shadowSampler, shadowMatrix, shadowParams, input.world, n);
     const float3 light = skyLight(n, s) + localLights(input.world, n, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner);
     if (fogRange.z > 0.5)
         return float4(light * 0.2, 1.0);       // the game's light buffer (x OO_LIGHT_MULTIPLIER), as /dl_showlight shows it
     const float3 lit = base.rgb * light + glow;
     return float4(applyFog(lit, length(view), fogColour, fogRange), base.a);
+}
+
+// Shadow pass: depth only; alpha-tested pieces (foliage) discard like the colour pass.
+void psShadow(VertexOutput input)
+{
+    if (options.x > 0.5 && diffuseTexture.Sample(diffuseSampler, input.uv).a < 0.5)
+        discard;
 }

@@ -34,7 +34,8 @@ struct ViewSettings {
     float flySpeed = 20.0f;      // metres per second
     bool skyLighting = true;     // light from the map region's .sky (the time of day and sky choice are per map, in SceneView)
     bool fog = true;
-    bool sun = true;             // the sky's sun/moon (turn off in caves: the game shadows it, the editor has no shadows)
+    bool sun = true;             // the sky's sun/moon
+    bool shadows = true;         // sun shadows (shadow map around the camera)
     bool mapLights = true;       // the map's lights.xml
 };
 

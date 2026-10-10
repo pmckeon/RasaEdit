@@ -106,7 +106,13 @@ public:
     };
     void setRegionSkies(const std::vector<std::pair<int32_t, std::string>>& regionSkies);
     const std::vector<SkyChoice>& skies() const { return skies_; }
-    size_t skyIndex = 0;                    // into skies(); the sky of region 0 by default
+    size_t skyIndex = 0;                    // into skies(); the sky of region 0 by default (used when not by region)
+    // Sky by region, as the client does (regionmanager.py OnUpdateRegions: the regions the player is in plus region 0,
+    // highest map priority first; RegionManagerClient::DoTransitionSky takes the first with a sky). Region volumes come
+    // from the server's map_region rows; without server content the chosen skyIndex is used.
+    bool skyByRegion = true;
+    size_t activeSkyIndex() const;          // the sky lighting uses (by region at the camera, else skyIndex)
+    bool skyFromRegion() const;             // activeSkyIndex() came from a server region volume
     float timeOfDay = 0.5f;                 // fraction of the day; the map's starting sky time by default
     float startTimeOfDay() const { return startTimeOfDay_; }
     bool skyLighting = true;                // false: plain editor lighting
@@ -114,7 +120,8 @@ public:
     bool showMapLights = true;              // the map's lights.xml (up to 16 nearest the camera)
     bool showLightBuffer = false;
     float ambientScale = 1;                 // debug/experiment: multiplies the sky's hemisphere light           // debug: draw 0.2 x light like the game's /dl_showlight
-    bool showSun = true;                    // the sky's sun/moon; off for caves (the game shadows it; no shadows here)
+    bool showSun = true;                    // the sky's sun/moon
+    bool showShadows = true;                // sun shadows
     const std::vector<tr::PlacedLight>& mapLights() const { return mapLights_; }
     const std::string& mapLightsError() const { return mapLightsError_; }
     // The frame lighting for the current sky, time and toggles (also used by queueDraws).
@@ -205,6 +212,8 @@ private:
     GpuMesh arrow_;                     // along -z (the models' front), length 1 (lines)
     GpuMesh pole_;                      // 0..1 along +y (lines)
     std::vector<SkyChoice> skies_;
+    std::unordered_map<int32_t, size_t> regionSky_;       // map region id -> skies_ index (base sky for _tranz)
+    std::unordered_map<int32_t, int32_t> regionPriority_; // map region id -> MapRegion.priority
     float startTimeOfDay_ = 0.5f;
     std::vector<tr::PlacedLight> mapLights_;
     std::string mapLightsError_;

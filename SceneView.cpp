@@ -286,6 +286,9 @@ void SceneView::setRegionSkies(const std::vector<std::pair<int32_t, std::string>
     // names the _tranz one (midday ambient (1.22, 1.06, 0.82) measured vs base (1.20, 1.04, 0.80), _tranz (0.81, 0.95,
     // 0.97)). How the engine picks it (RegionManagerClient::DoTransitionSky FUN_0052c2d0) is not decoded; the base is
     // preselected only when region 0's sky is a _tranz variant (UNVERIFIED beyond that map).
+    for (const tr::MapRegion& r : map_.map.regions) regionPriority_[r.regionId] = r.priority;
+    for (size_t k = 0; k < skies_.size(); ++k)
+        for (int32_t region : skies_[k].regions) regionSky_[region] = k;
     const size_t regionSkyCount = skies_.size();
     for (size_t k = 0; k < regionSkyCount; ++k) {
         std::string base = skies_[k].name;
@@ -311,10 +314,40 @@ void SceneView::setRegionSkies(const std::vector<std::pair<int32_t, std::string>
             it = skies_.end() - 1;
         }
         const std::string& variant = skies_[k].name;
-        if (k == skyIndex && haveRegion0 && it->loaded && variant.size() > 10 && variant.compare(variant.size() - 10, 10, "_tranz.sky") == 0)
-            skyIndex = size_t(it - skies_.begin());
+        const bool tranz = variant.size() > 10 && variant.compare(variant.size() - 10, 10, "_tranz.sky") == 0;
+        if (tranz && it->loaded) {
+            for (auto& rs : regionSky_)
+                if (rs.second == k) rs.second = size_t(it - skies_.begin());
+            if (k == skyIndex && haveRegion0) skyIndex = size_t(it - skies_.begin());
+        }
     }
 }
+
+namespace {
+bool insideArea(const AreaShape& a, const tr::Vec3& p) {
+    if (p.y < a.minY || p.y > a.maxY) return false;
+    const float dx = p.x - a.position.x, dz = p.z - a.position.z;
+    if (a.shape == 2) return std::fabs(dx) <= a.halfX && std::fabs(dz) <= a.halfZ;
+    return dx * dx + dz * dz <= a.radius * a.radius;
+}
+}  // namespace
+
+size_t SceneView::activeSkyIndex() const {
+    if (!skyByRegion || !serverContent_ || serverContent_->regions.empty()) return skyIndex;
+    // Regions containing the camera, plus region 0 (the client always adds DEFAULT_REGION_ID), by priority.
+    std::vector<int32_t> inside{0};
+    for (const MapRegion& r : serverContent_->regions)
+        if (r.enabled && insideArea(r.area, camera_.position)) inside.push_back(r.regionId);
+    const auto priority = [&](int32_t id) { const auto it = regionPriority_.find(id); return it == regionPriority_.end() ? 0 : it->second; };
+    std::stable_sort(inside.begin(), inside.end(), [&](int32_t a, int32_t b) { return priority(a) > priority(b); });
+    for (int32_t id : inside) {
+        const auto it = regionSky_.find(id);
+        if (it != regionSky_.end() && it->second < skies_.size() && skies_[it->second].loaded) return it->second;
+    }
+    return skyIndex;
+}
+
+bool SceneView::skyFromRegion() const { return skyByRegion && serverContent_ && !serverContent_->regions.empty(); }
 
 SceneLighting SceneView::lighting() const {
     SceneLighting l = skyLightingAt();
@@ -352,18 +385,21 @@ SceneLighting SceneView::lighting() const {
 
 SceneLighting SceneView::skyLightingAt() const {
     SceneLighting l;                                   // plain editor lighting
-    if (!skyLighting || skyIndex >= skies_.size() || !skies_[skyIndex].loaded) return l;
-    const tr::Sky& sky = skies_[skyIndex].sky;
+    const size_t active = activeSkyIndex();
+    if (!skyLighting || active >= skies_.size() || !skies_[active].loaded) return l;
+    const tr::Sky& sky = skies_[active].sky;
     const float t = timeOfDay;
     auto vec4 = [](const tr::Vec3& c) { return Vec4f{c.x, c.y, c.z, 1}; };
     auto luminance = [](const tr::Vec3& c) { return 0.3f * c.x + 0.59f * c.y + 0.11f * c.z; };
 
-    // Hemispheric light: the sum of every hemi light (the engine's CombinedHemiLight adds their TopColor/BottomColor;
-    // RenderMode 0 and 1 both count). Verified outdoors on Concordia Wilderness at midday: 2 x DIntensity 0.6 x
-    // (255, 222, 170)/255 = (1.20, 1.04, 0.80) vs (1.22, 1.06, 0.82) measured with /dl_showlight in a shadow.
+    // Hemispheric light: the sum (CombinedHemiLight) of the hemi lights the deferred renderer uses. tabula_rasa.exe
+    // FUN_00812dc0 / FUN_00812880 take a light only when RenderMode == 1 in deferred mode (0 in the fallback renderer)
+    // or RenderMode == 2; modes > 2 are mapped to a default (FUN_0086a910 -> FUN_00887550, not decoded - counted
+    // here). Skies carry one hemi light per renderer (Concordia: Light_01 mode 1, Light_02 mode 0). Checked at
+    // Alia Das 12:00: vertical faces away from the sun 0.55 measured vs (top + bottom) / 2 = 0.55 of Light_01 alone.
     tr::Vec3 top{0, 0, 0}, bottom{0, 0, 0};
     for (const tr::SkyLight& g : sky.globalLights) {
-        if (!g.hemi) continue;
+        if (!g.hemi || g.renderMode == 0) continue;
         top = add(top, tr::skyLightColour(g, 1, t));
         bottom = add(bottom, tr::skyLightColour(g, 2, t));
     }
@@ -384,6 +420,7 @@ SceneLighting SceneView::skyLightingAt() const {
             const tr::Vec3 travel = tr::skyLayerDirection(layer, light.orientation, t);
             l.towardsLight = normalized(tr::Vec3{-travel.x, -travel.y, -travel.z});
             l.sunFront = vec4(front);
+            l.sunShadows = showShadows;
             l.sunBack = vec4(tr::skyLightColour(light, 4, t));
         }
     }

@@ -67,6 +67,10 @@ struct SceneLighting {
     float fogStart = 0;
     float fogDensity = 0;                        // exp-squared fog, see shaders/lighting.hlsli
     bool showLight = false;                      // debug view like the game's /dl_showlight: 0.2 x light, no albedo
+    // Sun shadows: a shadow map from the sun over the area around the camera. The game's shadows let part of the sun
+    // through: shadowOpacity 0.64 fitted at Alia Das, 12:00 (shadowed ground 1.02 = ambient 0.60 + 0.36 x sun 1.16).
+    bool sunShadows = false;
+    float shadowOpacity = 0.64f;
     SDL_FColor clearColour{0.55f, 0.66f, 0.78f, 1.0f};   // background (the sky colour with sky lighting)
     // Placed lights, laid out as the shaders' arrays (shaders/lighting.hlsli): position xyz + range; colour rgb *
     // intensity + fade share; spot direction + cos(outer half angle) (-2 = point); x = cos(inner half angle).
@@ -154,6 +158,17 @@ private:
     SDL_GPUGraphicsPipeline* terrainPipeline_ = nullptr;
     SDL_GPUGraphicsPipeline* translucentPipeline_ = nullptr;
     SDL_GPUGraphicsPipeline* additivePipeline_ = nullptr;
+    // Sun shadow map (depth from the sun, orthographic, centred on the camera, texel-snapped).
+    static constexpr uint32_t shadowSize = 2048;
+    static constexpr float shadowExtent = 120.0f;   // half width in metres
+    static constexpr float shadowDepth = 1200.0f;
+    SDL_GPUShader* shadowFragment_ = nullptr;
+    SDL_GPUGraphicsPipeline* shadowPipeline_ = nullptr;
+    SDL_GPUTexture* shadowMap_ = nullptr;
+    SDL_GPUSampler* shadowSampler_ = nullptr;     // comparison sampler
+    Mat4 shadowMatrix_;
+    bool shadowsActive_ = false;
+    void recordShadows(SDL_GPUCommandBuffer* commands);
     SDL_GPUSampler* linearSampler_ = nullptr;   // trilinear, repeat
     SDL_GPUSampler* pointSampler_ = nullptr;    // nearest, clamp (terrain data textures)
     SDL_GPUSampler* clampSampler_ = nullptr;    // trilinear, clamp (lookup ramps)

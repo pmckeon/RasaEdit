@@ -12,13 +12,14 @@ struct SkyLighting
     float3 sunBack;
     float3 hemiTop;
     float3 hemiBottom;
+    float sunVisibility;              // 1 = fully sunlit (sun shadows)
 };
 
 float3 skyLight(float3 n, SkyLighting s)
 {
     const float ndl = dot(n, s.towardsLight);
     const float3 hemi = lerp(s.hemiBottom, s.hemiTop, n.y * 0.5 + 0.5);
-    return hemi + s.sunFront * saturate(ndl) + s.sunBack * saturate(-ndl);
+    return hemi + s.sunFront * saturate(ndl) * s.sunVisibility + s.sunBack * saturate(-ndl);
 }
 
 // Placed lights (the map's lights.xml), up to 16 per frame, nearest the camera first. Formulas from the game's
@@ -30,6 +31,24 @@ float3 skyLight(float3 n, SkyLighting s)
 // position: xyz, w range; colour: rgb * intensity, w fade start distance; spot: xyz axis, w cos(penumbra) or -2 for a
 // point light; spotInner: x cos(cone).
 #define MAX_LOCAL_LIGHTS 16
+
+// Sun shadow: 3x3 filtered comparisons in the sun's depth map, offset along the normal against acne; outside the map
+// (beyond the area around the camera) everything is lit. params: x on, y opacity (the game lets part of the sun through),
+// z 1 / map size.
+float sunShadow(Texture2D<float> map, SamplerComparisonState cmp, float4x4 m, float4 params, float3 world, float3 n)
+{
+    if (params.x < 0.5)
+        return 1.0;
+    const float4 p = mul(m, float4(world + n * 0.08, 1.0));
+    const float2 uv = float2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
+    if (any(uv < 0.0) || any(uv > 1.0) || p.z > 1.0)
+        return 1.0;
+    float lit = 0.0;
+    [unroll] for (int y = -1; y <= 1; ++y)
+        [unroll] for (int x = -1; x <= 1; ++x)
+            lit += map.SampleCmpLevelZero(cmp, uv + float2(x, y) * params.z, p.z - 0.0005);
+    return lerp(1.0, lit / 9.0, params.y);
+}
 
 float3 localLights(float3 world, float3 n, int count, float4 position[MAX_LOCAL_LIGHTS], float4 colour[MAX_LOCAL_LIGHTS],
                    float4 spot[MAX_LOCAL_LIGHTS], float4 spotInner[MAX_LOCAL_LIGHTS])

@@ -42,10 +42,11 @@ int main(int argc, char** argv) {
             scene.setRegionSkies(regionSkies);
             // RASA_TIME=<fraction of the day>, RASA_SKY=<index>, RASA_NOSKY=1 / RASA_NOFOG=1 for lighting checks.
             if (const char* t = envValue("RASA_TIME")) scene.timeOfDay = float(std::atof(t));
-            if (const char* k = envValue("RASA_SKY")) scene.skyIndex = size_t(std::atoi(k));
+            if (const char* k = envValue("RASA_SKY")) { scene.skyIndex = size_t(std::atoi(k)); scene.skyByRegion = false; }
             if (envValue("RASA_NOSKY")) scene.skyLighting = false;
             if (envValue("RASA_NOFOG")) scene.showFog = false;
             if (envValue("RASA_NOSUN")) scene.showSun = false;
+            if (envValue("RASA_NOSHADOWS")) scene.showShadows = false;
             if (envValue("RASA_NOLIGHTS")) scene.showMapLights = false;
             if (envValue("RASA_SHOWLIGHT")) scene.showLightBuffer = true;     // like the game's /dl_showlight
             if (const char* a = envValue("RASA_AMBIENT")) scene.ambientScale = float(std::atof(a));   // scales the sky hemi light
@@ -93,6 +94,11 @@ int main(int argc, char** argv) {
         cam.yaw = std::atan2(to.x, to.z);
         cam.pitch = std::atan2(to.y, std::sqrt(to.x * to.x + to.z * to.z));
         if (argc > 13) scene.showPlaceholders = false;
+        if (!scene.skies().empty()) {
+            const SceneLighting active = scene.lighting();
+            std::printf("sky at the camera: %s%s; hemi top %.2f %.2f %.2f, sun %.2f %.2f %.2f\n", scene.skies()[std::min(scene.activeSkyIndex(), scene.skies().size() - 1)].name.c_str(),
+                        scene.skyFromRegion() ? " (by region)" : "", active.hemiTop.x, active.hemiTop.y, active.hemiTop.z, active.sunFront.x, active.sunFront.y, active.sunFront.z);
+        }
         scene.queueDraws(Selection{});
         std::printf("draws queued: %zu (entities drawn %zu)\n", renderer.queuedDraws(), scene.drawnEntities());
         {
