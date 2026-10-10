@@ -23,7 +23,7 @@ namespace tr {
 struct SkyLightKey {
     float time = 0;
     uint32_t type = 0;                // 1/2 hemi front/back, 3/4 directional front/back (see above)
-    Vec3 colour;                      // "Diffuse" / 255
+    Vec3 colour;                      // "Diffuse" (written b, g, r, a; = "DiffuseColor" r, g, b)
     float diffuseIntensity = 1;       // "DIntensity"
     float ambientIntensity = 0;       // "AIntensity" (UNKNOWN use)
     float specularIntensity = 0;      // "SIntensity" (UNKNOWN use)
@@ -42,7 +42,7 @@ struct SkyLight {
 
 struct SkyFogKey {
     float time = 0;
-    Vec3 colour;                      // also the sky colour: dome layers with UseFogColor take it
+    Vec3 colour;                      // "Color" (written b, g, r, a); also the sky colour: dome layers with UseFogColor take it
     float startDistance = 0;
     float endDistance = 0;
     bool used = false;                // false in every shipped sky (fog is enabled elsewhere)

@@ -420,15 +420,23 @@ void Renderer::draw(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, b
     draws_.push_back(item);
 }
 
-void Renderer::drawTranslucent(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, SDL_GPUTexture* texture) {
+void Renderer::drawTranslucent(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, SDL_GPUTexture* texture, SDL_GPUTexture* detail,
+                               bool detailUv1) {
     if (!mesh.vertices || mesh.indexCount == 0) return;
-    translucentDraws_.push_back(DrawItem{&mesh, model, tint, true, texture ? texture : white_, false, nullptr, true, Vec4f{0, 0, 0, 0}, black_});
+    DrawItem item{&mesh, model, tint, true, texture ? texture : white_, false, nullptr, true, Vec4f{0, 0, 0, 0}, black_};
+    item.detail = detail;
+    item.layers = Vec4f{detailUv1 ? 1.0f : 0.0f, 0, detail ? 1.0f : 0.0f, 0};
+    translucentDraws_.push_back(item);
 }
 
-void Renderer::drawAdditive(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, SDL_GPUTexture* texture) {
+void Renderer::drawAdditive(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, SDL_GPUTexture* texture, bool lit, SDL_GPUTexture* detail,
+                            bool detailUv1) {
     if (!mesh.vertices || mesh.indexCount == 0) return;
     DrawItem item{&mesh, model, tint, false, texture ? texture : white_, false, nullptr, true, Vec4f{0, 0, 0, 0}, black_};
     item.additive = true;
+    item.forwardLit = lit;
+    item.detail = detail;
+    item.layers = Vec4f{detailUv1 ? 1.0f : 0.0f, 0, detail ? 1.0f : 0.0f, 0};
     additiveDraws_.push_back(item);
 }
 
@@ -630,7 +638,7 @@ void Renderer::recordItem(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pas
                                                           {item.light ? item.light : white_, clampSampler_},
                                                           {shadowMap_, shadowSampler_}, {globes_, clampSampler_}};
         SDL_BindGPUFragmentSamplers(pass, 0, samplers, 7);
-        SceneFragmentUniforms u{item.tint, towardsLight_, Vec4f{item.alphaTest ? item.alphaReference : 0.0f, item.translucent ? 2.0f : 0.0f, item.additive ? 1.0f : 0.0f, item.aniso ? 1.0f : 0.0f},
+        SceneFragmentUniforms u{item.tint, towardsLight_, Vec4f{item.alphaTest ? item.alphaReference : 0.0f, item.translucent ? 2.0f : 0.0f, item.additive ? (item.forwardLit ? 2.0f : 1.0f) : 0.0f, item.aniso ? 1.0f : 0.0f},
                                 item.hue, lightingUniforms(lighting_, cameraPosition_, shadowMatrix_, shadowsActive_, float(shadowSize)), item.specular, item.layers};
         u.lightDirection.w = item.lit ? 1.0f : 0.0f;
         SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof u);

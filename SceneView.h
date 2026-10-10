@@ -170,6 +170,12 @@ private:
         SDL_GPUTexture* glow = nullptr;        // GlowTexture (owned by textures_), added after lighting
         bool additive = false;                 // Additive phase: drawn additively with Effects on, not pickable
         bool translucent = false;              // Translucent phase: alpha-blended, lit
+        // Phase pieces of non-TRAdditive effects are drawn with their forward technique (verified in game: absent from
+        // /dl_showdiffuse): lit per vertex, detail layer, opacity x MatDiffuse alpha.
+        bool forwardLit = false;
+        SDL_GPUTexture* detail = nullptr;
+        bool detailUv1 = false;
+        float matDiffuseAlpha = 1.0f;
         bool flesh = false;                    // swap group "flesh": hued with the skin colour
         uint32_t swapId = 0;                   // avatar swap set (0: not swappable)
         bool aniso = false;                    // TRAdditiveAnisoSpec* effect (holograms): drawn with anisoMaterial

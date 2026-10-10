@@ -987,6 +987,13 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 part.swapId = piece.swapId;
                 part.additive = additive;
                 part.translucent = translucent;
+                part.forwardLit = (additive || translucent) && !namedAdditive && !aniso;
+                if (part.forwardLit)
+                    for (const tr::GeoParameter& gp : piece.parameters) {
+                        if (gp.key == "DetailTexture" && !water) part.detail = texture(gp.value);
+                        if (gp.key == "DetailTexCoord") part.detailUv1 = std::atoi(gp.value.c_str()) == 1;
+                        if (gp.key == "MatDiffuse") part.matDiffuseAlpha = parseColour(gp.value).w;
+                    }
                 // Effects whose (non-debug) passes set CULLMODE = NONE, from the compiled effects in effects.glm (fx_2_0
                 // state tables, 2026-10-10): every other model effect keeps PalGlobalEffect's CCW (back faces culled).
                 part.twoSided = effect.rfind("paldiffmap.", 0) == 0 || effect.rfind("trdiffmapnolight.", 0) == 0 ||
@@ -1180,6 +1187,9 @@ void SceneView::queueDraws(const Selection& selection) {
     // Additive pieces; holograms (aniso) use the game's own material when textures are shown.
     auto drawEffect = [&](const ModelPiece& piece, const Mat4& world) {
         if (piece.aniso && showTextures) renderer_.drawAnisoAdditive(piece.mesh, world, piece.anisoMaterial);
+        else if (piece.forwardLit)
+            renderer_.drawAdditive(piece.mesh, world, scaledTint(Vec4f{1, 1, 1, piece.matDiffuseAlpha}, piece.colourScale), showTextures ? piece.texture : nullptr,
+                                   true, showTextures ? piece.detail : nullptr, piece.detailUv1);
         else renderer_.drawAdditive(piece.mesh, world, scaledTint(Vec4f{1, 1, 1, 1}, piece.colourScale), showTextures ? piece.texture : nullptr);
     };
     auto waterTint = [](bool selected) { return Vec4f{0.22f, 0.42f, 0.58f, selected ? 0.75f : 0.55f}; };
@@ -1203,7 +1213,9 @@ void SceneView::queueDraws(const Selection& selection) {
                 for (const ModelPiece& piece : p.model->pieces) {
                     if (piece.additive) continue;
                     if (piece.water) renderer_.drawTranslucent(piece.mesh, p.world, waterTint(selected));
-                    else if (piece.translucent) renderer_.drawTranslucent(piece.mesh, p.world, scaledTint(tint, piece.colourScale), showTextures ? piece.texture : nullptr);
+                    else if (piece.translucent)
+                        renderer_.drawTranslucent(piece.mesh, p.world, scaledTint(Vec4f{tint.x, tint.y, tint.z, tint.w * piece.matDiffuseAlpha}, piece.colourScale),
+                                                  showTextures ? piece.texture : nullptr, showTextures ? piece.detail : nullptr, piece.detailUv1);
                     else renderer_.draw(piece.mesh, p.world, scaledTint(tint, piece.colourScale), true, showTextures ? piece.texture : nullptr, showTextures && piece.alphaTest,
                                         Vec4f{0, 0, 0, 0}, showTextures ? piece.glow : nullptr, piece.twoSided, piece.alphaReference);
                 }
@@ -1277,7 +1289,8 @@ void SceneView::queueDraws(const Selection& selection) {
                     return;
                 }
                 if (piece.translucent) {
-                    renderer_.drawTranslucent(piece.mesh, s.world, scaledTint(tint, piece.colourScale), showTextures ? piece.texture : nullptr);
+                    renderer_.drawTranslucent(piece.mesh, s.world, scaledTint(Vec4f{tint.x, tint.y, tint.z, tint.w * piece.matDiffuseAlpha}, piece.colourScale),
+                                              showTextures ? piece.texture : nullptr, showTextures ? piece.detail : nullptr, piece.detailUv1);
                     return;
                 }
                 const Vec4f hue = !showTextures || !piece.hued ? Vec4f{0, 0, 0, 0} : piece.flesh ? s.skinHue : partHue;

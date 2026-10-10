@@ -155,11 +155,15 @@ Vec3 vec3(const Properties& p, const char* key, const Vec3& fallback) {
     const std::vector<float> v = numbers(it->second);
     return v.size() >= 3 ? Vec3{v[0], v[1], v[2]} : fallback;
 }
-Vec3 colour255(const Properties& p, const char* key) {   // "r, g, b, a" in 0..255
+// Packed colour properties (LightKeyFrame Diffuse, FogKeyFrame Color: property type 10, string <-> packed ARGB by
+// FUN_00409650 / FUN_00409680 -> FUN_004191f0) are written as the bytes low to high: "b, g, r, a" in 0..255.
+// Verified 2026-10-11: Property_LightKeyFrame_DiffuseColorRef's getter (FUN_0082c150) reads the same packed value as
+// R = byte 2, G = byte 1, B = byte 0, and in all 4,381 shipped light keys DiffuseColor = Diffuse reversed.
+Vec3 packedColour(const Properties& p, const char* key) {
     const auto it = p.find(key);
     if (it == p.end()) return Vec3{};
     const std::vector<float> v = numbers(it->second);
-    return v.size() >= 3 ? Vec3{v[0] / 255.0f, v[1] / 255.0f, v[2] / 255.0f} : Vec3{};
+    return v.size() >= 3 ? Vec3{v[2] / 255.0f, v[1] / 255.0f, v[0] / 255.0f} : Vec3{};
 }
 
 SkyLight readLight(const XmlNode& node) {
@@ -177,7 +181,7 @@ SkyLight readLight(const XmlNode& node) {
             SkyLightKey key;
             key.time = number(k, "Time");
             key.type = uint32_t(number(k, "Type"));
-            key.colour = colour255(k, "Diffuse");
+            key.colour = packedColour(k, "Diffuse");
             key.diffuseIntensity = number(k, "DIntensity", 1);
             key.ambientIntensity = number(k, "AIntensity");
             key.specularIntensity = number(k, "SIntensity");
@@ -263,7 +267,7 @@ Sky readSky(const Bytes& data) {
             const Properties k = properties(&f);
             SkyFogKey key;
             key.time = number(k, "Time");
-            key.colour = colour255(k, "Color");
+            key.colour = packedColour(k, "Color");
             key.startDistance = number(k, "StartDist");
             key.endDistance = number(k, "EndDist");
             key.used = flag(k, "Used");

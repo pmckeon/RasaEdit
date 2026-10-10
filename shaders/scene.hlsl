@@ -20,7 +20,7 @@ cbuffer FragmentUniforms : register(b0, space3)
     float4 tint;              // multiplied with the vertex colour and the texture
     float4 lightDirection;    // xyz: towards the light (world space); w: 1 = lit, 0 = unlit
     float4 options;           // x: > 0 = alpha test, discard texture alpha below x; y: 1 = alpha-blended particle, 2 = translucent (lit, texture alpha);
-                              // z: 1 = additive; w: 1 = aniso additive
+                              // z: 1 = additive, 2 = lit additive (forward-phase pieces); w: 1 = aniso additive
     float4 hue;               // rgb added to the texel weighted by its alpha (the game's "Hue" effects); w: 1 = on
     float4 sunFront;          // rgb: directional light on surfaces facing it
     float4 sunBack;           // rgb: directional light's back colour (surfaces facing away)
@@ -38,7 +38,8 @@ cbuffer FragmentUniforms : register(b0, space3)
     row_major float4x4 shadowMatrix;   // world -> sun shadow map clip space
     float4 shadowParams;              // x: 1 = sun shadows on, y: opacity, z: 1 / map size
     float4 specular;          // aniso additive: MatSpecular
-    float4 layers;            // aniso additive: x detail on UV set 1, y decal on UV set 1, z has detail, w has decal
+    float4 layers;            // x detail on UV set 1, y decal on UV set 1, z has detail, w has decal (aniso additive and
+                              // forward-phase pieces)
 };
 
 [[vk::combinedImageSampler]] Texture2D diffuseTexture : register(t0, space2);
@@ -123,14 +124,34 @@ float4 psMain(VertexOutput input) : SV_Target0
         discard;
     // Hued textures (avatar skin, hair, clothing) are grey with the hue mask in alpha; the game's fallback
     // shader computes diffuse.rgb + Hue.rgb * diffuse.a (decal maps not applied here).
-    const float3 albedo = hue.w > 0.5 ? saturate(texel.rgb + hue.rgb * texel.a) : texel.rgb;
+    float3 albedo = hue.w > 0.5 ? saturate(texel.rgb + hue.rgb * texel.a) : texel.rgb;
+    // Detail layer, added around 0.5 grey (the forward TRDiffMapDetMapVertColor pixel shader psPixelShader:
+    // (diffuse + detail - 0.5) x lit vertex colour x 2). Set only for forward-phase pieces.
+    if (layers.z > 0.5)
+        albedo += detailTexture.Sample(detailSampler, layers.x > 0.5 ? input.uv1 : input.uv).rgb - 0.5;
     const float4 base = input.colour * tint * float4(albedo, 1.0);
     if (options.z > 0.5)
     {
         // Additive (TRAdditive* effects: glows, light cones, mist): unlit, blended one/one, scaled by texture alpha x
         // vertex alpha (as the game's TRAdditiveAnisoSpec* shader does; the plain additive shader is not stored -
-        // UNVERIFIED); fog fades it out.
-        const float3 added = base.rgb * texel.a * input.colour.a;
+        // UNVERIFIED); fog fades it out. options.z = 2: a forward-phase piece in the Additive phase, lit per vertex like
+        // the game's forward technique - vertex colour x (hemi + directional N.L + point lights), no shadow term -
+        // alpha = diffuse.a x vertex.a x MatDiffuse.a (tint.a), blended SRCALPHA / ONE (PhaseAdditive.fx).
+        float3 rgb = base.rgb;
+        if (options.z > 1.5)
+        {
+            const float3 nf = normalize(input.normal);
+            SkyLighting sf;
+            sf.towardsLight = normalize(lightDirection.xyz);
+            sf.sunFront = sunFront.rgb;
+            sf.sunBack = sunBack.rgb;
+            sf.hemiTop = hemiTop.rgb;
+            sf.hemiBottom = hemiBottom.rgb;
+            sf.sunVisibility = 1.0;
+            rgb *= skyLight(nf, sf) + localLights(input.world, nf, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner, localRotation,
+                                                  globeMaps, globeSampler);
+        }
+        const float3 added = rgb * texel.a * input.colour.a * (options.z > 1.5 ? tint.a : 1.0);
         const float3 black = applyFog(added, length(cameraPosition.xyz - input.world), float4(0, 0, 0, fogColour.w), fogRange);
         return float4(black, 1.0);
     }
@@ -155,7 +176,8 @@ float4 psMain(VertexOutput input) : SV_Target0
     s.hemiBottom = hemiBottom.rgb;
     // Glow maps add after lighting (the game's glow buffer, added in trhdrcomposite before fog).
     const float3 glow = glowTexture.Sample(glowSampler, input.uv1).rgb;
-    s.sunVisibility = sunShadow(shadowMap, shadowSampler, shadowMatrix, shadowParams, input.world, n);
+    // Translucent draws are forward pieces: the game's forward vertex shader has no shadow term.
+    s.sunVisibility = options.y > 1.5 ? 1.0 : sunShadow(shadowMap, shadowSampler, shadowMatrix, shadowParams, input.world, n);
     const float3 light = skyLight(n, s) + localLights(input.world, n, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner, localRotation,
                                                          globeMaps, globeSampler);
     if (fogRange.z > 0.5)

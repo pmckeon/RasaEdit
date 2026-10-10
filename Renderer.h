@@ -121,9 +121,13 @@ public:
     bool cullBackFaces = true;
     // Alpha-blended (opacity = tint.w x vertex alpha x texture alpha), lit, drawn after all opaque draws, without depth
     // writes: water, and pieces in the game's Translucent phase (SRCALPHA / INVSRCALPHA, PhaseTranslucent.fx).
-    void drawTranslucent(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, SDL_GPUTexture* texture = nullptr);
+    // detail: the forward pieces' detail layer (added around 0.5), sampled with UV set 1 when detailUv1.
+    void drawTranslucent(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, SDL_GPUTexture* texture = nullptr,
+                         SDL_GPUTexture* detail = nullptr, bool detailUv1 = false);
     // Additive (one, one), unlit, faded by fog, drawn last without depth writes: the game's TRAdditive* effects.
-    void drawAdditive(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, SDL_GPUTexture* texture);
+    // lit: a forward-phase piece in the Additive phase (lit per vertex, opacity x tint.w = MatDiffuse alpha).
+    void drawAdditive(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, SDL_GPUTexture* texture, bool lit = false,
+                      SDL_GPUTexture* detail = nullptr, bool detailUv1 = false);
     // The game's TRAdditiveAnisoSpec* effects (holograms): additive, with detail/decal layers and a view-angle light ramp.
     void drawAnisoAdditive(const GpuMesh& mesh, const Mat4& model, const AnisoMaterial& material);
     void drawTerrain(const GpuMesh& mesh, const TerrainMaterial& material);
@@ -157,6 +161,7 @@ private:
         Vec4f specular = Vec4f{0, 0, 0, 0};
         Vec4f layers = Vec4f{0, 0, 0, 0};
         bool aniso = false;
+        bool forwardLit = false;                 // lit additive (forward-phase piece)
         bool twoSided = false;
         float alphaReference = 0.5f;             // alpha test: texels below it are discarded
     };
