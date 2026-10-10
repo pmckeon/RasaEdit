@@ -51,7 +51,16 @@ public:
     // never drawn by the game (World::AddToWorld skips the graphics scene), so such entities get only their box.
     SceneView(Renderer& renderer, const tr::AssetLibrary& assets, const tr::MapBundle& map,
               std::function<std::string(int32_t)> meshForClass, std::function<bool(int32_t)> classKnown,
-              std::function<int32_t(int32_t)> cullingLayerForClass = nullptr, uint32_t terrainStep = 2);
+              std::function<int32_t(int32_t)> cullingLayerForClass = nullptr, uint32_t terrainStep = 0);
+    // Terrain detail by distance, like the game's TerrainLoaderClient quadtree (QuadNode): 64 m chunks drawn with every
+    // sample (1 m) near the camera and every 2nd / 4th / 8th sample further out; skirts hide the cracks where neighbours
+    // differ. Full detail matters: at 2 m the Caves of Donn stair top (y 5.0) poked through a plateau edge whose samples
+    // go 5.00 -> 0.75 within 1 m, which the game does not show. terrainStep (constructor) != 0 fixes the step instead
+    // (1, 2, 4 or 8; tests). The distances are the editor's own (the game's are not decoded).
+    float terrainDetailDistance = 160.0f;        // full detail within this distance of the camera; levels 1/2 at x2.5 / x6
+    size_t terrainBuildsPerFrame = 8;            // finer chunk meshes built per frame (tests: all at once)
+    size_t terrainChunkCount() const { return terrainChunks_.size(); }
+    size_t terrainChunksAtFullDetail() const { return terrainFullDetail_; }
     // The culling layer an entity ends up on (see above).
     int32_t entityCullingLayer(size_t entityIndex) const { return entityIndex < placements_.size() ? placements_[entityIndex].cullingLayer : 0; }
     ~SceneView();
@@ -219,7 +228,22 @@ private:
     // Puts the camera distance metres from target, looking at it (see focusOn).
     void frameTarget(const tr::Vec3& target, float distance);
     bool rayHitsModel(const Model& model, const tr::Vec3& origin, const tr::Vec3& dir, float& t) const;
-    void buildTerrain(uint32_t step);
+    // Terrain chunk: samples rows row0..row1, columns col0..col1 (edges shared with the neighbours), one mesh per level
+    // (step 1, 2, 4, 8); level 3 is built at load, finer ones on demand and released when the camera has moved away.
+    struct TerrainChunk {
+        uint32_t row0 = 0, row1 = 0, col0 = 0, col1 = 0;
+        tr::Vec3 centre;
+        float radius = 0;
+        GpuMesh level0, level1, level2, level3;
+    };
+    static GpuMesh& chunkLevel(TerrainChunk& chunk, uint32_t level);
+    void buildTerrainChunks();
+    GpuMesh buildTerrainChunkMesh(const TerrainChunk& chunk, uint32_t level) const;
+    void queueTerrain(const std::function<bool(const tr::Vec3&, float)>& visible);
+    std::vector<TerrainChunk> terrainChunks_;
+    float terrainLowest_ = 0, terrainRange_ = 1;
+    int32_t terrainFixedLevel_ = -1;             // >= 0: every chunk at this level
+    size_t terrainFullDetail_ = 0;
     void buildTerrainMaterial();
     void loadModel(const std::string& name, Model& model);
     SDL_GPUTexture* texture(const std::string& name);       // cached; nullptr if missing or unreadable
@@ -228,7 +252,6 @@ private:
     const tr::AssetLibrary& assets_;
     const tr::MapBundle& map_;
     ViewCamera camera_;
-    GpuMesh terrain_;
     TerrainMaterial terrainMaterial_;
     std::unordered_map<std::string, SDL_GPUTexture*> textures_;   // lower-case file name -> texture (or nullptr)
     std::map<std::string, std::string> textureErrors_;

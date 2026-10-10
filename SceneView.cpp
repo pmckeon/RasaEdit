@@ -202,7 +202,8 @@ SceneView::SceneView(Renderer& renderer, const tr::AssetLibrary& assets, const t
     pole_ = lineMesh({{0, 0, 0}, {0, 1, 0}}, {0, 1});
 
     if (map_.hasTerrain) {
-        buildTerrain(terrainStep);
+        if (terrainStep != 0) terrainFixedLevel_ = terrainStep >= 8 ? 3 : terrainStep >= 4 ? 2 : terrainStep >= 2 ? 1 : 0;
+        buildTerrainChunks();
         buildTerrainMaterial();
     }
 
@@ -488,7 +489,8 @@ SceneLighting SceneView::skyLightingAt() const {
 
 SceneView::~SceneView() {
     SDL_GPUDevice* device = renderer_.device();
-    renderer_.destroyMesh(terrain_);
+    for (TerrainChunk& chunk : terrainChunks_)
+        for (uint32_t level = 0; level < 4; ++level) renderer_.destroyMesh(chunkLevel(chunk, level));
     renderer_.destroyMesh(unitBox_);
     renderer_.destroyMesh(unitBoxLines_);
     renderer_.destroyMesh(unitCircle_);
@@ -551,13 +553,24 @@ void SceneView::buildTerrainMaterial() {
     }
     terrainMaterial_.layers = uploadRgbaArray(renderer_.device(), layers, size);
 
-    // Per-sample layer indices and weights, one texel per sample (row = z index, column = x index).
+    // Per-sample layer indices and coverages, one texel per sample (row = z index, column = x index). Coverage as the
+    // client's alpha masks (tr::slotCoverage).
     const tr::Terrain& t = map_.terrain;
+    const size_t layerCount = map_.textureLayers.size();
     std::vector<tr::Rgba8> indices(size_t(t.columns) * t.rows), weights(size_t(t.columns) * t.rows);
     for (size_t k = 0; k < t.samples.size(); ++k) {
         const tr::TerrainSample& s = t.samples[k];
-        indices[k] = tr::Rgba8{s.layer0.layerIndex, s.layer1.layerIndex, s.layer2.layerIndex, s.layer3.layerIndex};
-        weights[k] = tr::Rgba8{s.layer0.weight, s.layer1.weight, s.layer2.weight, s.layer3.weight};
+        // Texture array slice = the texlayers.tab entry (layer - 1); slots without one get slice 0 and no coverage.
+        const auto slice = [&](int slot) -> uint8_t {
+            const int entry = tr::textureLayerOf(tr::sampleLayer(s, slot));
+            return entry >= 0 && size_t(entry) < layerCount ? uint8_t(entry) : 0;
+        };
+        const auto coverage = [&](int slot) -> uint8_t {
+            const int entry = tr::textureLayerOf(tr::sampleLayer(s, slot));
+            return entry >= 0 && size_t(entry) < layerCount ? tr::slotCoverage(s, slot) : 0;
+        };
+        indices[k] = tr::Rgba8{slice(0), slice(1), slice(2), slice(3)};
+        weights[k] = tr::Rgba8{coverage(0), coverage(1), coverage(2), coverage(3)};
     }
     terrainMaterial_.layerIndices = uploadRgbaTexture(renderer_.device(), indices.data(), t.columns, t.rows);
     terrainMaterial_.layerWeights = uploadRgbaTexture(renderer_.device(), weights.data(), t.columns, t.rows);
@@ -568,55 +581,177 @@ void SceneView::buildTerrainMaterial() {
     terrainMaterial_.rows = t.rows;
 }
 
-void SceneView::buildTerrain(uint32_t step) {
+GpuMesh& SceneView::chunkLevel(TerrainChunk& chunk, uint32_t level) {
+    switch (level) {
+        case 0: return chunk.level0;
+        case 1: return chunk.level1;
+        case 2: return chunk.level2;
+        default: return chunk.level3;
+    }
+}
+
+void SceneView::buildTerrainChunks() {
     const tr::Terrain& t = map_.terrain;
-    const uint32_t rows = (t.boundedRows() - 1) / step + 1;
-    const uint32_t columns = (t.boundedColumns() - 1) / step + 1;
+    const uint32_t lastRow = t.boundedRows() - 1, lastColumn = t.boundedColumns() - 1;
+    // Height range for the untextured view's colour ramp.
     float lowest = 1e30f, highest = -1e30f;
-    for (uint32_t i = 0; i < rows; ++i)
-        for (uint32_t j = 0; j < columns; ++j)
-            if (t.hasData(i * step, j * step)) {
-                const float h = t.worldHeightAt(i * step, j * step);
+    for (uint32_t r = 0; r <= lastRow; r += 4)
+        for (uint32_t c = 0; c <= lastColumn; c += 4)
+            if (t.hasData(r, c)) {
+                const float h = t.worldHeightAt(r, c);
                 lowest = std::min(lowest, h);
                 highest = std::max(highest, h);
             }
-    const float range = highest > lowest ? highest - lowest : 1.0f;
-    auto heightAt = [&](int64_t i, int64_t j, float fallback) {
-        if (i < 0 || j < 0 || i >= int64_t(rows) || j >= int64_t(columns)) return fallback;
-        const uint32_t r = uint32_t(i) * step, c = uint32_t(j) * step;
-        return t.hasData(r, c) ? t.worldHeightAt(r, c) : fallback;
+    terrainLowest_ = lowest < highest ? lowest : 0.0f;
+    terrainRange_ = highest > lowest ? highest - lowest : 1.0f;
+    constexpr uint32_t chunkSamples = 64;
+    for (uint32_t r0 = 0; r0 < lastRow; r0 += chunkSamples) {
+        for (uint32_t c0 = 0; c0 < lastColumn; c0 += chunkSamples) {
+            TerrainChunk chunk;
+            chunk.row0 = r0;
+            chunk.row1 = std::min(r0 + chunkSamples, lastRow);
+            chunk.col0 = c0;
+            chunk.col1 = std::min(c0 + chunkSamples, lastColumn);
+            float low = 1e30f, high = -1e30f;
+            bool any = false;
+            for (uint32_t r = chunk.row0; r <= chunk.row1; ++r)
+                for (uint32_t c = chunk.col0; c <= chunk.col1; ++c)
+                    if (t.hasData(r, c)) {
+                        const float h = t.worldHeightAt(r, c);
+                        low = std::min(low, h);
+                        high = std::max(high, h);
+                        any = true;
+                    }
+            if (!any) continue;
+            const tr::Vec3 lo{t.worldX(chunk.col0), low, t.worldZ(chunk.row0)}, hi{t.worldX(chunk.col1), high, t.worldZ(chunk.row1)};
+            chunk.centre = scaled(add(lo, hi), 0.5f);
+            chunk.radius = length(subtract(hi, lo)) * 0.5f;
+            terrainChunks_.push_back(chunk);
+        }
+    }
+    // The coarsest level of every chunk up front (or the fixed level), so the whole map draws from the first frame.
+    const uint32_t loadLevel = terrainFixedLevel_ >= 0 ? uint32_t(terrainFixedLevel_) : 3u;
+    for (TerrainChunk& chunk : terrainChunks_) chunkLevel(chunk, loadLevel) = buildTerrainChunkMesh(chunk, loadLevel);
+}
+
+GpuMesh SceneView::buildTerrainChunkMesh(const TerrainChunk& chunk, uint32_t level) const {
+    const tr::Terrain& t = map_.terrain;
+    const uint32_t step = 1u << level;
+    const uint32_t lastRow = t.boundedRows() - 1, lastColumn = t.boundedColumns() - 1;
+    // Sample lines of this level, the chunk's far edges always included (they are shared with the neighbours).
+    std::vector<uint32_t> rowLines, columnLines;
+    for (uint32_t r = chunk.row0; r < chunk.row1; r += step) rowLines.push_back(r);
+    rowLines.push_back(chunk.row1);
+    for (uint32_t c = chunk.col0; c < chunk.col1; c += step) columnLines.push_back(c);
+    columnLines.push_back(chunk.col1);
+    auto heightAt = [&](int64_t r, int64_t c, float fallback) {
+        if (r < 0 || c < 0 || r > int64_t(lastRow) || c > int64_t(lastColumn)) return fallback;
+        return t.hasData(uint32_t(r), uint32_t(c)) ? t.worldHeightAt(uint32_t(r), uint32_t(c)) : fallback;
     };
     const float spacing = t.header.spacing * float(step);
-    std::vector<MeshVertex> vertices(size_t(rows) * columns);
-    for (uint32_t i = 0; i < rows; ++i) {
-        for (uint32_t j = 0; j < columns; ++j) {
-            const float h = heightAt(i, j, 0.0f);
-            MeshVertex& v = vertices[size_t(i) * columns + j];
-            v.positionX = t.worldX(j * step);
+    const size_t rows = rowLines.size(), columns = columnLines.size();
+    std::vector<MeshVertex> vertices;
+    vertices.reserve(rows * columns + 2 * (rows + columns));
+    for (uint32_t r : rowLines) {
+        for (uint32_t c : columnLines) {
+            const float h = heightAt(r, c, 0.0f);
+            MeshVertex v;
+            v.positionX = t.worldX(c);
             v.positionY = h;
-            v.positionZ = t.worldZ(i * step);
-            // Normal of the height field y = h(x, z): (-dh/dx, 1, -dh/dz).
-            const float dx = (heightAt(i, int64_t(j) + 1, h) - heightAt(i, int64_t(j) - 1, h)) / (2.0f * spacing);
-            const float dz = (heightAt(int64_t(i) + 1, j, h) - heightAt(int64_t(i) - 1, j, h)) / (2.0f * spacing);
+            v.positionZ = t.worldZ(r);
+            // Normal of the height field y = h(x, z): (-dh/dx, 1, -dh/dz), at this level's spacing.
+            const float dx = (heightAt(r, int64_t(c) + step, h) - heightAt(r, int64_t(c) - step, h)) / (2.0f * spacing);
+            const float dz = (heightAt(int64_t(r) + step, c, h) - heightAt(int64_t(r) - step, c, h)) / (2.0f * spacing);
             const tr::Vec3 n = normalized(tr::Vec3{-dx, 1.0f, -dz});
             v.normalX = n.x;
             v.normalY = n.y;
             v.normalZ = n.z;
-            v.colour = heightColour((h - lowest) / range);
+            v.colour = heightColour((h - terrainLowest_) / terrainRange_);
+            vertices.push_back(v);
         }
     }
     std::vector<uint32_t> indices;
-    indices.reserve(size_t(rows - 1) * (columns - 1) * 6);
-    for (uint32_t i = 0; i + 1 < rows; ++i) {
-        for (uint32_t j = 0; j + 1 < columns; ++j) {
-            if (!t.hasData(i * step, j * step) || !t.hasData((i + 1) * step, j * step) || !t.hasData(i * step, (j + 1) * step) ||
-                !t.hasData((i + 1) * step, (j + 1) * step))
+    indices.reserve((rows - 1) * (columns - 1) * 6 + 24 * (rows + columns));
+    for (size_t i = 0; i + 1 < rows; ++i) {
+        for (size_t j = 0; j + 1 < columns; ++j) {
+            if (!t.hasData(rowLines[i], columnLines[j]) || !t.hasData(rowLines[i + 1], columnLines[j]) || !t.hasData(rowLines[i], columnLines[j + 1]) ||
+                !t.hasData(rowLines[i + 1], columnLines[j + 1]))
                 continue;
-            const uint32_t a = i * columns + j, b = a + 1, c = a + columns, d = c + 1;
+            const uint32_t a = uint32_t(i * columns + j), b = a + 1, c = a + uint32_t(columns), d = c + 1;
             indices.insert(indices.end(), {a, c, d, a, d, b});
         }
     }
-    terrain_ = renderer_.createMesh(vertices, indices, false);
+    // Skirts: each edge copied a little below and joined to it, so a coarser neighbour leaves no gap (the terrain
+    // pipeline draws both sides). Deep enough for this level's largest interpolation error near cliffs.
+    const float skirtDepth = 2.0f + 2.0f * float(step);
+    auto skirt = [&](const std::vector<uint32_t>& edge) {
+        for (size_t k = 0; k + 1 < edge.size(); ++k) {
+            const MeshVertex& p = vertices[edge[k]];
+            const MeshVertex& q = vertices[edge[k + 1]];
+            const uint32_t base = uint32_t(vertices.size());
+            MeshVertex pd = p, qd = q;
+            pd.positionY -= skirtDepth;
+            qd.positionY -= skirtDepth;
+            vertices.push_back(pd);
+            vertices.push_back(qd);
+            indices.insert(indices.end(), {edge[k], edge[k + 1], base + 1, edge[k], base + 1, base});
+        }
+    };
+    std::vector<uint32_t> top, bottom, left, right;
+    for (size_t j = 0; j < columns; ++j) {
+        top.push_back(uint32_t(j));
+        bottom.push_back(uint32_t((rows - 1) * columns + j));
+    }
+    for (size_t i = 0; i < rows; ++i) {
+        left.push_back(uint32_t(i * columns));
+        right.push_back(uint32_t(i * columns + columns - 1));
+    }
+    if (!indices.empty()) {
+        skirt(top);
+        skirt(bottom);
+        skirt(left);
+        skirt(right);
+    }
+    return renderer_.createMesh(vertices, indices, false);
+}
+
+void SceneView::queueTerrain(const std::function<bool(const tr::Vec3&, float)>& visible) {
+    // Level by distance from the camera to the chunk's bounding sphere; finer levels built a few per frame (nearest first),
+    // and released once the camera is well beyond their range. Until a level exists the next coarser one is drawn.
+    auto wantedLevel = [&](const TerrainChunk& chunk) -> uint32_t {
+        if (terrainFixedLevel_ >= 0) return uint32_t(terrainFixedLevel_);
+        const float d = std::max(0.0f, length(subtract(chunk.centre, camera_.position)) - chunk.radius);
+        return d < terrainDetailDistance ? 0u : d < terrainDetailDistance * 2.5f ? 1u : d < terrainDetailDistance * 6.0f ? 2u : 3u;
+    };
+    auto releaseDistance = [&](uint32_t level) { return level == 0 ? terrainDetailDistance * 1.5f : level == 1 ? terrainDetailDistance * 3.5f : terrainDetailDistance * 8.0f; };
+    std::vector<std::pair<float, size_t>> wanted;
+    for (size_t k = 0; k < terrainChunks_.size(); ++k) {
+        TerrainChunk& chunk = terrainChunks_[k];
+        const float d = std::max(0.0f, length(subtract(chunk.centre, camera_.position)) - chunk.radius);
+        if (terrainFixedLevel_ < 0)
+            for (uint32_t level = 0; level < 3; ++level)
+                if (chunkLevel(chunk, level).vertices && d > releaseDistance(level)) renderer_.destroyMesh(chunkLevel(chunk, level));
+        const uint32_t want = wantedLevel(chunk);
+        if (!chunkLevel(chunk, want).vertices) wanted.push_back({d, k});
+    }
+    std::sort(wanted.begin(), wanted.end());
+    for (size_t n = 0; n < wanted.size() && n < terrainBuildsPerFrame; ++n) {
+        TerrainChunk& chunk = terrainChunks_[wanted[n].second];
+        const uint32_t want = wantedLevel(chunk);
+        chunkLevel(chunk, want) = buildTerrainChunkMesh(chunk, want);
+    }
+    terrainFullDetail_ = 0;
+    const float maxDistance = drawDistance + 64.0f;
+    for (TerrainChunk& chunk : terrainChunks_) {
+        if (length(subtract(chunk.centre, camera_.position)) - chunk.radius > maxDistance || !visible(chunk.centre, chunk.radius)) continue;
+        const GpuMesh* mesh = nullptr;
+        for (uint32_t level = wantedLevel(chunk); level < 4 && !mesh; ++level)
+            if (chunkLevel(chunk, level).vertices) mesh = &chunkLevel(chunk, level);
+        if (!mesh) continue;
+        if (mesh == &chunk.level0) ++terrainFullDetail_;
+        if (showTextures && terrainMaterial_.layers) renderer_.drawTerrain(*mesh, terrainMaterial_);
+        else renderer_.draw(*mesh, identityMatrix(), Vec4f{1, 1, 1, 1}, true);     // height-tinted vertex colours
+    }
 }
 
 // ------------------------------------------------------------------------------------------
@@ -903,10 +1038,6 @@ void SceneView::queueDraws(const Selection& selection) {
     const float aspect = float(renderer_.width()) / float(std::max<uint32_t>(1, renderer_.height()));
     const Mat4 viewProjection = multiply(camera_.projectionMatrix(aspect), camera_.viewMatrix());
     renderer_.beginFrame(viewProjection, camera_.position, lighting());
-    if (showTerrain && terrain_.vertices) {
-        if (showTextures && terrainMaterial_.layers) renderer_.drawTerrain(terrain_, terrainMaterial_);
-        else renderer_.draw(terrain_, identityMatrix(), Vec4f{1, 1, 1, 1}, true);     // height-tinted vertex colours
-    }
 
     // Frustum test against the clip-space planes of viewProjection (Gribb/Hartmann, depth 0..1).
     const Vec4f& r0 = viewProjection.row0; const Vec4f& r1 = viewProjection.row1;
@@ -922,6 +1053,7 @@ void SceneView::queueDraws(const Selection& selection) {
         }
         return true;
     };
+    if (showTerrain && !terrainChunks_.empty()) queueTerrain(visible);
 
     // Map entities and server objects are lit and tinted alike; only the selection is highlighted.
     auto modelTint = [&](bool selected) {

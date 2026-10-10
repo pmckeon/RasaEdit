@@ -1,9 +1,10 @@
 // terrain.hlsl - blended terrain layers for the 3D viewport.
 //
-// Every terrain sample has four (layer index, weight) pairs. They arrive as two RGBA8 textures with
-// one texel per sample (read with a point sampler). For each pixel the four surrounding samples
-// are blended by their own weights (normalised), then interpolated bilinearly, which reproduces
-// the per-sample blend without seams or a per-patch layer limit. Layers live in one texture array
+// Every terrain sample has four (layer index, coverage) pairs. They arrive as two RGBA8 textures with
+// one texel per sample (read with a point sampler); coverage is the client's alpha-mask value
+// (tr::slotCoverage). For each pixel the four surrounding samples are summed by coverage - the game
+// adds one pass per layer, texture x mask, and leaves what no layer covers black - then interpolated
+// bilinearly (the game's masks are filtered textures at one texel per sample). Layers live in one texture array
 // and are projected tri-planar with the game's hard switch by normal (TRTerrain shader:
 // |n.x| > 0.5 -> X-facing, else |n.z| > 0.5 -> Z-facing, else top-down), scaled by each layer's
 // tiling (taken as metres per repeat). Registers as in scene.hlsl; lighting and fog as in lighting.hlsli.
@@ -89,7 +90,10 @@ float4 psMain(VertexOutput input) : SV_Target0
     const float3 n = normalize(input.normal);
     const float3 an = abs(n);
     // Tri-planar projection chosen once per pixel; gradients taken outside the loops.
-    const float2 projected = an.x > 0.5 ? input.world.zy : (an.z > 0.5 ? input.world.xy : input.world.xz);
+    // The game's layer coordinates are position x gLayMat = scale(1/t, 1/t, -1/t) (FUN_007423f0; TRTerrainClient vertex
+    // shader: oT3 = v0 x gLayMat), i.e. z mirrored, sampled as .xz (top), .zy (X-facing), .xy (Z-facing).
+    const float3 layerPosition = float3(input.world.x, input.world.y, -input.world.z);
+    const float2 projected = an.x > 0.5 ? layerPosition.zy : (an.z > 0.5 ? layerPosition.xy : layerPosition.xz);
     const float2 dx = ddx(projected), dy = ddy(projected);
 
     const float2 g = float2((input.world.x - grid.x) * grid.z, (input.world.z - grid.y) * grid.z);
@@ -100,10 +104,10 @@ float4 psMain(VertexOutput input) : SV_Target0
     {
         const float2 offset = float2(corner & 1, corner >> 1);
         const float2 sampleUv = (clamp(cell + offset, float2(0, 0), gridSize.xy - 1) + 0.5) * gridSize.zw;
-        const float4 indices = layerIndices.SampleLevel(indexSampler, sampleUv, 0) * 255.0 + 0.5;
-        float4 weights = layerWeights.SampleLevel(weightSampler, sampleUv, 0);
-        const float total = dot(weights, float4(1, 1, 1, 1));
-        weights = total > 0.0 ? weights / total : float4(1, 0, 0, 0);
+        // round(), not + 0.5 and a uint cast: DXC folded float(uint(x + 0.5)) to x + 0.5, and the array slice selection
+        // rounds that (index 13 drew slice 14, measured on Vulkan and D3D12).
+        const float4 indices = round(layerIndices.SampleLevel(indexSampler, sampleUv, 0) * 255.0);
+        const float4 weights = layerWeights.SampleLevel(weightSampler, sampleUv, 0);
         const float bilinear = (offset.x > 0.5 ? f.x : 1.0 - f.x) * (offset.y > 0.5 ? f.y : 1.0 - f.y);
         [unroll] for (uint slot = 0; slot < 4; ++slot)
         {

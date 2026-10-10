@@ -35,7 +35,8 @@ int main(int argc, char** argv) {
         tr::GameData data(argv[2]);
         const tr::MapBundle map = tr::loadMap(assets, argv[3]);
         SceneView scene(renderer, assets, map, [&](int32_t id) { return data.classMeshName(id); },
-                        [&](int32_t id) { return !data.className(id).empty(); }, [&](int32_t id) { return data.classCullingLayer(id); });
+                        [&](int32_t id) { return !data.className(id).empty(); }, [&](int32_t id) { return data.classCullingLayer(id); },
+                        envValue("RASA_TERRAINSTEP") ? uint32_t(std::atoi(envValue("RASA_TERRAINSTEP"))) : 0u);   // 0 = automatic
         {
             std::vector<std::pair<int32_t, std::string>> regionSkies;
             for (const tr::MapRegion& r : map.map.regions)
@@ -198,6 +199,7 @@ int main(int argc, char** argv) {
         // RASA_NOPARTICLES=1 leaves them out.
         if (envValue("RASA_NOPARTICLES")) scene.showParticles = false;
         if (envValue("RASA_NOTERRAIN")) scene.showTerrain = false;
+        scene.terrainBuildsPerFrame = SIZE_MAX;      // a single frame: every chunk at its distance's detail
         if (envValue("RASA_TWOSIDED")) renderer.cullBackFaces = false;
         if (envValue("RASA_NOENTITIES")) scene.showEntities = false;
         const float particleSeconds = envValue("RASA_PARTICLES") ? float(std::atof(envValue("RASA_PARTICLES"))) : 0.5f;
@@ -207,12 +209,31 @@ int main(int argc, char** argv) {
         for (const auto& e : scene.textureErrors()) std::printf("texture error: %s: %s\n", e.first.c_str(), e.second.c_str());
         scene.queueDraws(Selection{});
         std::printf("draws queued: %zu (entities drawn %zu), particle vertices %zu\n", renderer.queuedDraws(), scene.drawnEntities(), renderer.queuedParticleVertices());
+        std::printf("terrain chunks: %zu, %zu at full detail\n", scene.terrainChunkCount(), scene.terrainChunksAtFullDetail());
         {
             tr::Vec3 rayOrigin, rayDirection, ground;
             scene.viewRay(0.0f, 0.0f, rayOrigin, rayDirection);
             if (scene.groundPoint(rayOrigin, rayDirection, 0.0f, ground))
+            {
                 std::printf("ground under the view centre: %.2f, %.2f, %.2f (terrain height there %.2f)\n", ground.x, ground.y, ground.z,
                             scene.groundHeight(ground.x, ground.z, -9999.0f));
+                // The sample there: layers (texlayers.tab name) with stored weight and the client's coverage.
+                const tr::Terrain& t = map.terrain;
+                const long column = std::lround((ground.x - t.worldX(0)) / t.header.spacing);
+                const long row = std::lround((ground.z - t.worldZ(0)) / t.header.spacing);
+                if (map.hasTerrain && column >= 0 && row >= 0 && column < long(t.columns) && row < long(t.rows)) {
+                    const tr::TerrainSample& s = t.sampleAt(uint32_t(row), uint32_t(column));
+                    std::printf("terrain sample (row %ld, column %ld), category %d:", row, column, int(tr::surfaceCategory(s.word)));
+                    for (int k = 0; k < 4; ++k) {
+                        const tr::LayerBlend& b = tr::sampleLayer(s, k);
+                        const int entry = tr::textureLayerOf(b);
+                        std::printf(" [%d %s w%d c%d]", int(b.layerIndex),
+                                    entry >= 0 && size_t(entry) < map.textureLayers.size() ? map.textureLayers[entry].name.c_str() : "-", int(b.weight),
+                                    int(tr::slotCoverage(s, k)));
+                    }
+                    std::printf("\n");
+                }
+            }
         }
         const Selection hit = scene.pick(0.0f, 0.0f);    // centre of the view
         const int picked = hit.kind == SelectionKind::MapEntity ? int(hit.index) : -1;

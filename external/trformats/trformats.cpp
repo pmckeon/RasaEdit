@@ -219,6 +219,22 @@ const LayerBlend& sampleLayer(const TerrainSample& sample, int index) {
     }
 }
 
+uint8_t slotCoverage(const TerrainSample& sample, int index) {
+    const uint8_t layer = sampleLayer(sample, index).layerIndex;
+    // The weight of the layer is that of its first slot (FUN_0072aa20).
+    float weight = 0.0f;
+    for (int k = 0; k < 4; ++k)
+        if (sampleLayer(sample, k).layerIndex == layer) {
+            weight = sampleLayer(sample, k).weight * (1.0f / 255.0f);
+            break;
+        }
+    if (layer == 0 || weight <= 0.001f) return 0;     // slots naming layer 0 only feed the base mask
+    for (int k = 0; k < 4; ++k)
+        if (sampleLayer(sample, k).layerIndex > layer) weight *= 1.0f - sampleLayer(sample, k).weight * (1.0f / 255.0f);
+    if (weight <= 0.001f) return 0;
+    return static_cast<uint8_t>(std::min(255, static_cast<int>(weight * 255.0f + 0.5f)));   // truncating conversion
+}
+
 uint32_t Terrain::boundedRows() const {
     const auto n = uint32_t(std::lround((header.bounds.max.z - header.bounds.min.z) / header.spacing)) + 1;
     return std::min(n, rows);

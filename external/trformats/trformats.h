@@ -148,7 +148,7 @@ struct TerrainHeader {
 };
 
 struct LayerBlend {
-    uint8_t layerIndex = 0;      // index into readTextureLayers()
+    uint8_t layerIndex = 0;      // 1-based: texture layer layerIndex - 1 of readTextureLayers(); 0 = none (textureLayerOf)
     uint8_t weight = 0;          // 0-255 (the client turns these into per-patch RGBA alpha masks)
 };
 
@@ -168,6 +168,16 @@ inline uint16_t heightFixed13(uint16_t word) {
 }
 float worldHeight(const TerrainHeader& header, uint16_t word);
 const LayerBlend& sampleLayer(const TerrainSample& sample, int index);    // index 0-3
+// The texlayers.tab entry a slot names, or -1 for layer 0 (no layer). Verified in tabula_rasa.exe: FUN_0072f3b0 maps
+// layer n to entry n - 1 when 1 <= n <= the entry count, else -1; the largest index in shipped samples is the count.
+inline int textureLayerOf(const LayerBlend& blend) { return int(blend.layerIndex) - 1; }
+// How much of a sample one slot's layer covers, 0-255, as the client builds its terrain alpha masks
+// (alphamaskmgr / FUN_00743230, weight FUN_0093fdd0): layers composite in layer-index order, higher indices over
+// lower - the slot's weight times (1 - weight) of every slot with a higher layer index, 0 at or below 0.001, then
+// int(x * 255 + 0.5). Not normalised: the colour is the sum of layer texture x coverage, and what no layer covers
+// stays black (the base pass writes albedo 0). Layer 0 means no layer (it feeds only the base pass's mask), so its
+// slots return 0. (A layer named in two slots would count twice; no shipped sample does that.)
+uint8_t slotCoverage(const TerrainSample& sample, int index);
 
 struct Terrain {
     TerrainHeader header;
