@@ -500,6 +500,14 @@ struct GeoBone {
     Quat rotation;
     Vec3 translation;
     Vec3 scale{1, 1, 1};
+    // BDAT's 4x4 matrix: the inverse bind pose in mesh space (Direct3D row-vector layout, translation in the last row):
+    // bone-local = v.x * inverseBindX + v.y * inverseBindY + v.z * inverseBindZ + inverseBindT. Skinning uses it as
+    // posed world x inverse bind; it can differ from the inverse of the PSKE transforms (npc_eloh_hologram_large).
+    bool hasInverseBind = false;
+    Vec3 inverseBindX{1, 0, 0};
+    Vec3 inverseBindY{0, 1, 0};
+    Vec3 inverseBindZ{0, 0, 1};
+    Vec3 inverseBindT{0, 0, 0};
 };
 
 struct GeoProperty {

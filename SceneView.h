@@ -112,6 +112,8 @@ public:
     bool skyLighting = true;                // false: plain editor lighting
     bool showFog = true;                    // distance fog in the sky colour (the .sky's own "Used" flag is false everywhere)
     bool showMapLights = true;              // the map's lights.xml (up to 16 nearest the camera)
+    bool showLightBuffer = false;
+    float ambientScale = 1;                 // debug/experiment: multiplies the sky's hemisphere light           // debug: draw 0.2 x light like the game's /dl_showlight
     bool showSun = true;                    // the sky's sun/moon; off for caves (the game shadows it; no shadows here)
     const std::vector<tr::PlacedLight>& mapLights() const { return mapLights_; }
     const std::string& mapLightsError() const { return mapLightsError_; }
@@ -134,6 +136,8 @@ private:
         bool additive = false;                 // TRAdditive* effect: drawn additively with Effects on, not pickable
         bool flesh = false;                    // swap group "flesh": hued with the skin colour
         uint32_t swapId = 0;                   // avatar swap set (0: not swappable)
+        bool aniso = false;                    // TRAdditiveAnisoSpec* effect (holograms): drawn with anisoMaterial
+        AnisoMaterial anisoMaterial;           // textures owned by textures_
     };
     struct Model {
         std::vector<ModelPiece> pieces;
@@ -176,7 +180,7 @@ private:
         AreaShape shape;
     };
     // poseAnimation: skin the model into the first frame of this .anm ("" = as authored, bind pose).
-    Model* modelFor(const std::string& mesh, const std::string& poseAnimation = "");
+    Model* modelFor(const std::string& mesh, const std::string& poseAnimation = "", const std::string& skeletonMesh = "");
     SceneLighting skyLightingAt() const;       // the sky part of lighting()
     // Puts the camera distance metres from target, looking at it (see focusOn).
     void frameTarget(const tr::Vec3& target, float distance);

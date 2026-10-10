@@ -19,26 +19,34 @@ cbuffer FragmentUniforms : register(b0, space3)
 {
     float4 tint;              // multiplied with the vertex colour and the texture
     float4 lightDirection;    // xyz: towards the light (world space); w: 1 = lit, 0 = unlit
-    float4 options;           // x: 1 = alpha test (discard below 0.5); z: 1 = additive
+    float4 options;           // x: 1 = alpha test (discard below 0.5); z: 1 = additive; w: 1 = aniso additive (holograms)
     float4 hue;               // rgb added to the texel weighted by its alpha (the game's "Hue" effects); w: 1 = on
     float4 sunFront;          // rgb: directional light on surfaces facing it
     float4 sunBack;           // rgb: directional light's back colour (surfaces facing away)
     float4 hemiTop;           // rgb: hemispheric light from above
     float4 hemiBottom;        // rgb: hemispheric light from below
     float4 fogColour;         // rgb; w: 1 = fog on
-    float4 fogRange;          // x: start distance, y: density
+    float4 fogRange;          // x: start distance, y: density, z: 1 = light-buffer debug view
     float4 cameraPosition;    // xyz
     float4 localCount;        // x: number of placed lights
     float4 localPosition[MAX_LOCAL_LIGHTS];
     float4 localColour[MAX_LOCAL_LIGHTS];
     float4 localSpot[MAX_LOCAL_LIGHTS];
     float4 localSpotInner[MAX_LOCAL_LIGHTS];
+    float4 specular;          // aniso additive: MatSpecular
+    float4 layers;            // aniso additive: x detail on UV set 1, y decal on UV set 1, z has detail, w has decal
 };
 
 [[vk::combinedImageSampler]] Texture2D diffuseTexture : register(t0, space2);
 [[vk::combinedImageSampler]] SamplerState diffuseSampler : register(s0, space2);
 [[vk::combinedImageSampler]] Texture2D glowTexture : register(t1, space2);
 [[vk::combinedImageSampler]] SamplerState glowSampler : register(s1, space2);
+[[vk::combinedImageSampler]] Texture2D detailTexture : register(t2, space2);
+[[vk::combinedImageSampler]] SamplerState detailSampler : register(s2, space2);
+[[vk::combinedImageSampler]] Texture2D decalTexture : register(t3, space2);
+[[vk::combinedImageSampler]] SamplerState decalSampler : register(s3, space2);
+[[vk::combinedImageSampler]] Texture2D lightTexture : register(t4, space2);
+[[vk::combinedImageSampler]] SamplerState lightSampler : register(s4, space2);
 
 struct VertexInput
 {
@@ -72,8 +80,35 @@ VertexOutput vsMain(VertexInput input)
     return output;
 }
 
+// The game's TRAdditiveAnisoSpecMapDiffMap[DetMapDecMap]VertColor pixel shader (effects.glm, disassembled):
+// a detail layer added around 0.5 grey, a decal blended by its alpha, and a specular term from LightTexture,
+// an alpha ramp looked up by how directly the surface faces the camera (N.V, not two-sided).
+float3 anisoAdditive(VertexOutput input)
+{
+    const float4 diffuse = diffuseTexture.Sample(diffuseSampler, input.uv);
+    float3 albedo = diffuse.rgb;
+    if (layers.z > 0.5)
+        albedo += detailTexture.Sample(detailSampler, layers.x > 0.5 ? input.uv1 : input.uv).rgb - 0.5;
+    if (layers.w > 0.5)
+    {
+        const float4 decal = decalTexture.Sample(decalSampler, layers.y > 0.5 ? input.uv1 : input.uv);
+        albedo = lerp(albedo, decal.rgb, decal.a);
+    }
+    const float facing = max(dot(normalize(input.normal), normalize(cameraPosition.xyz - input.world)), 0.0);
+    const float ramp = lightTexture.Sample(lightSampler, float2(0.5, facing)).a;
+    const float alpha = diffuse.a * input.colour.a * tint.a;
+    return max(4.0 * alpha * albedo * (albedo * input.colour.rgb + ramp * specular.rgb), 0.0);
+}
+
 float4 psMain(VertexOutput input) : SV_Target0
 {
+    if (fogRange.z > 0.5 && (options.w > 0.5 || options.z > 0.5))
+        return float4(0, 0, 0, 1);             // light-buffer view: additive effects are not lit geometry
+    if (options.w > 0.5)
+    {
+        const float3 colour = applyFog(anisoAdditive(input), length(cameraPosition.xyz - input.world), float4(0, 0, 0, fogColour.w), fogRange);
+        return float4(colour, 1.0);
+    }
     const float4 texel = diffuseTexture.Sample(diffuseSampler, input.uv);
     if (options.x > 0.5 && texel.a < 0.5)
         discard;
@@ -83,8 +118,11 @@ float4 psMain(VertexOutput input) : SV_Target0
     const float4 base = input.colour * tint * float4(albedo, 1.0);
     if (options.z > 0.5)
     {
-        // Additive (TRAdditive* effects: glows, holograms, light cones): unlit, blended one/one; fog fades it out.
-        const float3 black = applyFog(base.rgb, length(cameraPosition.xyz - input.world), float4(0, 0, 0, fogColour.w), fogRange);
+        // Additive (TRAdditive* effects: glows, light cones, mist): unlit, blended one/one, scaled by texture alpha x
+        // vertex alpha (as the game's TRAdditiveAnisoSpec* shader does; the plain additive shader is not stored -
+        // UNVERIFIED); fog fades it out.
+        const float3 added = base.rgb * texel.a * input.colour.a;
+        const float3 black = applyFog(added, length(cameraPosition.xyz - input.world), float4(0, 0, 0, fogColour.w), fogRange);
         return float4(black, 1.0);
     }
     if (lightDirection.w < 0.5)
@@ -102,6 +140,9 @@ float4 psMain(VertexOutput input) : SV_Target0
     s.hemiBottom = hemiBottom.rgb;
     // Glow maps add after lighting (the game's glow buffer, added in trhdrcomposite before fog).
     const float3 glow = glowTexture.Sample(glowSampler, input.uv1).rgb;
-    const float3 lit = base.rgb * (skyLight(n, s) + localLights(input.world, n, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner)) + glow;
+    const float3 light = skyLight(n, s) + localLights(input.world, n, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner);
+    if (fogRange.z > 0.5)
+        return float4(light * 0.2, 1.0);       // the game's light buffer (x OO_LIGHT_MULTIPLIER), as /dl_showlight shows it
+    const float3 lit = base.rgb * light + glow;
     return float4(applyFog(lit, length(view), fogColour, fogRange), base.a);
 }

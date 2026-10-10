@@ -32,9 +32,11 @@ struct LightingUniforms {
 struct SceneFragmentUniforms {
     Vec4f tint;
     Vec4f lightDirection;          // w: 1 = lit, 0 = unlit
-    Vec4f options;                 // x: alpha test
+    Vec4f options;                 // x: alpha test, z: additive, w: aniso additive
     Vec4f hue;                     // rgb added, weighted by the texture alpha; w: 1 = on
     LightingUniforms lighting;
+    Vec4f specular;                // aniso additive: MatSpecular
+    Vec4f layers;                  // aniso additive: x detail uses UV set 1, y decal uses UV set 1, z 1 = has detail, w 1 = has decal
 };
 
 struct TerrainFragmentUniforms {
@@ -52,7 +54,7 @@ LightingUniforms lightingUniforms(const SceneLighting& l, const Vec4f& cameraPos
     u.hemiTop = l.hemiTop;
     u.hemiBottom = l.hemiBottom;
     u.fogColour = Vec4f{l.fogColour.x, l.fogColour.y, l.fogColour.z, l.fog ? 1.0f : 0.0f};
-    u.fogRange = Vec4f{l.fogStart, l.fogDensity, 0, 0};
+    u.fogRange = Vec4f{l.fogStart, l.fogDensity, l.showLight ? 1.0f : 0.0f, 0};
     u.cameraPosition = cameraPosition;
     u.localCount = Vec4f{float(l.localCount), 0, 0, 0};
     for (int i = 0; i < SceneLighting::maxLocalLights; ++i) {
@@ -66,12 +68,12 @@ LightingUniforms lightingUniforms(const SceneLighting& l, const Vec4f& cameraPos
 
 [[noreturn]] void fail(const char* what) { throw std::runtime_error(std::string(what) + ": " + SDL_GetError()); }
 
-SDL_GPUSampler* createSampler(SDL_GPUDevice* device, bool linear) {
+SDL_GPUSampler* createSampler(SDL_GPUDevice* device, bool linear, bool repeat) {
     SDL_GPUSamplerCreateInfo info = {};
     info.min_filter = linear ? SDL_GPU_FILTER_LINEAR : SDL_GPU_FILTER_NEAREST;
     info.mag_filter = linear ? SDL_GPU_FILTER_LINEAR : SDL_GPU_FILTER_NEAREST;
     info.mipmap_mode = linear ? SDL_GPU_SAMPLERMIPMAPMODE_LINEAR : SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
-    const SDL_GPUSamplerAddressMode mode = linear ? SDL_GPU_SAMPLERADDRESSMODE_REPEAT : SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+    const SDL_GPUSamplerAddressMode mode = repeat ? SDL_GPU_SAMPLERADDRESSMODE_REPEAT : SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
     info.address_mode_u = mode;
     info.address_mode_v = mode;
     info.address_mode_w = mode;
@@ -95,7 +97,7 @@ Renderer::Renderer(SDL_GPUDevice* device) : device_(device) {
     sceneVertex_ = createShader(sceneVertexDxil, sizeof sceneVertexDxil, sceneVertexSpirv, sizeof sceneVertexSpirv, "vsMain",
                                 SDL_GPU_SHADERSTAGE_VERTEX, 0);
     sceneFragment_ = createShader(sceneFragmentDxil, sizeof sceneFragmentDxil, sceneFragmentSpirv, sizeof sceneFragmentSpirv, "psMain",
-                                  SDL_GPU_SHADERSTAGE_FRAGMENT, 2);
+                                  SDL_GPU_SHADERSTAGE_FRAGMENT, 5);
     terrainVertex_ = createShader(terrainVertexDxil, sizeof terrainVertexDxil, terrainVertexSpirv, sizeof terrainVertexSpirv, "vsMain",
                                   SDL_GPU_SHADERSTAGE_VERTEX, 0);
     terrainFragment_ = createShader(terrainFragmentDxil, sizeof terrainFragmentDxil, terrainFragmentSpirv, sizeof terrainFragmentSpirv,
@@ -107,8 +109,9 @@ Renderer::Renderer(SDL_GPUDevice* device) : device_(device) {
     terrainPipeline_ = createPipeline(terrainVertex_, terrainFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST);
     translucentPipeline_ = createPipeline(sceneVertex_, sceneFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST, 1);
     additivePipeline_ = createPipeline(sceneVertex_, sceneFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST, 2);
-    linearSampler_ = createSampler(device_, true);
-    pointSampler_ = createSampler(device_, false);
+    linearSampler_ = createSampler(device_, true, true);
+    pointSampler_ = createSampler(device_, false, false);
+    clampSampler_ = createSampler(device_, true, false);
     const uint32_t white = 0xFFFFFFFF;
     white_ = uploadRgbaTexture(device_, &white, 1, 1);
     const uint32_t black = 0xFF000000;
@@ -123,6 +126,7 @@ Renderer::~Renderer() {
     if (black_) SDL_ReleaseGPUTexture(device_, black_);
     if (linearSampler_) SDL_ReleaseGPUSampler(device_, linearSampler_);
     if (pointSampler_) SDL_ReleaseGPUSampler(device_, pointSampler_);
+    if (clampSampler_) SDL_ReleaseGPUSampler(device_, clampSampler_);
     for (SDL_GPUGraphicsPipeline* p : {trianglePipeline_, linePipeline_, terrainPipeline_, translucentPipeline_, additivePipeline_})
         if (p) SDL_ReleaseGPUGraphicsPipeline(device_, p);
     for (SDL_GPUShader* s : {sceneVertex_, sceneFragment_, terrainVertex_, terrainFragment_})
@@ -323,6 +327,20 @@ void Renderer::drawAdditive(const GpuMesh& mesh, const Mat4& model, const Vec4f&
     additiveDraws_.push_back(item);
 }
 
+void Renderer::drawAnisoAdditive(const GpuMesh& mesh, const Mat4& model, const AnisoMaterial& material) {
+    if (!mesh.vertices || mesh.indexCount == 0) return;
+    DrawItem item{&mesh, model, material.diffuseAlpha, false, material.diffuse ? material.diffuse : white_, false, nullptr, true, Vec4f{0, 0, 0, 0},
+                  black_};
+    item.additive = true;
+    item.detail = material.detail;
+    item.decal = material.decal;
+    item.light = material.light;
+    item.specular = material.specular;
+    item.aniso = true;
+    item.layers = Vec4f{material.detailUv1 ? 1.0f : 0.0f, material.decalUv1 ? 1.0f : 0.0f, material.detail ? 1.0f : 0.0f, material.decal ? 1.0f : 0.0f};
+    additiveDraws_.push_back(item);
+}
+
 void Renderer::drawTerrain(const GpuMesh& mesh, const TerrainMaterial& material) {
     if (!mesh.vertices || mesh.indexCount == 0 || !material.layers || !material.layerIndices || !material.layerWeights) return;
     draws_.push_back(DrawItem{&mesh, identityMatrix(), Vec4f{1, 1, 1, 1}, true, nullptr, false, &material, false, Vec4f{0, 0, 0, 0}, nullptr});
@@ -385,10 +403,14 @@ void Renderer::recordItem(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pas
         }
         SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof u);
     } else {
-        const SDL_GPUTextureSamplerBinding samplers[2] = {{item.texture, linearSampler_}, {item.glow ? item.glow : black_, linearSampler_}};
-        SDL_BindGPUFragmentSamplers(pass, 0, samplers, 2);
-        SceneFragmentUniforms u{item.tint, towardsLight_, Vec4f{item.alphaTest ? 1.0f : 0.0f, 0, item.additive ? 1.0f : 0.0f, 0}, item.hue,
-                                lightingUniforms(lighting_, cameraPosition_)};
+        // Unused detail/decal slots are switched off by layers.z/w; the light ramp defaults to opaque white.
+        const SDL_GPUTextureSamplerBinding samplers[5] = {{item.texture, linearSampler_}, {item.glow ? item.glow : black_, linearSampler_},
+                                                          {item.detail ? item.detail : black_, linearSampler_},
+                                                          {item.decal ? item.decal : black_, linearSampler_},
+                                                          {item.light ? item.light : white_, clampSampler_}};
+        SDL_BindGPUFragmentSamplers(pass, 0, samplers, 5);
+        SceneFragmentUniforms u{item.tint, towardsLight_, Vec4f{item.alphaTest ? 1.0f : 0.0f, 0, item.additive ? 1.0f : 0.0f, item.aniso ? 1.0f : 0.0f},
+                                item.hue, lightingUniforms(lighting_, cameraPosition_), item.specular, item.layers};
         u.lightDirection.w = item.lit ? 1.0f : 0.0f;
         SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof u);
     }

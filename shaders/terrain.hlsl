@@ -26,7 +26,7 @@ cbuffer FragmentUniforms : register(b0, space3)
     float4 hemiTop;
     float4 hemiBottom;
     float4 fogColour;         // rgb; w: 1 = fog on
-    float4 fogRange;          // x: start distance, y: density
+    float4 fogRange;          // x: start distance, y: density, z: 1 = light-buffer debug view
     float4 cameraPosition;    // xyz
     float4 localCount;        // x: number of placed lights
     float4 localPosition[MAX_LOCAL_LIGHTS];
@@ -112,6 +112,9 @@ float4 psMain(VertexOutput input) : SV_Target0
     s.sunBack = sunBack.rgb;
     s.hemiTop = hemiTop.rgb;
     s.hemiBottom = hemiBottom.rgb;
-    const float3 lit = colour * (skyLight(n, s) + localLights(input.world, n, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner));
+    const float3 light = skyLight(n, s) + localLights(input.world, n, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner);
+    if (fogRange.z > 0.5)
+        return float4(light * 0.2, 1.0);       // the game's light buffer (x OO_LIGHT_MULTIPLIER), as /dl_showlight shows it
+    const float3 lit = colour * light;
     return float4(applyFog(lit, length(cameraPosition.xyz - input.world), fogColour, fogRange), 1.0);
 }

@@ -1068,7 +1068,14 @@ std::vector<GeoBone> readSkeleton(ByteReader& r) {
         b.rotation.w = r.f32();
         b.translation = r.vec3();
         if (data.version == 2) b.scale = r.vec3();
-        r.seek(data.end);                      // 4x4 matrix and optional bounding volume follow
+        if (r.tell() + 64 <= data.end) {       // inverse bind matrix, rows of 4 floats (4th column 0 0 0 1)
+            b.hasInverseBind = true;
+            b.inverseBindX = r.vec3(); r.f32();
+            b.inverseBindY = r.vec3(); r.f32();
+            b.inverseBindZ = r.vec3(); r.f32();
+            b.inverseBindT = r.vec3(); r.f32();
+        }
+        r.seek(data.end);                      // optional bounding volume follows
         r.seek(bone.end);
         bones.push_back(std::move(b));
     }

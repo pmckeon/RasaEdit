@@ -20,6 +20,20 @@ inline uint32_t packColour(uint8_t red, uint8_t green, uint8_t blue, uint8_t alp
     return uint32_t(red) | (uint32_t(green) << 8) | (uint32_t(blue) << 16) | (uint32_t(alpha) << 24);
 }
 
+// Material of the game's TRAdditiveAnisoSpecMapDiffMap[DetMapDecMap]VertColor effects (shader in effects.glm, verified by disassembly):
+//   albedo = lerp(diffuse + detail - 0.5, decal, decal.a);  alpha = diffuse.a * vertex.a * MatDiffuse.a
+//   colour = 4 * alpha * albedo * (albedo * vertex.rgb + LightTexture(0.5, max(N.V, 0)).a * MatSpecular)
+struct AnisoMaterial {
+    SDL_GPUTexture* diffuse = nullptr;     // UV set 0
+    SDL_GPUTexture* detail = nullptr;      // null: no detail layer (diffuse used as is)
+    SDL_GPUTexture* decal = nullptr;       // null: no decal
+    SDL_GPUTexture* light = nullptr;       // LightTexture: alpha ramp indexed by N.V
+    bool detailUv1 = false;                // DetailTexCoord = 1
+    bool decalUv1 = false;                 // DecalTexCoord = 1
+    Vec4f specular = Vec4f{0, 0, 0, 0};    // MatSpecular
+    Vec4f diffuseAlpha = Vec4f{1, 1, 1, 1};  // MatDiffuse
+};
+
 struct GpuMesh {
     SDL_GPUBuffer* vertices = nullptr;
     SDL_GPUBuffer* indices = nullptr;
@@ -52,6 +66,7 @@ struct SceneLighting {
     Vec4f fogColour{0.55f, 0.66f, 0.78f, 1};
     float fogStart = 0;
     float fogDensity = 0;                        // exp-squared fog, see shaders/lighting.hlsli
+    bool showLight = false;                      // debug view like the game's /dl_showlight: 0.2 x light, no albedo
     SDL_FColor clearColour{0.55f, 0.66f, 0.78f, 1.0f};   // background (the sky colour with sky lighting)
     // Placed lights, laid out as the shaders' arrays (shaders/lighting.hlsli): position xyz + range; colour rgb *
     // intensity + fade share; spot direction + cos(outer half angle) (-2 = point); x = cos(inner half angle).
@@ -97,6 +112,8 @@ public:
     void drawTranslucent(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint);
     // Additive (one, one), unlit, faded by fog, drawn last without depth writes: the game's TRAdditive* effects.
     void drawAdditive(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, SDL_GPUTexture* texture);
+    // The game's TRAdditiveAnisoSpec* effects (holograms): additive, with detail/decal layers and a view-angle light ramp.
+    void drawAnisoAdditive(const GpuMesh& mesh, const Mat4& model, const AnisoMaterial& material);
     void drawTerrain(const GpuMesh& mesh, const TerrainMaterial& material);
     void record(SDL_GPUCommandBuffer* commands);
     size_t queuedDraws() const { return draws_.size() + translucentDraws_.size() + additiveDraws_.size(); }
@@ -114,6 +131,12 @@ private:
         Vec4f hue;
         SDL_GPUTexture* glow;                    // never null for scene draws (black_ when none)
         bool additive = false;
+        SDL_GPUTexture* detail = nullptr;        // aniso additive layers (null: defaults bound)
+        SDL_GPUTexture* decal = nullptr;
+        SDL_GPUTexture* light = nullptr;
+        Vec4f specular = Vec4f{0, 0, 0, 0};
+        Vec4f layers = Vec4f{0, 0, 0, 0};
+        bool aniso = false;
     };
     SDL_GPUShader* createShader(const unsigned char* dxil, size_t dxilSize, const unsigned char* spirv, size_t spirvSize,
                                 const char* entryPoint, SDL_GPUShaderStage stage, uint32_t samplers);
@@ -133,6 +156,7 @@ private:
     SDL_GPUGraphicsPipeline* additivePipeline_ = nullptr;
     SDL_GPUSampler* linearSampler_ = nullptr;   // trilinear, repeat
     SDL_GPUSampler* pointSampler_ = nullptr;    // nearest, clamp (terrain data textures)
+    SDL_GPUSampler* clampSampler_ = nullptr;    // trilinear, clamp (lookup ramps)
     SDL_GPUTexture* white_ = nullptr;
     SDL_GPUTexture* black_ = nullptr;          // default glow
     SDL_GPUTextureFormat colourFormat_ = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;

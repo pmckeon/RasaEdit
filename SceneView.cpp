@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 
 // ------------------------------------------------------------------------------------------
 // Camera
@@ -58,12 +59,46 @@ Mat4 affineInverse(const Mat4& m) {
     return r;
 }
 
+// A bone's stored inverse bind as a column-vector matrix (the file has Direct3D row vectors: transpose).
+Mat4 inverseBindMatrix(const tr::GeoBone& bone) {
+    const tr::Vec3& x = bone.inverseBindX; const tr::Vec3& y = bone.inverseBindY;
+    const tr::Vec3& z = bone.inverseBindZ; const tr::Vec3& t = bone.inverseBindT;
+    Mat4 m = identityMatrix();
+    m.row0 = {x.x, y.x, z.x, t.x};
+    m.row1 = {x.y, y.y, z.y, t.y};
+    m.row2 = {x.z, y.z, z.z, t.z};
+    return m;
+}
+
 // Skinning matrix per skeleton bone: posed world * inverse(bind world), the pose sampled from the animation at time.
 // Bones without a track keep their bind local transform; a track's missing components keep the bind values.
 // Parents come before children in PSKE (parent index < bone index).
-std::vector<Mat4> skinMatrices(const tr::GeoModel& geo, const tr::Animation& animation, float time) {
+// skeleton (optional): pose bones from that model's skeleton, matched by name - avatar swap-set parts follow the body's
+// skeleton, and some part files carry a different hierarchy (avatar_hum_m_face_asian_v04_round: Spine under Pelvis,
+// without the Body Correction / Spine1 target bones), so posing them on their own chain put the head at hip height.
+std::vector<Mat4> skinMatrices(const tr::GeoModel& geo, const tr::Animation& animation, float time, const tr::GeoModel* skeleton = nullptr) {
+    std::unordered_map<std::string, Mat4> skeletonPosed;
+    if (skeleton) {
+        const size_t m = skeleton->bones.size();
+        std::vector<Mat4> world(m);
+        for (size_t k = 0; k < m; ++k) {
+            const tr::GeoBone& bone = skeleton->bones[k];
+            tr::Vec3 translation = bone.translation, scale = bone.scale;
+            tr::Quat rotation = bone.rotation;
+            if (const tr::AnimTrack* track = tr::findTrack(animation, bone.name)) {
+                const tr::AnimKey key = tr::sampleTrack(*track, time);
+                if (track->hasTranslation) translation = key.translation;
+                if (track->hasRotation) rotation = key.rotation;
+                if (track->hasScale) scale = key.scale;
+            }
+            const Mat4 local = boneLocal(translation, rotation, scale);
+            world[k] = bone.parent >= 0 && size_t(bone.parent) < k ? multiply(world[size_t(bone.parent)], local) : local;
+            skeletonPosed.emplace(tr::toLowerAscii(bone.name), world[k]);
+        }
+    }
     const size_t n = geo.bones.size();
     std::vector<Mat4> bindWorld(n), posedWorld(n), skin(n);
+    std::vector<tr::Vec3> rootScale(n);
     for (size_t k = 0; k < n; ++k) {
         const tr::GeoBone& bone = geo.bones[k];
         tr::Vec3 translation = bone.translation, scale = bone.scale;
@@ -77,9 +112,25 @@ std::vector<Mat4> skinMatrices(const tr::GeoModel& geo, const tr::Animation& ani
         const Mat4 bindLocal = boneLocal(bone.translation, bone.rotation, bone.scale);
         const Mat4 posedLocal = boneLocal(translation, rotation, scale);
         const bool hasParent = bone.parent >= 0 && size_t(bone.parent) < k;
+        rootScale[k] = hasParent ? rootScale[size_t(bone.parent)] : bone.scale;
         bindWorld[k] = hasParent ? multiply(bindWorld[size_t(bone.parent)], bindLocal) : bindLocal;
         posedWorld[k] = hasParent ? multiply(posedWorld[size_t(bone.parent)], posedLocal) : posedLocal;
-        skin[k] = multiply(posedWorld[k], affineInverse(bindWorld[k]));
+        if (!skeletonPosed.empty()) {
+            const auto found = skeletonPosed.find(tr::toLowerAscii(bone.name));
+            if (found != skeletonPosed.end()) posedWorld[k] = found->second;
+        }
+        if (bone.hasInverseBind) {
+            // The bone's stored inverse bind (mesh space). npc_eloh_hologram_large needs it: its mesh is not around the
+            // PSKE bind pose (figure pelvis at y 1.21 vs 6.14; the rays shield 12.9 m out along z vs 0).
+            skin[k] = multiply(posedWorld[k], inverseBindMatrix(bone));
+            continue;
+        }
+        // No stored matrix: the bind skeleton shrunk by its root bone's scale (the rule that fitted the hologram figure).
+        Mat4 rootScaling = identityMatrix();
+        rootScaling.row0.x = rootScale[k].x;
+        rootScaling.row1.y = rootScale[k].y;
+        rootScaling.row2.z = rootScale[k].z;
+        skin[k] = multiply(multiply(posedWorld[k], affineInverse(bindWorld[k])), rootScaling);
     }
     return skin;
 }
@@ -230,10 +281,44 @@ void SceneView::setRegionSkies(const std::vector<std::pair<int32_t, std::string>
             haveRegion0 = true;
         }
     }
+    // Base skies of "_tranz" / "_war" variants (sky_foreas_wilderness_default_tranz.sky -> ..._default.sky) are offered
+    // too: no region names them, yet on Concordia Wilderness the game lit the world with the base sky while region 0
+    // names the _tranz one (midday ambient (1.22, 1.06, 0.82) measured vs base (1.20, 1.04, 0.80), _tranz (0.81, 0.95,
+    // 0.97)). How the engine picks it (RegionManagerClient::DoTransitionSky FUN_0052c2d0) is not decoded; the base is
+    // preselected only when region 0's sky is a _tranz variant (UNVERIFIED beyond that map).
+    const size_t regionSkyCount = skies_.size();
+    for (size_t k = 0; k < regionSkyCount; ++k) {
+        std::string base = skies_[k].name;
+        for (const char* suffix : {"_tranz.sky", "_war.sky"}) {
+            const std::string s = suffix;
+            if (base.size() > s.size() && base.compare(base.size() - s.size(), s.size(), s) == 0) {
+                base = base.substr(0, base.size() - s.size()) + ".sky";
+                break;
+            }
+        }
+        if (base == skies_[k].name || !assets_.exists(base)) continue;
+        auto it = std::find_if(skies_.begin(), skies_.end(), [&](const SkyChoice& c) { return c.name == base; });
+        if (it == skies_.end()) {
+            SkyChoice c;
+            c.name = base;
+            try {
+                c.sky = tr::readSky(assets_.read(base));
+                c.loaded = true;
+            } catch (const std::exception& e) {
+                c.error = e.what();
+            }
+            skies_.push_back(std::move(c));
+            it = skies_.end() - 1;
+        }
+        const std::string& variant = skies_[k].name;
+        if (k == skyIndex && haveRegion0 && it->loaded && variant.size() > 10 && variant.compare(variant.size() - 10, 10, "_tranz.sky") == 0)
+            skyIndex = size_t(it - skies_.begin());
+    }
 }
 
 SceneLighting SceneView::lighting() const {
     SceneLighting l = skyLightingAt();
+    l.showLight = showLightBuffer;
     if (!showMapLights) return l;
     // Placed lights: the enabled ones nearest the camera (distance to their range sphere), up to the shader's limit.
     std::vector<std::pair<float, const tr::PlacedLight*>> nearest;
@@ -248,10 +333,11 @@ SceneLighting SceneView::lighting() const {
         const tr::PlacedLight& light = *n.second;
         const int i = l.localCount++;
         l.localPosition[i] = Vec4f{light.position.x, light.position.y, light.position.z, light.range};
-        // Fade start distance: FalloffPercent of the range (the shaders' LightFalloff is a distance; this mapping
-        // from the file is UNVERIFIED).
+        // Fade start distance: the engine sets LightFalloff = (1 - falloff) * LightRange (tabula_rasa.exe FUN_00879150 /
+        // FUN_00875360), i.e. FalloffPercent is the outer part of the range that fades (0.25: full to 75%, then fade).
+        // That the field is FalloffPercent is inferred from its name and use (the serializer's offsets are unclear).
         l.localColour[i] = Vec4f{light.colour.x * light.intensity, light.colour.y * light.intensity, light.colour.z * light.intensity,
-                                 std::clamp(light.falloffPercent, 0.0f, 1.0f) * light.range};
+                                 (1.0f - std::clamp(light.falloffPercent, 0.0f, 1.0f)) * light.range};
         if (light.kind == tr::PlacedLight::Kind::Spot) {
             const tr::Vec3 d = normalized(light.direction());
             const float outer = std::max(light.penumbraAngle, light.coneAngle) * 0.5f * 0.0174533f;   // full angles (UNVERIFIED)
@@ -272,12 +358,17 @@ SceneLighting SceneView::skyLightingAt() const {
     auto vec4 = [](const tr::Vec3& c) { return Vec4f{c.x, c.y, c.z, 1}; };
     auto luminance = [](const tr::Vec3& c) { return 0.3f * c.x + 0.59f * c.y + 0.11f * c.z; };
 
-    // Hemispheric light: the global light used for the world (RenderMode 1 where a sky has two), else the first.
-    const tr::SkyLight* hemi = nullptr;
-    for (const tr::SkyLight& g : sky.globalLights)
-        if (g.hemi && (!hemi || g.renderMode == 1)) hemi = &g;
-    l.hemiTop = hemi ? vec4(tr::skyLightColour(*hemi, 1, t)) : Vec4f{0, 0, 0, 1};
-    l.hemiBottom = hemi ? vec4(tr::skyLightColour(*hemi, 2, t)) : Vec4f{0, 0, 0, 1};
+    // Hemispheric light: the sum of every hemi light (the engine's CombinedHemiLight adds their TopColor/BottomColor;
+    // RenderMode 0 and 1 both count). Verified outdoors on Concordia Wilderness at midday: 2 x DIntensity 0.6 x
+    // (255, 222, 170)/255 = (1.20, 1.04, 0.80) vs (1.22, 1.06, 0.82) measured with /dl_showlight in a shadow.
+    tr::Vec3 top{0, 0, 0}, bottom{0, 0, 0};
+    for (const tr::SkyLight& g : sky.globalLights) {
+        if (!g.hemi) continue;
+        top = add(top, tr::skyLightColour(g, 1, t));
+        bottom = add(bottom, tr::skyLightColour(g, 2, t));
+    }
+    l.hemiTop = vec4(scaled(top, ambientScale));
+    l.hemiBottom = vec4(scaled(bottom, ambientScale));
 
     // Directional light: the brightest layer light at this time (the sun by day, the moon by night).
     l.sunFront = Vec4f{0, 0, 0, 1};
@@ -305,9 +396,10 @@ SceneLighting SceneView::skyLightingAt() const {
         l.fog = showFog && fog.endDistance > fog.startDistance;
         l.fogStart = fog.startDistance;
         // The game's composite pass fogs with density: visibility = exp(-(density * max(d - start, 0))^2)
-        // (trhdrcomposite). The sky gives start/end distances; density = 2 / (end - start) leaves ~2% at the end
-        // distance (this conversion is UNVERIFIED).
-        l.fogDensity = fog.endDistance > fog.startDistance ? 2.0f / (fog.endDistance - fog.startDistance) : 0.0f;
+        // (trhdrcomposite). tabula_rasa.exe FUN_00803780: density = 2.354074 / (end - start), i.e. exp(-2.354^2) =
+        // 1/256 at the end distance (else 0.0023541). Not reproduced: the engine also clamps the fog end by the view
+        // distance option (100..500 m) and keeps start <= end - 50 (FUN_007fd9e0; read from decompiled code).
+        l.fogDensity = fog.endDistance > fog.startDistance ? 2.354074f / (fog.endDistance - fog.startDistance) : 0.0023541f;
     }
     return l;
 }
@@ -448,19 +540,40 @@ void SceneView::buildTerrain(uint32_t step) {
 // ------------------------------------------------------------------------------------------
 // Models
 // ------------------------------------------------------------------------------------------
+namespace {
+
+// Material colour parameter "r g b a" (missing components 0, alpha 1).
+Vec4f parseColour(const std::string& text) {
+    float c[4] = {0, 0, 0, 1};
+    std::sscanf(text.c_str(), "%f %f %f %f", &c[0], &c[1], &c[2], &c[3]);
+    return Vec4f{c[0], c[1], c[2], c[3]};
+}
+
+}  // namespace
+
 void SceneView::loadModel(const std::string& name, Model& model) {
     try {
-        // name is "<mesh>" or "<mesh>|<animation>" (posed: skinned pieces in the animation's first frame).
+        // name is "<mesh>", "<mesh>|<animation>" (posed: skinned pieces in the animation's first frame) or
+        // "<mesh>|<animation>|<skeleton mesh>" (avatar parts: posed on the base body's skeleton).
         const size_t bar = name.find('|');
+        const size_t bar2 = bar == std::string::npos ? std::string::npos : name.find('|', bar + 1);
         const tr::GeoModel geo = tr::readGeo(assets_.read(name.substr(0, bar)));
         std::vector<Mat4> skin;                    // per skeleton bone; empty = draw as authored
         if (bar != std::string::npos && !geo.bones.empty()) {
             try {
-                skin = skinMatrices(geo, tr::readAnimation(assets_.read(name.substr(bar + 1))), 0.0f);
+                const std::string animationName = name.substr(bar + 1, bar2 == std::string::npos ? std::string::npos : bar2 - bar - 1);
+                tr::GeoModel skeletonGeo;
+                if (bar2 != std::string::npos) skeletonGeo = tr::readGeo(assets_.read(name.substr(bar2 + 1)));
+                skin = skinMatrices(geo, tr::readAnimation(assets_.read(animationName)), 0.0f, bar2 != std::string::npos ? &skeletonGeo : nullptr);
             } catch (const std::exception& e) {
                 SDL_Log("pose %s: %s; drawing the bind pose", name.c_str(), e.what());
             }
         }
+        // Skinned pieces without an animation are still skinned, in the bind pose: their vertices are not stored in
+        // place (prop_hum_sign_holo_v11's screen: stored y 1.06..2.01, skinned y 1.60..3.01 = the frame's screen; the
+        // inverse binds carry the sign's x1.5 scale).
+        const bool anySkinned = std::any_of(geo.pieces.begin(), geo.pieces.end(), [](const tr::GeoPiece& p) { return p.skinned; });
+        if (skin.empty() && anySkinned && !geo.bones.empty()) skin = skinMatrices(geo, tr::Animation{}, 0.0f);
         size_t effectPieces = 0;
         // Only full detail is drawn: lower LODs (USDA "LOD" >= 1) and swap set 99 (a low-LOD stand-in) sit on top
         // of the LOD 0 geometry. A model made only of such pieces is drawn whole.
@@ -489,6 +602,9 @@ void SceneView::loadModel(const std::string& name, Model& model) {
             // "VertColor" effects: albedo = texture x vertex colour x 2 (the game's G-buffer pass, trdiffmapvertcolor).
             // The vertex colours are authored greyscale occlusion (they do not encode the map's lights).
             const bool vertexColour = effect.find("vertcolor") != std::string::npos;
+            // TRAdditiveAnisoSpec* (holograms): the game's own formula, see AnisoMaterial. Additive pieces keep their
+            // vertex alpha: it is the opacity (the aniso shader multiplies by it; glow fins fade out by it).
+            const bool aniso = effect.rfind("tradditiveanisospec", 0) == 0;
             // Glow map: added after lighting (see shaders/scene.hlsl), sampled with UV set GlowTexCoord (0 or 1).
             std::string glowName;
             int glowUvSet = 1;
@@ -543,7 +659,8 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 MeshVertex v;
                 v.positionX = p.x; v.positionY = p.y; v.positionZ = p.z;
                 v.normalX = n.x; v.normalY = n.y; v.normalZ = n.z;
-                v.colour = vertexColour ? packColour(uint8_t(gv.colour >> 16), uint8_t(gv.colour >> 8), uint8_t(gv.colour), 255)   // ARGB
+                v.colour = vertexColour ? packColour(uint8_t(gv.colour >> 16), uint8_t(gv.colour >> 8), uint8_t(gv.colour),     // ARGB
+                                                     additive ? uint8_t(gv.colour >> 24) : 255)
                                         : packColour(255, 255, 255, 255);
                 v.texU = gv.uv.x;
                 v.texV = gv.uv.y;
@@ -565,6 +682,20 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 part.flesh = tr::toLowerAscii(piece.swapGroup) == "flesh";
                 part.swapId = piece.swapId;
                 part.additive = additive;
+                if (aniso) {
+                    part.aniso = true;
+                    AnisoMaterial& m = part.anisoMaterial;
+                    m.diffuse = part.texture;
+                    for (const tr::GeoParameter& p : piece.parameters) {
+                        if (p.key == "DetailTexture") m.detail = texture(p.value);
+                        if (p.key == "DecalTexture") m.decal = texture(p.value);
+                        if (p.key == "LightTexture") m.light = texture(p.value);
+                        if (p.key == "DetailTexCoord") m.detailUv1 = std::atoi(p.value.c_str()) == 1;
+                        if (p.key == "DecalTexCoord") m.decalUv1 = std::atoi(p.value.c_str()) == 1;
+                        if (p.key == "MatSpecular") m.specular = parseColour(p.value);
+                        if (p.key == "MatDiffuse") m.diffuseAlpha = parseColour(p.value);
+                    }
+                }
                 model.pieces.push_back(part);
                 if (additive) continue;
                 model.hasSolid = true;
@@ -635,6 +766,11 @@ void SceneView::queueDraws(const Selection& selection) {
         return selected ? Vec4f{1.0f, 0.9f, 0.45f, 1} : showTextures ? Vec4f{1, 1, 1, 1} : Vec4f{0.8f, 0.8f, 0.8f, 1};
     };
     auto scaledTint = [](const Vec4f& t, float s) { return Vec4f{t.x * s, t.y * s, t.z * s, t.w}; };   // VertColor x2
+    // Additive pieces; holograms (aniso) use the game's own material when textures are shown.
+    auto drawEffect = [&](const ModelPiece& piece, const Mat4& world) {
+        if (piece.aniso && showTextures) renderer_.drawAnisoAdditive(piece.mesh, world, piece.anisoMaterial);
+        else renderer_.drawAdditive(piece.mesh, world, scaledTint(Vec4f{1, 1, 1, 1}, piece.colourScale), showTextures ? piece.texture : nullptr);
+    };
     auto waterTint = [](bool selected) { return Vec4f{0.22f, 0.42f, 0.58f, selected ? 0.75f : 0.55f}; };
 
     drawnEntities_ = 0;
@@ -649,7 +785,7 @@ void SceneView::queueDraws(const Selection& selection) {
             const bool selected = int(k) == selectedEntity;
             if (p.model && p.model->loaded && showEffects) {      // additive pieces: glows, holograms, light cones
                 for (const ModelPiece& piece : p.model->pieces)
-                    if (piece.additive) renderer_.drawAdditive(piece.mesh, p.world, scaledTint(Vec4f{1, 1, 1, 1}, piece.colourScale), showTextures ? piece.texture : nullptr);
+                    if (piece.additive) drawEffect(piece, p.world);
             }
             if (p.model && p.model->loaded && p.model->hasSolid) {
                 const Vec4f tint = modelTint(selected);
@@ -704,7 +840,7 @@ void SceneView::queueDraws(const Selection& selection) {
             const Vec4f tint = modelTint(selected);
             auto drawPiece = [&](const ModelPiece& piece, const Vec4f& partHue) {
                 if (piece.additive) {
-                    if (showEffects) renderer_.drawAdditive(piece.mesh, s.world, scaledTint(Vec4f{1, 1, 1, 1}, piece.colourScale), showTextures ? piece.texture : nullptr);
+                    if (showEffects) drawEffect(piece, s.world);
                     return;
                 }
                 if (piece.water) {
@@ -720,8 +856,14 @@ void SceneView::queueDraws(const Selection& selection) {
             uint32_t replaced = 0;
             for (const AvatarDraw& part : s.avatarParts)
                 if (part.model && part.model->loaded && !part.model->pieces.empty() && part.swapsetId < 32) replaced |= 1u << part.swapsetId;
+            // Base swap sets with no item: the client calls HueSwapset(swapset, None, skin) for swap sets 1..8 when the
+            // creature has a skin (face) colour (creature.py defaults, actor.py _ProcessSwapsets); the engine then gives
+            // their non-flesh pieces grey 0.5 (tabula_rasa.exe FUN_004fcc60: an unset hue becomes (0.5, 0.5, 0.5, 1))
+            // and flesh pieces the skin colour (FUN_00800340). Other pieces keep no hue here.
+            const bool skinned = s.skinHue.w > 0.5f;
             for (const ModelPiece& piece : s.model->pieces)
-                if (piece.swapId >= 32 || ((replaced >> piece.swapId) & 0x1) == 0) drawPiece(piece, Vec4f{0, 0, 0, 0});
+                if (piece.swapId >= 32 || ((replaced >> piece.swapId) & 0x1) == 0)
+                    drawPiece(piece, skinned && piece.swapId >= 1 && piece.swapId <= 8 ? Vec4f{0.5f, 0.5f, 0.5f, 1} : Vec4f{0, 0, 0, 0});
             for (const AvatarDraw& part : s.avatarParts) {
                 if (!part.model || !part.model->loaded) continue;
                 for (const ModelPiece& piece : part.model->pieces)
@@ -956,12 +1098,14 @@ void SceneView::focusOn(const Selection& selection) {
     if (focusTarget(selection, target, distance)) frameTarget(target, distance);
 }
 
-SceneView::Model* SceneView::modelFor(const std::string& mesh, const std::string& poseAnimation) {
+SceneView::Model* SceneView::modelFor(const std::string& mesh, const std::string& poseAnimation, const std::string& skeletonMesh) {
     // default.geo is the engine's stand-in mesh (system classes: ABV boxes, no-walk shapes, proxies, appearance items);
     // the game never shows it, so such entities are placeholders here.
     if (mesh.empty() || tr::toLowerAscii(mesh) == "default.geo") return nullptr;
     // Posed models are separate entries: "<mesh>|<animation>" (see loadModel).
-    const std::string key = tr::toLowerAscii(poseAnimation.empty() ? mesh : mesh + "|" + poseAnimation);
+    std::string key = poseAnimation.empty() ? mesh : mesh + "|" + poseAnimation;
+    if (!poseAnimation.empty() && !skeletonMesh.empty() && tr::toLowerAscii(skeletonMesh) != tr::toLowerAscii(mesh)) key += "|" + skeletonMesh;
+    key = tr::toLowerAscii(key);
     auto inserted = models_.emplace(key, Model());
     if (inserted.second) pending_.push_back(inserted.first->first);     // loaded progressively
     return &inserted.first->second;
@@ -1039,7 +1183,7 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
             if (!look.baseMesh.empty()) s.model = modelFor(look.baseMesh, look.poseAnimation);
             s.skinHue = hueFromAbgr(look.skinColour);
             for (const AvatarPart& part : look.parts)
-                s.avatarParts.push_back(AvatarDraw{modelFor(part.mesh, look.poseAnimation), part.swapsetId, hueFromAbgr(part.colour)});
+                s.avatarParts.push_back(AvatarDraw{modelFor(part.mesh, look.poseAnimation, look.baseMesh), part.swapsetId, hueFromAbgr(part.colour)});
         }
         s.colour = vendor ? Vec4f{1.0f, 0.8f, 0.2f, 1} : npc ? Vec4f{0.35f, 1.0f, 0.45f, 1} : Vec4f{1.0f, 0.35f, 0.3f, 1};
         s.ringRadius = std::max(pool.radius, 1.5f);
