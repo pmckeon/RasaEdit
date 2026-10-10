@@ -14,6 +14,7 @@
 
 #include "trformats.h"
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -85,6 +86,7 @@ struct PlacedLight {
     bool enabled = true;
     bool castsShadows = false;
     Vec3 position;
+    Vec3 offset;                      // Offset: in a light template (.ltmp), its place relative to the contact point
     Vec3 colour{1, 1, 1};
     float intensity = 1;
     float range = 10;
@@ -96,7 +98,9 @@ struct PlacedLight {
     Vec3 direction() const;           // spot: the direction it shines
 };
 
-std::vector<PlacedLight> readLights(const Bytes& data);
+// overrides: property name -> value, applied over every light's own properties (as the engine sets a contact point's
+// "beginlight" ... "endlight" pairs by property name on an attached template, FUN_00816bf0 / FUN_00884cf0).
+std::vector<PlacedLight> readLights(const Bytes& data, const std::map<std::string, std::string>& overrides = {});
 
 // Day-cycle sampling: keys wrap around (time 1 = time 0), linear interpolation.
 Vec3 skyLightColour(const SkyLight& light, uint32_t keyType, float time);   // colour * DIntensity; 0 if no such keys

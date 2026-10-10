@@ -273,14 +273,15 @@ Sky readSky(const Bytes& data) {
     return sky;
 }
 
-std::vector<PlacedLight> readLights(const Bytes& data) {
+std::vector<PlacedLight> readLights(const Bytes& data, const std::map<std::string, std::string>& overrides) {
     const XmlNode root = XmlParser(data).document();
     if (root.tag != "LightRoot") throw FormatError("lights: root element " + root.tag + " (expected <LightRoot>)");
     std::vector<PlacedLight> out;
     const XmlNode* lights = root.child("Lights");
     if (!lights) return out;
     for (const XmlNode& l : lights->children) {
-        const Properties p = properties(&l);
+        Properties p = properties(&l);
+        for (const auto& o : overrides) p[o.first] = o.second;
         const XmlNode* object = l.child("PropertyObject");
         const std::string cls = object ? object->attribute("class") : "";
         PlacedLight light;
@@ -289,6 +290,7 @@ std::vector<PlacedLight> readLights(const Bytes& data) {
         light.enabled = flag(p, "Enabled", true);
         light.castsShadows = flag(p, "CastsShadows");
         light.position = vec3(p, "Position", Vec3{});
+        light.offset = vec3(p, "Offset", Vec3{});
         const auto colour = p.find("Color");
         if (colour != p.end()) {
             const std::vector<float> c = numbers(colour->second);

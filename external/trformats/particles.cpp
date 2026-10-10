@@ -377,10 +377,11 @@ ParticleSystem readParticleSystem(const Bytes& data) {
     return s;
 }
 
-std::vector<ParticleAttachment> particleAttachments(const GeoModel& model) {
+namespace {
+std::vector<ParticleAttachment> attachments(const GeoModel& model, const char* wanted) {
     std::vector<ParticleAttachment> out;
     auto add = [&](const std::string& key, const std::string& value) {
-        if (toLowerAscii(key) != "psys") return;
+        if (toLowerAscii(key) != wanted) return;
         const size_t comma = value.find(',');
         if (comma == std::string::npos) return;
         ParticleAttachment a;
@@ -397,6 +398,9 @@ std::vector<ParticleAttachment> particleAttachments(const GeoModel& model) {
         for (const GeoParameter& p : piece.userData) add(p.key, p.value);
     return out;
 }
+}  // namespace
+
+std::vector<ParticleAttachment> particleAttachments(const GeoModel& model) { return attachments(model, "psys"); }
 
 const GeoContactPoint* findContactPoint(const GeoModel& model, uint32_t id) {
     for (const GeoContactPoint& cp : model.contactPoints)

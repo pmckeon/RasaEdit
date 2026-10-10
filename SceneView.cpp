@@ -44,6 +44,56 @@ Mat4 boneLocal(const tr::Vec3& translation, const tr::Quat& rotation, const tr::
     return m;
 }
 
+// A contact point's frame in model space: its bone's bind pose x the point's rotation and position.
+Mat4 contactPointFrame(const tr::GeoModel& geo, const tr::GeoContactPoint& cp) {
+    Mat4 local = rotationMatrix(cp.rotation);
+    local.row0.w = cp.position.x;
+    local.row1.w = cp.position.y;
+    local.row2.w = cp.position.z;
+    if (cp.bone >= 0 && size_t(cp.bone) < geo.bones.size()) {
+        Mat4 bind = identityMatrix();
+        for (int32_t b = cp.bone; b >= 0 && size_t(b) < geo.bones.size(); b = geo.bones[size_t(b)].parent >= b ? -1 : geo.bones[size_t(b)].parent) {
+            const tr::GeoBone& bone = geo.bones[size_t(b)];
+            bind = multiply(boneLocal(bone.translation, bone.rotation, bone.scale), bind);
+        }
+        local = multiply(bind, local);
+    }
+    return local;
+}
+
+// Quaternion product: rotationMatrix(multiplyQuat(a, b)) = rotationMatrix(a) x rotationMatrix(b).
+tr::Quat multiplyQuat(const tr::Quat& a, const tr::Quat& b) {
+    return tr::Quat{a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y, a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+                    a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w, a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z};
+}
+
+// The rotation of an affine matrix (scale divided out of its columns) as a quaternion.
+tr::Quat quatFromMatrix(const Mat4& m) {
+    const float sx = std::sqrt(m.row0.x * m.row0.x + m.row1.x * m.row1.x + m.row2.x * m.row2.x);
+    const float sy = std::sqrt(m.row0.y * m.row0.y + m.row1.y * m.row1.y + m.row2.y * m.row2.y);
+    const float sz = std::sqrt(m.row0.z * m.row0.z + m.row1.z * m.row1.z + m.row2.z * m.row2.z);
+    if (sx <= 0 || sy <= 0 || sz <= 0) return tr::Quat{};
+    const float r00 = m.row0.x / sx, r01 = m.row0.y / sy, r02 = m.row0.z / sz;
+    const float r10 = m.row1.x / sx, r11 = m.row1.y / sy, r12 = m.row1.z / sz;
+    const float r20 = m.row2.x / sx, r21 = m.row2.y / sy, r22 = m.row2.z / sz;
+    tr::Quat q;
+    const float trace = r00 + r11 + r22;
+    if (trace > 0) {
+        const float s = std::sqrt(trace + 1.0f) * 2.0f;
+        q = tr::Quat{(r21 - r12) / s, (r02 - r20) / s, (r10 - r01) / s, 0.25f * s};
+    } else if (r00 > r11 && r00 > r22) {
+        const float s = std::sqrt(1.0f + r00 - r11 - r22) * 2.0f;
+        q = tr::Quat{0.25f * s, (r01 + r10) / s, (r02 + r20) / s, (r21 - r12) / s};
+    } else if (r11 > r22) {
+        const float s = std::sqrt(1.0f + r11 - r00 - r22) * 2.0f;
+        q = tr::Quat{(r01 + r10) / s, 0.25f * s, (r12 + r21) / s, (r02 - r20) / s};
+    } else {
+        const float s = std::sqrt(1.0f + r22 - r00 - r11) * 2.0f;
+        q = tr::Quat{(r02 + r20) / s, (r12 + r21) / s, 0.25f * s, (r10 - r01) / s};
+    }
+    return q;
+}
+
 // Inverse of an affine matrix (row3 = 0 0 0 1).
 Mat4 affineInverse(const Mat4& m) {
     const float a = m.row0.x, b = m.row0.y, c = m.row0.z, d = m.row1.x, e = m.row1.y, f = m.row1.z, g = m.row2.x, h = m.row2.y, i = m.row2.z;
@@ -289,10 +339,11 @@ void SceneView::setRegionSkies(const std::vector<std::pair<int32_t, std::string>
         }
     }
     // Base skies of "_tranz" / "_war" variants (sky_foreas_wilderness_default_tranz.sky -> ..._default.sky) are offered
-    // too: no region names them, yet on Concordia Wilderness the game lit the world with the base sky while region 0
-    // names the _tranz one (midday ambient (1.22, 1.06, 0.82) measured vs base (1.20, 1.04, 0.80), _tranz (0.81, 0.95,
-    // 0.97)). How the engine picks it (RegionManagerClient::DoTransitionSky FUN_0052c2d0) is not decoded; the base is
-    // preselected only when region 0's sky is a _tranz variant (UNVERIFIED beyond that map).
+    // as manual choices only: no region names them. The game uses the region skies as named -
+    // RegionManagerClient::DoTransitionSky (FUN_0052c2d0) takes the first region of the priority-sorted list (the camera's
+    // regions plus region 0) whose sky is set and loads, and clears the sky when none has one (nothing is kept from an
+    // earlier region); the transition-sky slot is unused (gamemap.py SetTransSky(False)). Seen in game: Bane dropships
+    // (a layer only _tranz / _war have) in the night sky at Ranja Gorge, whose regions 9 / 49 name no sky.
     for (const tr::MapRegion& r : map_.map.regions) regionPriority_[r.regionId] = r.priority;
     for (size_t k = 0; k < skies_.size(); ++k)
         for (int32_t region : skies_[k].regions) regionSky_[region] = k;
@@ -319,13 +370,6 @@ void SceneView::setRegionSkies(const std::vector<std::pair<int32_t, std::string>
             }
             skies_.push_back(std::move(c));
             it = skies_.end() - 1;
-        }
-        const std::string& variant = skies_[k].name;
-        const bool tranz = variant.size() > 10 && variant.compare(variant.size() - 10, 10, "_tranz.sky") == 0;
-        if (tranz && it->loaded) {
-            for (auto& rs : regionSky_)
-                if (rs.second == k) rs.second = size_t(it - skies_.begin());
-            if (k == skyIndex && haveRegion0) skyIndex = size_t(it - skies_.begin());
         }
     }
 }
@@ -361,16 +405,30 @@ SceneLighting SceneView::lighting() const {
     l.showLight = showLightBuffer;
     if (!showMapLights) return l;
     // Placed lights: the enabled ones nearest the camera (distance to their range sphere), up to the shader's limit.
-    std::vector<std::pair<float, const tr::PlacedLight*>> nearest;
-    for (const tr::PlacedLight& light : mapLights_) {
-        if (!light.enabled || light.range <= 0 || light.intensity <= 0) continue;
+    // Candidates: the map's lights.xml, and lights on map entities' models (contact point "lsys" templates) placed
+    // with the entity (not on culling layer 6: the engine never adds those bodies to the scene).
+    std::vector<std::pair<float, tr::PlacedLight>> nearest;
+    auto consider = [&](const tr::PlacedLight& light) {
+        if (!light.enabled || light.range <= 0 || light.intensity <= 0) return;
         const float gap = std::max(0.0f, length(subtract(light.position, camera_.position)) - light.range);
-        if (gap <= drawDistance) nearest.emplace_back(gap, &light);
+        if (gap <= drawDistance) nearest.emplace_back(gap, light);
+    };
+    for (const tr::PlacedLight& light : mapLights_) consider(light);
+    for (const Placement& p : placements_) {
+        if (p.neverDrawn || !p.model || !p.model->loaded || p.model->lights.empty()) continue;
+        // Range is used as the property says (the point pass reads LightRange from the light's properties,
+        // FUN_00875360), not scaled with the entity.
+        const tr::Quat rotation = quatFromMatrix(p.world);
+        for (tr::PlacedLight light : p.model->lights) {
+            light.position = transformPoint(p.world, light.position);
+            light.worldOrientation = multiplyQuat(rotation, light.worldOrientation);
+            consider(light);
+        }
     }
     std::sort(nearest.begin(), nearest.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
     for (const auto& n : nearest) {
         if (l.localCount >= SceneLighting::maxLocalLights) break;
-        const tr::PlacedLight& light = *n.second;
+        const tr::PlacedLight& light = n.second;
         const int i = l.localCount++;
         l.localPosition[i] = Vec4f{light.position.x, light.position.y, light.position.z, light.range};
         // Fade start distance: the engine sets LightFalloff = (1 - falloff) * LightRange (tabula_rasa.exe FUN_00879150 /
@@ -395,12 +453,20 @@ SceneLighting SceneView::lighting() const {
     return l;
 }
 
-// The globe cube maps the map's lights use: each DDS cube (6 faces of mip chains, DXT) decoded face by face to RGBA,
-// resized to 64 x 64, uploaded as one cube map array.
+// The globe cube maps the map's lights and the loaded models' lights use: each DDS cube (6 faces of mip chains, DXT)
+// decoded face by face to RGBA, resized to 64 x 64, uploaded as one cube map array. Rebuilt whenever a loaded model
+// brings a new one (between frames: it releases the previous texture).
 void SceneView::loadGlobeMaps() {
     constexpr uint32_t size = 64;
     std::vector<std::vector<tr::Rgba8>> faces;
-    for (const tr::PlacedLight& light : mapLights_) {
+    globeIndex_.clear();
+    globeErrors_.clear();
+    std::vector<const tr::PlacedLight*> all;
+    for (const tr::PlacedLight& light : mapLights_) all.push_back(&light);
+    for (const auto& m : models_)
+        for (const tr::PlacedLight& light : m.second.lights) all.push_back(&light);
+    for (const tr::PlacedLight* lightPointer : all) {
+        const tr::PlacedLight& light = *lightPointer;
         if (light.globeMap.empty()) continue;
         const std::string name = tr::toLowerAscii(light.globeMap);
         if (globeIndex_.count(name)) continue;
@@ -802,7 +868,20 @@ void SceneView::loadModel(const std::string& name, Model& model) {
             // Effects are shown; they are not pickable and do not count towards the bounds. A model made only of them is
             // an effect (also shown as a cyan box with Placeholders on).
             const std::string effect = tr::toLowerAscii(piece.effectName);
-            const bool additive = effect.find("additive") != std::string::npos;
+            const bool namedAdditive = effect.find("additive") != std::string::npos;
+            // The material's "Phase" parameter picks the render phase, whose own effect sets the blending (effects.glm
+            // PhaseAdditive.fx: SRCALPHA/ONE, PhaseTranslucent.fx: SRCALPHA/INVSRCALPHA, both without depth writes;
+            // PhaseOpaque.fx: no blending). 1,081 pieces set it (Additive 877, Translucent 158, Opaque 46), e.g.
+            // vfx_waterfall_wake.geo's TRDiffMapDetMapVertColor foam is Additive - drawn solid it was a black sheet.
+            // TRAdditive* effects are additive whatever the phase: their passes set ALPHABLENDENABLE 1, SRCBLEND SRCALPHA,
+            // DESTBLEND ONE, ZWRITEENABLE 0 themselves (effects.glm, 2026-10-11), and pass states are applied after the
+            // phase effect's.
+            std::string phase;
+            for (const tr::GeoParameter& gp : piece.parameters)
+                if (gp.key == "Phase") phase = tr::toLowerAscii(gp.value);
+            const bool aniso = effect.rfind("tradditiveanisospec", 0) == 0;
+            const bool additive = namedAdditive || phase == "additive";
+            const bool translucent = !additive && phase == "translucent";
             if (additive) ++effectPieces;
             // Not drawn (counted as effect pieces): helper shapes - effects that sample a diffuse map but have none
             // (e.g. vfx_eloh_lilly_pollen.geo, a 207 m particle-emitter sheet whose contact point names its .pfx) - and
@@ -811,7 +890,7 @@ void SceneView::loadModel(const std::string& name, Model& model) {
             // them, and drawn solid they hid the additive hologram inside.
             const bool helperShape = piece.diffuseTexture.empty() && effect.find("diffmap") != std::string::npos;
             const bool refraction = effect.rfind("trrefract", 0) == 0;
-            if (!additive && (helperShape || refraction || effect.find("billboard") != std::string::npos)) {
+            if ((!namedAdditive && helperShape) || refraction || effect.find("billboard") != std::string::npos) {
                 ++effectPieces;
                 continue;
             }
@@ -819,9 +898,8 @@ void SceneView::loadModel(const std::string& name, Model& model) {
             // "VertColor" effects: albedo = texture x vertex colour x 2 (the game's G-buffer pass, trdiffmapvertcolor).
             // The vertex colours are authored greyscale occlusion (they do not encode the map's lights).
             const bool vertexColour = effect.find("vertcolor") != std::string::npos;
-            // TRAdditiveAnisoSpec* (holograms): the game's own formula, see AnisoMaterial. Additive pieces keep their
-            // vertex alpha: it is the opacity (the aniso shader multiplies by it; glow fins fade out by it).
-            const bool aniso = effect.rfind("tradditiveanisospec", 0) == 0;
+            // TRAdditiveAnisoSpec* (holograms): the game's own formula, see AnisoMaterial. Additive and translucent pieces
+            // keep their vertex alpha: it is the opacity (the aniso shader multiplies by it; glow fins fade out by it).
             // Glow map: added after lighting (see shaders/scene.hlsl), sampled with UV set GlowTexCoord (0 or 1).
             std::string glowName;
             int glowUvSet = 1;
@@ -877,7 +955,7 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 v.positionX = p.x; v.positionY = p.y; v.positionZ = p.z;
                 v.normalX = n.x; v.normalY = n.y; v.normalZ = n.z;
                 v.colour = vertexColour ? packColour(uint8_t(gv.colour >> 16), uint8_t(gv.colour >> 8), uint8_t(gv.colour),     // ARGB
-                                                     additive ? uint8_t(gv.colour >> 24) : 255)
+                                                     additive || translucent ? uint8_t(gv.colour >> 24) : 255)
                                         : packColour(255, 255, 255, 255);
                 v.texU = gv.uv.x;
                 v.texV = gv.uv.y;
@@ -893,12 +971,22 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 part.texture = water ? nullptr : texture(piece.diffuseTexture);    // water's diffuse map is a stand-in
                 for (const tr::GeoParameter& p : piece.parameters)
                     if (p.key == "AlphaTestEnable") part.alphaTest = p.value == "true";
+                // Cut-outs (effects.glm pixel shaders, 2026-10-11): AlphaTestEnable materials kill below 0.5
+                // (TRDiffMapDetMapVertColor psPixelShaderDeferred[1]: texkill(diffuse.a x vertex.a x MatDiffuse.a - 0.5); the
+                // editor tests the texture alpha only). TRDiffMapVertColorWave (swaying foliage, e.g.
+                // flora_foreas_gen_bush03_v01; no AlphaTestEnable parameter) always kills below 0.25 (psWaveDeferred and
+                // psWaveLegacy: texkill(diffuse.a - 0.25)).
+                if (effect.rfind("trdiffmapvertcolorwave", 0) == 0) {
+                    part.alphaTest = true;
+                    part.alphaReference = 0.25f;
+                }
                 part.hued = tr::isHuedEffect(piece.effectName);
                 part.colourScale = vertexColour ? 2.0f : 1.0f;
                 if (!glowName.empty() && !water) part.glow = texture(glowName);
                 part.flesh = tr::toLowerAscii(piece.swapGroup) == "flesh";
                 part.swapId = piece.swapId;
                 part.additive = additive;
+                part.translucent = translucent;
                 // Effects whose (non-debug) passes set CULLMODE = NONE, from the compiled effects in effects.glm (fx_2_0
                 // state tables, 2026-10-10): every other model effect keeps PalGlobalEffect's CCW (back faces culled).
                 part.twoSided = effect.rfind("paldiffmap.", 0) == 0 || effect.rfind("trdiffmapnolight.", 0) == 0 ||
@@ -933,19 +1021,43 @@ void SceneView::loadModel(const std::string& name, Model& model) {
         for (const tr::ParticleAttachment& a : tr::particleAttachments(geo)) {
             const tr::GeoContactPoint* cp = tr::findContactPoint(geo, a.contactPoint);
             if (!cp) continue;                 // 7 of the shipped references name a point the model lacks
-            Mat4 local = rotationMatrix(cp->rotation);
-            local.row0.w = cp->position.x;
-            local.row1.w = cp->position.y;
-            local.row2.w = cp->position.z;
-            if (cp->bone >= 0 && size_t(cp->bone) < geo.bones.size()) {
-                Mat4 bind = identityMatrix();
-                for (int32_t b = cp->bone; b >= 0 && size_t(b) < geo.bones.size(); b = geo.bones[size_t(b)].parent >= b ? -1 : geo.bones[size_t(b)].parent) {
-                    const tr::GeoBone& bone = geo.bones[size_t(b)];
-                    bind = multiply(boneLocal(bone.translation, bone.rotation, bone.scale), bind);
+            model.particles.push_back(Model::ParticleMount{contactPointFrame(geo, *cp), a.file});
+        }
+        // Lights on contact points ("lsys" "<cp>,<file>.ltmp"; tabula_rasa.exe FUN_00816bf0 = SceneBody::AddLightToCP):
+        // the pairs that directly follow the lsys pair between "beginlight" and "endlight" are set on the light by
+        // property name (FUN_00884cf0 -> FUN_00431d70), e.g. "Range 10". The template's Offset / LocalOrientation are the
+        // translation / rotation of the light's own child transform node (Property_LightImplPropsPoint_OffsetRef sets
+        // light + 0x234 node + 0xA0, LocalOrientation reads the same node), placed here under the contact point's frame.
+        // Position sets a different node; the templates' Position is their authoring location (point_bane_rotatingligh
+        // t_orange: 243, 9, 113, 90 m from the Bootcamp lamp whose light shows at the lamp in game), so it is not used -
+        // how the attach (FUN_0088c610) parents the nodes is not fully traced. Light Mods are not applied.
+        for (const tr::GeoContactPoint& cp : geo.contactPoints) {
+            for (size_t k = 0; k < cp.values.size(); ++k) {
+                if (tr::toLowerAscii(cp.values[k].key) != "lsys") continue;
+                const std::string& value = cp.values[k].value;
+                const size_t comma = value.find(',');
+                if (comma == std::string::npos) continue;
+                const tr::GeoContactPoint* target = tr::findContactPoint(geo, uint32_t(std::strtoul(value.c_str(), nullptr, 10)));
+                if (!target) continue;
+                std::map<std::string, std::string> overrides;
+                if (k + 1 < cp.values.size() && tr::toLowerAscii(cp.values[k + 1].key) == "beginlight")
+                    for (size_t j = k + 2; j < cp.values.size() && tr::toLowerAscii(cp.values[j].key) != "endlight"; ++j)
+                        overrides[cp.values[j].key] = cp.values[j].value;
+                tr::Bytes data;
+                if (!assets_.tryRead(value.substr(comma + 1), data)) continue;
+                std::vector<tr::PlacedLight> lights;
+                try {
+                    lights = tr::readLights(data, overrides);
+                } catch (const std::exception&) {
+                    continue;
                 }
-                local = multiply(bind, local);
+                const Mat4 frame = contactPointFrame(geo, *target);
+                for (tr::PlacedLight light : lights) {
+                    light.position = transformPoint(frame, light.offset);
+                    light.worldOrientation = multiplyQuat(target->rotation, light.worldOrientation);
+                    model.lights.push_back(light);
+                }
             }
-            model.particles.push_back(Model::ParticleMount{local, a.file});
         }
         model.effectOnly = !model.hasSolid && effectPieces > 0;
         if (!model.positions.empty()) {
@@ -966,12 +1078,17 @@ void SceneView::loadModel(const std::string& name, Model& model) {
 
 void SceneView::loadPending(double budgetSeconds) {
     const auto start = std::chrono::steady_clock::now();
+    bool newGlobe = false;
     while (!pending_.empty()) {
         const std::string name = pending_.front();
         pending_.pop_front();
-        loadModel(name, models_[name]);
+        Model& model = models_[name];
+        loadModel(name, model);
+        for (const tr::PlacedLight& light : model.lights)
+            if (!light.globeMap.empty() && !globeIndex_.count(tr::toLowerAscii(light.globeMap))) newGlobe = true;
         if (std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() > budgetSeconds) break;
     }
+    if (newGlobe) loadGlobeMaps();
 }
 
 const tr::ParticleSystem* SceneView::particleSystem(const std::string& file) {
@@ -1086,8 +1203,9 @@ void SceneView::queueDraws(const Selection& selection) {
                 for (const ModelPiece& piece : p.model->pieces) {
                     if (piece.additive) continue;
                     if (piece.water) renderer_.drawTranslucent(piece.mesh, p.world, waterTint(selected));
+                    else if (piece.translucent) renderer_.drawTranslucent(piece.mesh, p.world, scaledTint(tint, piece.colourScale), showTextures ? piece.texture : nullptr);
                     else renderer_.draw(piece.mesh, p.world, scaledTint(tint, piece.colourScale), true, showTextures ? piece.texture : nullptr, showTextures && piece.alphaTest,
-                                        Vec4f{0, 0, 0, 0}, showTextures ? piece.glow : nullptr, piece.twoSided);
+                                        Vec4f{0, 0, 0, 0}, showTextures ? piece.glow : nullptr, piece.twoSided, piece.alphaReference);
                 }
             } else if (p.model && p.model->loaded && p.model->effectOnly) {
                 // Effect-only entity (particle emitters, light cones): with Placeholders on, a cyan wireframe of its bounds.
@@ -1158,9 +1276,13 @@ void SceneView::queueDraws(const Selection& selection) {
                     renderer_.drawTranslucent(piece.mesh, s.world, waterTint(selected));
                     return;
                 }
+                if (piece.translucent) {
+                    renderer_.drawTranslucent(piece.mesh, s.world, scaledTint(tint, piece.colourScale), showTextures ? piece.texture : nullptr);
+                    return;
+                }
                 const Vec4f hue = !showTextures || !piece.hued ? Vec4f{0, 0, 0, 0} : piece.flesh ? s.skinHue : partHue;
                 renderer_.draw(piece.mesh, s.world, scaledTint(tint, piece.colourScale), true, showTextures ? piece.texture : nullptr, showTextures && piece.alphaTest, hue,
-                               showTextures ? piece.glow : nullptr, piece.twoSided);
+                               showTextures ? piece.glow : nullptr, piece.twoSided, piece.alphaReference);
             };
             // Avatars: the base suit minus the swap sets replaced by loaded parts, then each part's swap set
             // from its suit (a part still loading, or failed, leaves the base pieces in place).

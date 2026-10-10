@@ -19,7 +19,8 @@ cbuffer FragmentUniforms : register(b0, space3)
 {
     float4 tint;              // multiplied with the vertex colour and the texture
     float4 lightDirection;    // xyz: towards the light (world space); w: 1 = lit, 0 = unlit
-    float4 options;           // x: 1 = alpha test (discard below 0.5); y: 1 = alpha-blended particle; z: 1 = additive; w: 1 = aniso additive
+    float4 options;           // x: > 0 = alpha test, discard texture alpha below x; y: 1 = alpha-blended particle, 2 = translucent (lit, texture alpha);
+                              // z: 1 = additive; w: 1 = aniso additive
     float4 hue;               // rgb added to the texel weighted by its alpha (the game's "Hue" effects); w: 1 = on
     float4 sunFront;          // rgb: directional light on surfaces facing it
     float4 sunBack;           // rgb: directional light's back colour (surfaces facing away)
@@ -109,7 +110,8 @@ float3 anisoAdditive(VertexOutput input)
 
 float4 psMain(VertexOutput input) : SV_Target0
 {
-    if (fogRange.z > 0.5 && (options.w > 0.5 || options.z > 0.5 || options.y > 0.5))
+    const bool particle = options.y > 0.5 && options.y < 1.5;
+    if (fogRange.z > 0.5 && (options.w > 0.5 || options.z > 0.5 || particle))
         return float4(0, 0, 0, 1);             // light-buffer view: additive effects are not lit geometry
     if (options.w > 0.5)
     {
@@ -117,7 +119,7 @@ float4 psMain(VertexOutput input) : SV_Target0
         return float4(colour, 1.0);
     }
     const float4 texel = diffuseTexture.Sample(diffuseSampler, input.uv);
-    if (options.x > 0.5 && texel.a < 0.5)
+    if (options.x > 0.0 && texel.a < options.x)
         discard;
     // Hued textures (avatar skin, hair, clothing) are grey with the hue mask in alpha; the game's fallback
     // shader computes diffuse.rgb + Hue.rgb * diffuse.a (decal maps not applied here).
@@ -132,7 +134,7 @@ float4 psMain(VertexOutput input) : SV_Target0
         const float3 black = applyFog(added, length(cameraPosition.xyz - input.world), float4(0, 0, 0, fogColour.w), fogRange);
         return float4(black, 1.0);
     }
-    if (options.y > 0.5)
+    if (particle)
     {
         // Alpha-blended particles (the game's PalParticleSystem pixel shader: texture x vertex colour, alpha x fog).
         const float visibility = applyFog(float3(1, 1, 1), length(cameraPosition.xyz - input.world), float4(0, 0, 0, fogColour.w), fogRange).x;
@@ -159,12 +161,13 @@ float4 psMain(VertexOutput input) : SV_Target0
     if (fogRange.z > 0.5)
         return float4(light * 0.2, 1.0);       // the game's light buffer (x OO_LIGHT_MULTIPLIER), as /dl_showlight shows it
     const float3 lit = base.rgb * light + glow;
-    return float4(applyFog(lit, length(view), fogColour, fogRange), base.a);
+    // Alpha: only translucent draws blend with it. Opaque draws keep it 1 - the viewport image is composited with alpha.
+    return float4(applyFog(lit, length(view), fogColour, fogRange), options.y > 1.5 ? base.a * texel.a : base.a);
 }
 
 // Shadow pass: depth only; alpha-tested pieces (foliage) discard like the colour pass.
 void psShadow(VertexOutput input)
 {
-    if (options.x > 0.5 && diffuseTexture.Sample(diffuseSampler, input.uv).a < 0.5)
+    if (options.x > 0.0 && diffuseTexture.Sample(diffuseSampler, input.uv).a < options.x)
         discard;
 }

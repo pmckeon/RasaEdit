@@ -109,18 +109,19 @@ public:
 
     // Frame: begin, queue draws, then record everything into a command buffer.
     void beginFrame(const Mat4& viewProjection, const tr::Vec3& cameraPosition, const SceneLighting& lighting);
-    // texture nullptr draws untextured (white); alphaTest discards texels with alpha below 0.5.
+    // texture nullptr draws untextured (white); alphaTest discards texels with alpha below alphaReference.
     // hue (w = 1) adds hue.rgb weighted by the texture alpha, as the game's "Hue" effects do (avatar skin, hair, clothing).
     // glow (sampled with the second UV set) is added after lighting, as the game's glow buffer is.
     // twoSided: no back-face culling for this draw (effects whose passes set CULLMODE = NONE, see SceneView).
     void draw(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, bool lit, SDL_GPUTexture* texture = nullptr, bool alphaTest = false,
-              const Vec4f& hue = Vec4f{0, 0, 0, 0}, SDL_GPUTexture* glow = nullptr, bool twoSided = false);
+              const Vec4f& hue = Vec4f{0, 0, 0, 0}, SDL_GPUTexture* glow = nullptr, bool twoSided = false, float alphaReference = 0.5f);
     // Back faces of opaque lit draws are culled when true, as in the game: PalGlobalEffect.fx sets CULLMODE = CCW and
     // is begun without state saving (D3DXFX_DONOTSAVESTATE), so it is the baseline; material effects leave it alone
     // except the few that set NONE. false draws everything two-sided (comparison / debugging).
     bool cullBackFaces = true;
-    // Alpha-blended (tint.w is the opacity), drawn after all opaque draws, without depth writes.
-    void drawTranslucent(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint);
+    // Alpha-blended (opacity = tint.w x vertex alpha x texture alpha), lit, drawn after all opaque draws, without depth
+    // writes: water, and pieces in the game's Translucent phase (SRCALPHA / INVSRCALPHA, PhaseTranslucent.fx).
+    void drawTranslucent(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, SDL_GPUTexture* texture = nullptr);
     // Additive (one, one), unlit, faded by fog, drawn last without depth writes: the game's TRAdditive* effects.
     void drawAdditive(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, SDL_GPUTexture* texture);
     // The game's TRAdditiveAnisoSpec* effects (holograms): additive, with detail/decal layers and a view-angle light ramp.
@@ -157,6 +158,7 @@ private:
         Vec4f layers = Vec4f{0, 0, 0, 0};
         bool aniso = false;
         bool twoSided = false;
+        float alphaReference = 0.5f;             // alpha test: texels below it are discarded
     };
     SDL_GPUShader* createShader(const unsigned char* dxil, size_t dxilSize, const unsigned char* spirv, size_t spirvSize,
                                 const char* entryPoint, SDL_GPUShaderStage stage, uint32_t samplers);

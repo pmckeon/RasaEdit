@@ -163,11 +163,13 @@ private:
         GpuMesh mesh;
         SDL_GPUTexture* texture = nullptr;     // owned by textures_; nullptr = untextured
         bool alphaTest = false;
+        float alphaReference = 0.5f;           // texture alpha below it is discarded (see loadModel)
         bool water = false;                    // TRWater* effect: drawn as a translucent surface
         bool hued = false;                     // "Hue" effect: a colour is added, weighted by the diffuse alpha
         float colourScale = 1;                 // 2 for "VertColor" effects (texture x vertex colour x 2)
         SDL_GPUTexture* glow = nullptr;        // GlowTexture (owned by textures_), added after lighting
-        bool additive = false;                 // TRAdditive* effect: drawn additively with Effects on, not pickable
+        bool additive = false;                 // Additive phase: drawn additively with Effects on, not pickable
+        bool translucent = false;              // Translucent phase: alpha-blended, lit
         bool flesh = false;                    // swap group "flesh": hued with the skin colour
         uint32_t swapId = 0;                   // avatar swap set (0: not swappable)
         bool aniso = false;                    // TRAdditiveAnisoSpec* effect (holograms): drawn with anisoMaterial
@@ -191,6 +193,9 @@ private:
             std::string file;
         };
         std::vector<ParticleMount> particles;
+        // Lights on contact points ("lsys" .ltmp templates), in model space: position = contact point frame x Offset,
+        // spot/globe orientation = frame rotation x the template's. Placed per entity in lighting().
+        std::vector<tr::PlacedLight> lights;
     };
     struct Placement {
         Mat4 world;                 // entity placement

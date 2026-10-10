@@ -56,7 +56,9 @@ int main(int argc, char** argv) {
             std::printf("map lights: %zu%s%s\n", scene.mapLights().size(), scene.mapLightsError().empty() ? "" : " - ", scene.mapLightsError().c_str());
             for (size_t k = 0; k < scene.skies().size(); ++k) {
                 const SceneView::SkyChoice& c = scene.skies()[k];
-                std::printf("sky %zu%s: %s (%zu regions)%s%s\n", k, k == scene.skyIndex ? " *" : "", c.name.c_str(), c.regions.size(),
+                std::string regions;
+                for (int32_t r : c.regions) regions += (regions.empty() ? "" : " ") + std::to_string(r);
+                std::printf("sky %zu%s: %s (regions: %s)%s%s\n", k, k == scene.skyIndex ? " *" : "", c.name.c_str(), regions.c_str(),
                             c.loaded ? "" : " - not usable: ", c.error.c_str());
             }
             const SceneLighting l = scene.lighting();

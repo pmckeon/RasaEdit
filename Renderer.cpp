@@ -412,16 +412,17 @@ void Renderer::beginFrame(const Mat4& viewProjection, const tr::Vec3& cameraPosi
 }
 
 void Renderer::draw(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, bool lit, SDL_GPUTexture* texture, bool alphaTest, const Vec4f& hue,
-                    SDL_GPUTexture* glow, bool twoSided) {
+                    SDL_GPUTexture* glow, bool twoSided, float alphaReference) {
     if (!mesh.vertices || mesh.indexCount == 0) return;
     DrawItem item{&mesh, model, tint, lit, texture ? texture : white_, alphaTest, nullptr, false, hue, glow ? glow : black_};
     item.twoSided = twoSided;
+    item.alphaReference = alphaReference;
     draws_.push_back(item);
 }
 
-void Renderer::drawTranslucent(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint) {
+void Renderer::drawTranslucent(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, SDL_GPUTexture* texture) {
     if (!mesh.vertices || mesh.indexCount == 0) return;
-    translucentDraws_.push_back(DrawItem{&mesh, model, tint, true, white_, false, nullptr, true, Vec4f{0, 0, 0, 0}, black_});
+    translucentDraws_.push_back(DrawItem{&mesh, model, tint, true, texture ? texture : white_, false, nullptr, true, Vec4f{0, 0, 0, 0}, black_});
 }
 
 void Renderer::drawAdditive(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, SDL_GPUTexture* texture) {
@@ -579,7 +580,7 @@ void Renderer::recordShadows(SDL_GPUCommandBuffer* commands) {
         const bool alphaTest = !item.terrain && item.alphaTest;
         const SDL_GPUTextureSamplerBinding sampler = {alphaTest && item.texture ? item.texture : white_, linearSampler_};
         SDL_BindGPUFragmentSamplers(pass, 0, &sampler, 1);
-        const Vec4f options{alphaTest ? 1.0f : 0.0f, 0, 0, 0};
+        const Vec4f options{alphaTest ? item.alphaReference : 0.0f, 0, 0, 0};
         SceneFragmentUniforms u{Vec4f{1, 1, 1, 1}, towardsLight_, options, Vec4f{0, 0, 0, 0},
                                 lightingUniforms(lighting_, cameraPosition_, shadowMatrix_, false, float(shadowSize))};
         SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof u);
@@ -629,7 +630,7 @@ void Renderer::recordItem(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pas
                                                           {item.light ? item.light : white_, clampSampler_},
                                                           {shadowMap_, shadowSampler_}, {globes_, clampSampler_}};
         SDL_BindGPUFragmentSamplers(pass, 0, samplers, 7);
-        SceneFragmentUniforms u{item.tint, towardsLight_, Vec4f{item.alphaTest ? 1.0f : 0.0f, 0, item.additive ? 1.0f : 0.0f, item.aniso ? 1.0f : 0.0f},
+        SceneFragmentUniforms u{item.tint, towardsLight_, Vec4f{item.alphaTest ? item.alphaReference : 0.0f, item.translucent ? 2.0f : 0.0f, item.additive ? 1.0f : 0.0f, item.aniso ? 1.0f : 0.0f},
                                 item.hue, lightingUniforms(lighting_, cameraPosition_, shadowMatrix_, shadowsActive_, float(shadowSize)), item.specular, item.layers};
         u.lightDirection.w = item.lit ? 1.0f : 0.0f;
         SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof u);
