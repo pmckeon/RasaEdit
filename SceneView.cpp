@@ -532,7 +532,11 @@ SceneLighting SceneView::lighting() const {
     std::vector<std::pair<float, tr::PlacedLight>> nearest;
     auto consider = [&](const tr::PlacedLight& light) {
         if (!light.enabled || light.range <= 0 || light.intensity <= 0) return;
-        const float gap = std::max(0.0f, length(subtract(light.position, camera_.position)) - light.range);
+        // Plane lights reach a box of half-extents (Width/2, Length/2, Range) around their position.
+        const float reach = light.kind == tr::PlacedLight::Kind::Plane
+                                ? std::sqrt(light.width * light.width * 0.25f + light.length * light.length * 0.25f + light.range * light.range)
+                                : light.range;
+        const float gap = std::max(0.0f, length(subtract(light.position, camera_.position)) - reach);
         if (gap <= drawDistance) nearest.emplace_back(gap, light);
     };
     for (const tr::PlacedLight& light : mapLights_) consider(light);
@@ -564,8 +568,17 @@ SceneLighting SceneView::lighting() const {
             const float outer = std::max(light.penumbraAngle, light.coneAngle) * 0.5f * 0.0174533f;   // full angles (UNVERIFIED)
             l.localSpot[i] = Vec4f{d.x, d.y, d.z, std::cos(outer)};
             l.localSpotInner[i] = Vec4f{std::cos(light.coneAngle * 0.5f * 0.0174533f), 0, 0, 0};
+        } else if (light.kind == tr::PlacedLight::Kind::Plane) {
+            // TRPlaneLight (effects.glm, disassembled 2026-10-12; constants from FUN_0087a070): a box in the light's frame
+            // (Position, WorldOrientation) with half-extents LightDimensions = (Width/2, Length/2, Range) and full strength
+            // within LightFalloffVec = (Width/2 (1 - f.x), Length/2 (1 - f.y), Range (1 - f.z)), f = FalloffPercentVec.
+            const tr::Vec3 dims{light.width * 0.5f, light.length * 0.5f, light.range};
+            const tr::Vec3& f = light.falloffPercentVec;
+            l.localPosition[i].w = std::sqrt(dims.x * dims.x + dims.y * dims.y + dims.z * dims.z);
+            l.localSpot[i] = Vec4f{dims.x, dims.y, dims.z, -3.0f};
+            l.localSpotInner[i] = Vec4f{dims.x * (1.0f - f.x), 0, dims.y * (1.0f - f.y), dims.z * (1.0f - f.z)};
         } else {
-            l.localSpot[i] = Vec4f{0, -1, 0, -2.0f};       // point (plane lights approximated as points)
+            l.localSpot[i] = Vec4f{0, -1, 0, -2.0f};       // point
         }
         const auto globe = light.globeMap.empty() ? globeIndex_.end() : globeIndex_.find(tr::toLowerAscii(light.globeMap));
         l.localSpotInner[i].y = globe == globeIndex_.end() ? 0.0f : float(globe->second);
@@ -738,27 +751,42 @@ SDL_GPUTexture* SceneView::texture(const std::string& name) {
 }
 
 void SceneView::buildTerrainMaterial() {
-    // Layer textures, resized to a common size for the texture array (layer index = position in texlayers.tab).
-    const uint32_t size = 256;
-    std::vector<std::vector<tr::Rgba8>> layers;
+    // Layer textures in one texture array (layer index = position in texlayers.tab). The shipped layer textures are DXT1,
+    // 512 x 512 (121 of 148) or 1024 x 1024 (23): the array is 512 x 512 BC1 straight from the files' compressed levels
+    // (1024 layers contribute their stored 512 level). The editor used to shrink every layer to 256 x 256, visibly blurring
+    // the terrain. Fallback when a layer does not fit (missing, not DXT1, smaller): decoded RGBA at 512.
+    const uint32_t size = 512;
+    std::vector<tr::Bytes> files;
     for (const tr::TextureLayer& layer : map_.textureLayers) {
         std::string file = layer.texture;
         const size_t slash = file.find_last_of("/\\");
         if (slash != std::string::npos) file = file.substr(slash + 1);
-        std::vector<tr::Rgba8> pixels(size_t(size) * size, tr::Rgba8{128, 128, 128, 255});   // missing: neutral grey
         tr::Bytes data;
         try {
-            if (assets_.tryRead(file, data)) {
-                tr::DdsHeader header;
-                const std::vector<tr::Rgba8> decoded = tr::decodeDds(data, header);
-                pixels = resizeRgba(decoded, header.width, header.height, size, size);
-            }
+            if (!assets_.tryRead(file, data)) data.clear();
         } catch (const std::exception&) {
+            data.clear();
         }
-        layers.push_back(std::move(pixels));
+        files.push_back(std::move(data));
         terrainMaterial_.tilings.push_back(layer.tiling);
     }
-    terrainMaterial_.layers = uploadRgbaArray(renderer_.device(), layers, size);
+    terrainMaterial_.layers = uploadDxt1Array(renderer_.device(), files, size);
+    if (!terrainMaterial_.layers) {
+        std::vector<std::vector<tr::Rgba8>> layers;
+        for (const tr::Bytes& data : files) {
+            std::vector<tr::Rgba8> pixels(size_t(size) * size, tr::Rgba8{128, 128, 128, 255});   // missing: neutral grey
+            try {
+                if (!data.empty()) {
+                    tr::DdsHeader header;
+                    const std::vector<tr::Rgba8> decoded = tr::decodeDds(data, header);
+                    pixels = resizeRgba(decoded, header.width, header.height, size, size);
+                }
+            } catch (const std::exception&) {
+            }
+            layers.push_back(std::move(pixels));
+        }
+        terrainMaterial_.layers = uploadRgbaArray(renderer_.device(), layers, size);
+    }
 
     // Per-sample layer indices and coverages, one texel per sample (row = z index, column = x index). Coverage as the
     // client's alpha masks (tr::slotCoverage).

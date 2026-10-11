@@ -251,6 +251,40 @@ SDL_GPUTexture* uploadRgbaCube(SDL_GPUDevice* device, const std::vector<std::vec
     return texture;
 }
 
+SDL_GPUTexture* uploadDxt1Array(SDL_GPUDevice* device, const std::vector<tr::Bytes>& files, uint32_t size) {
+    if (files.empty() || (size & 0x3) != 0) return nullptr;
+    if (!SDL_GPUTextureSupportsFormat(device, SDL_GPU_TEXTUREFORMAT_BC1_RGBA_UNORM, SDL_GPU_TEXTURETYPE_2D_ARRAY, SDL_GPU_TEXTUREUSAGE_SAMPLER))
+        return nullptr;
+    std::vector<std::vector<tr::DdsLevel>> chains;
+    uint32_t levelCount = 0xFFFFFFFF;
+    for (const tr::Bytes& file : files) {
+        tr::DdsHeader header;
+        try {
+            header = tr::readDdsHeader(file);
+        } catch (const std::exception&) {
+            return nullptr;
+        }
+        if (!tr::ddsIsDxt1(header) || header.width != header.height || header.width < size) return nullptr;
+        std::vector<tr::DdsLevel> levels = tr::ddsCompressedLevels(file, header);
+        while (!levels.empty() && levels.front().width > size) levels.erase(levels.begin());
+        if (levels.empty() || levels.front().width != size) return nullptr;
+        levelCount = std::min<uint32_t>(levelCount, uint32_t(levels.size()));
+        chains.push_back(std::move(levels));
+    }
+    SDL_GPUTexture* texture = createTexture(device, SDL_GPU_TEXTUREFORMAT_BC1_RGBA_UNORM, SDL_GPU_TEXTURETYPE_2D_ARRAY, size, size,
+                                            uint32_t(files.size()), levelCount);
+    std::vector<uint8_t> blob;
+    std::vector<Region> regions;
+    for (uint32_t layer = 0; layer < files.size(); ++layer)
+        for (uint32_t k = 0; k < levelCount; ++k) {
+            const tr::DdsLevel& level = chains[layer][k];
+            regions.push_back(Region{k, layer, level.width, level.height, blob.size()});
+            appendBytes(blob, files[layer].data() + level.offset, level.size);
+        }
+    uploadRegions(device, texture, blob, regions);
+    return texture;
+}
+
 SDL_GPUTexture* uploadRgbaArray(SDL_GPUDevice* device, const std::vector<std::vector<tr::Rgba8>>& layers, uint32_t size) {
     const uint32_t count = std::max<uint32_t>(1, uint32_t(layers.size()));
     SDL_GPUTexture* texture = createTexture(device, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, SDL_GPU_TEXTURETYPE_2D_ARRAY, size, size, count,

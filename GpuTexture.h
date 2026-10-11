@@ -17,6 +17,10 @@ SDL_GPUTexture* uploadRgbaTextureMipmapped(SDL_GPUDevice* device, const std::vec
 // A DDS file: DXT1/3/5 uploaded compressed (BC1/2/3, every mip level in the file) when the device
 // supports it and the size allows; otherwise decoded to RGBA8 with generated mips.
 SDL_GPUTexture* uploadDdsTexture(SDL_GPUDevice* device, const tr::Bytes& dds);
+// A 2D array of DDS files as one BC1 array of size x size layers, using the files' own compressed mip levels (a larger
+// file contributes its levels from size down). Returns nullptr (nothing created) when a file is not DXT1, not square,
+// smaller than size or the device lacks BC1 arrays - callers then decode and use uploadRgbaArray.
+SDL_GPUTexture* uploadDxt1Array(SDL_GPUDevice* device, const std::vector<tr::Bytes>& files, uint32_t size);
 // A 2D array of square RGBA8 layers (each size x size), mipmapped.
 SDL_GPUTexture* uploadRgbaArray(SDL_GPUDevice* device, const std::vector<std::vector<tr::Rgba8>>& layers, uint32_t size);
 // A DDS cube map (6 faces of mip chains, +X, -X, +Y, -Y, +Z, -Z): DXT1/3/5 uploaded compressed with the file's own mip

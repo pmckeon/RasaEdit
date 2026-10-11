@@ -73,6 +73,28 @@ float3 rotateInverse(float4 q, float3 v)
     return 2.0 * dot(u, v) * u + (q.w * q.w - dot(u, u)) * v + 2.0 * q.w * cross(u, v);
 }
 
+// q v for a unit quaternion q (x y z w).
+float3 rotateBy(float4 q, float3 v)
+{
+    const float3 u = q.xyz;
+    return 2.0 * dot(u, v) * u + (q.w * q.w - dot(u, u)) * v + 2.0 * q.w * cross(u, v);
+}
+
+// Plane light (TRPlaneLight pixel shader, effects.glm, disassembled 2026-10-12): p = the pixel in the light's frame; outside
+// the box |p| < dims nothing; per-axis fade 1 - (clamp(|p|, falloff, dims) - falloff) / (dims - falloff), the smallest of
+// the three; direction fixed: sat(N . -(light's local z axis)). The caller multiplies by colour x intensity. BackColor is
+// not applied (0 in the shipped lights checked); the shadowed variant is not reproduced.
+float planeLight(float3 world, float3 n, float4 position, float4 dims, float4 falloff, float4 q)
+{
+    const float3 p = abs(rotateInverse(q, world - position.xyz));
+    if (any(p > dims.xyz))
+        return 0.0;
+    const float3 f = float3(falloff.x, falloff.z, falloff.w);
+    const float3 fade = 1.0 - (clamp(p, f, dims.xyz) - f) / max(dims.xyz - f, 0.0001);
+    const float3 axis = rotateBy(q, float3(0, 0, 1));
+    return min(fade.x, min(fade.y, fade.z)) * saturate(dot(n, -axis));
+}
+
 // Globe maps (GlobeMapFile): the game's trpointlight globe variant samples a cube map with the pixel's position in the
 // light's own frame (Proj2LightView) and multiplies the light colour by it (disassembled from effects.glm).
 float3 localLights(float3 world, float3 n, int count, float4 position[MAX_LOCAL_LIGHTS], float4 colour[MAX_LOCAL_LIGHTS],
@@ -87,6 +109,11 @@ float3 localLights(float3 world, float3 n, int count, float4 position[MAX_LOCAL_
         const float range = position[i].w;
         if (d >= range)
             continue;
+        if (spot[i].w < -2.5)
+        {
+            sum += colour[i].rgb * planeLight(world, n, position[i], spot[i], spotInner[i], rotation[i]);
+            continue;
+        }
         const float3 l = toLight / max(d, 0.0001);
         const bool isSpot = spot[i].w > -1.5;
         const float along = isSpot ? dot(-toLight, spot[i].xyz) : d;       // spot: depth along its axis
@@ -142,6 +169,8 @@ float3 localSpecular(float3 world, float3 n, float3 v, float sp, float i, int co
         const float range = position[k].w;
         if (d >= range)
             continue;
+        if (spot[k].w < -2.5)
+            continue;                           // plane lights: specular not decoded
         const bool isSpot = spot[k].w > -1.5;
         const float along = isSpot ? dot(-toLight, spot[k].xyz) : d;
         if (isSpot && along <= 0.0)

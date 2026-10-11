@@ -96,6 +96,9 @@ struct PlacedLight {
     std::string globeMap;             // GlobeMapFile: a cube map the light projects around itself ("" = none)
     float coneAngle = 45;             // spot, degrees
     float penumbraAngle = 60;         // spot, degrees
+    float width = 0;                  // plane: Width, Length (the box's full x / y extents), FalloffPercentVec (x y z)
+    float length = 0;
+    Vec3 falloffPercentVec;
     Vec3 direction() const;           // spot: the direction it shines
 };
 

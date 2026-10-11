@@ -313,6 +313,9 @@ std::vector<PlacedLight> readLights(const Bytes& data, const std::map<std::strin
         if (p.count("GlobeMapFile")) light.globeMap = p.at("GlobeMapFile");
         light.coneAngle = number(p, "ConeAngle", 45);
         light.penumbraAngle = number(p, "PenumbraAngle", 60);
+        light.width = number(p, "Width", 0);
+        light.length = number(p, "Length", 0);
+        light.falloffPercentVec = vec3(p, "FalloffPercentVec", Vec3{});
         out.push_back(std::move(light));
     }
     return out;
