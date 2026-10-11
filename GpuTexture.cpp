@@ -190,6 +190,46 @@ SDL_GPUTexture* uploadDdsTexture(SDL_GPUDevice* device, const tr::Bytes& dds) {
     return uploadRgbaTextureMipmapped(device, pixels, decoded.width, decoded.height);
 }
 
+SDL_GPUTexture* uploadDdsCubeTexture(SDL_GPUDevice* device, const tr::Bytes& dds) {
+    const tr::DdsHeader header = tr::readDdsHeader(dds);
+    const std::vector<tr::DdsLevel> levels = tr::ddsCompressedLevels(dds, header);
+    if (levels.empty()) throw std::runtime_error("not a block-compressed DDS");
+    if (header.width != header.height) throw std::runtime_error("cube faces are not square");
+    size_t faceBytes = 0;
+    for (const tr::DdsLevel& level : levels) faceBytes += level.size;
+    if (dds.size() < levels[0].offset + 6 * faceBytes) throw std::runtime_error("not a cube map");
+    const SDL_GPUTextureFormat format = tr::ddsIsDxt1(header)   ? SDL_GPU_TEXTUREFORMAT_BC1_RGBA_UNORM
+                                        : tr::ddsIsDxt3(header) ? SDL_GPU_TEXTUREFORMAT_BC2_RGBA_UNORM
+                                        : tr::ddsIsDxt5(header) ? SDL_GPU_TEXTUREFORMAT_BC3_RGBA_UNORM
+                                                                : SDL_GPU_TEXTUREFORMAT_INVALID;
+    if (format != SDL_GPU_TEXTUREFORMAT_INVALID && (header.width & 0x3) == 0 &&
+        SDL_GPUTextureSupportsFormat(device, format, SDL_GPU_TEXTURETYPE_CUBE, SDL_GPU_TEXTUREUSAGE_SAMPLER)) {
+        SDL_GPUTexture* texture = createTexture(device, format, SDL_GPU_TEXTURETYPE_CUBE, header.width, header.height, 6, uint32_t(levels.size()));
+        std::vector<uint8_t> blob;
+        std::vector<Region> regions;
+        for (uint32_t face = 0; face < 6; ++face)
+            for (uint32_t k = 0; k < levels.size(); ++k) {
+                regions.push_back(Region{k, face, levels[k].width, levels[k].height, blob.size()});
+                appendBytes(blob, dds.data() + levels[k].offset + face * faceBytes, levels[k].size);
+            }
+        uploadRegions(device, texture, blob, regions);
+        return texture;
+    }
+    // Fallback: decode each face (a one-face copy of the file) and generate mips.
+    SDL_GPUTexture* texture = createTexture(device, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, SDL_GPU_TEXTURETYPE_CUBE, header.width, header.height, 6,
+                                            mipCount(header.width, header.height));
+    std::vector<uint8_t> blob;
+    std::vector<Region> regions;
+    for (uint32_t face = 0; face < 6; ++face) {
+        tr::Bytes one(dds.begin(), dds.begin() + levels[0].offset);
+        one.insert(one.end(), dds.begin() + levels[0].offset + face * faceBytes, dds.begin() + levels[0].offset + (face + 1) * faceBytes);
+        tr::DdsHeader decoded;
+        appendMipChain(blob, regions, tr::decodeDds(one, decoded), decoded.width, decoded.height, face);
+    }
+    uploadRegions(device, texture, blob, regions);
+    return texture;
+}
+
 SDL_GPUTexture* uploadRgbaCubeArray(SDL_GPUDevice* device, const std::vector<std::vector<tr::Rgba8>>& faces, uint32_t size) {
     const uint32_t count = uint32_t(faces.size());
     SDL_GPUTexture* texture = createTexture(device, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, SDL_GPU_TEXTURETYPE_CUBE_ARRAY, size, size, count,
@@ -197,6 +237,16 @@ SDL_GPUTexture* uploadRgbaCubeArray(SDL_GPUDevice* device, const std::vector<std
     std::vector<uint8_t> blob;
     std::vector<Region> regions;
     for (uint32_t layer = 0; layer < count; ++layer) appendMipChain(blob, regions, faces[layer], size, size, layer);
+    uploadRegions(device, texture, blob, regions);
+    return texture;
+}
+
+SDL_GPUTexture* uploadRgbaCube(SDL_GPUDevice* device, const std::vector<std::vector<tr::Rgba8>>& faces, uint32_t size) {
+    if (faces.size() != 6) throw std::runtime_error("a cube map needs 6 faces");
+    SDL_GPUTexture* texture = createTexture(device, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, SDL_GPU_TEXTURETYPE_CUBE, size, size, 6, mipCount(size, size));
+    std::vector<uint8_t> blob;
+    std::vector<Region> regions;
+    for (uint32_t face = 0; face < 6; ++face) appendMipChain(blob, regions, faces[face], size, size, face);
     uploadRegions(device, texture, blob, regions);
     return texture;
 }

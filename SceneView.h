@@ -128,6 +128,11 @@ public:
         tr::Sky sky;
     };
     void setRegionSkies(const std::vector<std::pair<int32_t, std::string>>& regionSkies);
+    // Map entity hues as the client sets them (gamemap.py _LoadEntities3: generated.client.physicalentityclasshue by class,
+    // else the .map's own hue1 / hue2; StaticBodySetHue). The static body's post-load (FUN_00511370) applies hue1 only when
+    // it differs from (0, 0, 0, 255) (DAT_00d08b38), as SetHue (Hue and Hue2 of every piece, bytes / 255, FUN_00408ae0).
+    // Otherwise each piece keeps its material's stored Hue. classHue gives the table row (false: none).
+    void setClassHues(const std::function<bool(int32_t, tr::HueColour&, tr::HueColour&)>& classHue);
     const std::vector<SkyChoice>& skies() const { return skies_; }
     size_t skyIndex = 0;                    // into skies(); the sky of region 0 by default (used when not by region)
     // Sky by region, as the client does (regionmanager.py OnUpdateRegions: the regions the player is in plus region 0,
@@ -136,14 +141,22 @@ public:
     bool skyByRegion = true;
     size_t activeSkyIndex() const;          // the sky lighting uses (by region at the camera, else skyIndex)
     bool skyFromRegion() const;             // activeSkyIndex() came from a server region volume
+    // Environment cube by region (RegionManagerClient, decompiled 2026-10-11): of the same priority-sorted regions, the first
+    // whose enabledFlags has bit 1 names gGlobalEnvTexture (MapRegion.environmentMap); none, an empty name or a failed load
+    // gives "Env1.dds". setRegionEnvironmentMaps gives (region id, .dds name) pairs and loads each distinct cube once.
+    void setRegionEnvironmentMaps(const std::vector<std::pair<int32_t, std::string>>& regionEnvironmentMaps);
+    std::string activeEnvironmentMap() const;   // lower-case file name of the cube in use ("" = none loaded)
+    const std::map<std::string, std::string>& environmentMapErrors() const { return environmentMapErrors_; }
     float timeOfDay = 0.5f;                 // fraction of the day; the map's starting sky time by default
     float startTimeOfDay() const { return startTimeOfDay_; }
     bool skyLighting = true;                // false: plain editor lighting
     bool showFog = true;                    // distance fog in the sky colour (the .sky's own "Used" flag is false everywhere)
     bool showMapLights = true;              // the map's lights.xml (up to 16 nearest the camera)
     bool showLightBuffer = false;
-    int debugView = 0;                      // 2: normals, 3: specular intensity (like the game's /dl_shownormals, /dl_showspecintensity)
+    int debugView = 0;                      // 2: normals, 3: specular intensity, 4: albedo (the game's /dl_shownormals,
+                                            // /dl_showspecintensity, /dl_showdiffuse)
     bool materialMaps = true;               // normal and gloss maps (Pal* materials); off for comparison
+    bool environmentMaps = true;            // environment cube reflections (Pal*Env*); off for comparison
     std::unordered_map<std::string, int> globeIndex_;    // lower-case GlobeMapFile -> cube index (1-based; 0 = none)
     std::string globeErrors_;
     void loadGlobeMaps();
@@ -176,6 +189,10 @@ private:
         // CLAUDE.md "Material maps". Environment reflection (gloss b) not applied yet.
         SDL_GPUTexture* normalMap = nullptr;
         SDL_GPUTexture* glossMap = nullptr;
+        bool environment = false;              // Pal*Env* material: reflects the region's environment cube by gloss.b
+        bool hueUnweighted = false;            // alpha-tested Pal*Hue: Hue added without the diffuse-alpha weight
+        // The material's stored Hue parameter (w = 1 when set): what a map entity's pieces keep when the entity is not hued.
+        Vec4f materialHue = Vec4f{0, 0, 0, 0};
         // Phase pieces of non-TRAdditive effects are drawn with their forward technique (verified in game: absent from
         // /dl_showdiffuse): lit per vertex, detail layer, opacity x MatDiffuse alpha.
         bool forwardLit = false;
@@ -219,6 +236,7 @@ private:
         bool hasBounds = false;
         int32_t cullingLayer = 3;   // map cullLayer, else the class's vizsetting layer
         bool neverDrawn = false;    // culling layer 6
+        Vec4f hue = Vec4f{0, 0, 0, 0};   // the entity's hue1 / 255 when it is set (w = 1), else the materials keep theirs
     };
 
     struct AvatarDraw {                 // one suit's pieces of one swap set
@@ -281,6 +299,12 @@ private:
     std::vector<SkyChoice> skies_;
     std::unordered_map<int32_t, size_t> regionSky_;       // map region id -> skies_ index (base sky for _tranz)
     std::unordered_map<int32_t, int32_t> regionPriority_; // map region id -> MapRegion.priority
+    std::unordered_map<int32_t, int32_t> regionFlags_;    // map region id -> MapRegion.enabledFlags
+    std::unordered_map<int32_t, std::string> regionEnvironmentMap_;   // map region id -> lower-case env cube name (may be empty)
+    std::unordered_map<std::string, SDL_GPUTexture*> environmentCubes_;   // lower-case name -> cube (nullptr: failed)
+    std::map<std::string, std::string> environmentMapErrors_;
+    void readRegionSettings();
+    std::vector<int32_t> regionsAtCamera() const;       // the client's region list at the camera, highest priority first
     float startTimeOfDay_ = 0.5f;
     std::vector<tr::PlacedLight> mapLights_;
     std::string mapLightsError_;

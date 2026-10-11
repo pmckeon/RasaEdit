@@ -41,7 +41,7 @@ struct SceneFragmentUniforms {
     LightingUniforms lighting;
     Vec4f specular;                // aniso additive: MatSpecular
     Vec4f layers;                  // aniso additive: x detail uses UV set 1, y decal uses UV set 1, z 1 = has detail, w 1 = has decal
-    Vec4f material;                // x: 1 = normal map, y: 1 = gloss map
+    Vec4f material;                // x: 1 = normal map, y: 1 = gloss map, z: 1 = environment reflection (gloss.b)
 };
 
 struct TerrainFragmentUniforms {
@@ -105,7 +105,7 @@ Renderer::Renderer(SDL_GPUDevice* device) : device_(device) {
     sceneVertex_ = createShader(sceneVertexDxil, sizeof sceneVertexDxil, sceneVertexSpirv, sizeof sceneVertexSpirv, "vsMain",
                                 SDL_GPU_SHADERSTAGE_VERTEX, 0);
     sceneFragment_ = createShader(sceneFragmentDxil, sizeof sceneFragmentDxil, sceneFragmentSpirv, sizeof sceneFragmentSpirv, "psMain",
-                                  SDL_GPU_SHADERSTAGE_FRAGMENT, 9);
+                                  SDL_GPU_SHADERSTAGE_FRAGMENT, 10);
     terrainVertex_ = createShader(terrainVertexDxil, sizeof terrainVertexDxil, terrainVertexSpirv, sizeof terrainVertexSpirv, "vsMain",
                                   SDL_GPU_SHADERSTAGE_VERTEX, 0);
     terrainFragment_ = createShader(terrainFragmentDxil, sizeof terrainFragmentDxil, terrainFragmentSpirv, sizeof terrainFragmentSpirv,
@@ -190,6 +190,7 @@ Renderer::Renderer(SDL_GPUDevice* device) : device_(device) {
     white_ = uploadRgbaTexture(device_, &white, 1, 1);
     const uint32_t black = 0xFF000000;
     black_ = uploadRgbaTexture(device_, &black, 1, 1);
+    blackCube_ = uploadRgbaCube(device_, std::vector<std::vector<tr::Rgba8>>(6, std::vector<tr::Rgba8>(1, tr::Rgba8{0, 0, 0, 255})), 1);
     viewProjection_ = identityMatrix();
 }
 
@@ -198,6 +199,7 @@ Renderer::~Renderer() {
     if (depth_) SDL_ReleaseGPUTexture(device_, depth_);
     if (white_) SDL_ReleaseGPUTexture(device_, white_);
     if (black_) SDL_ReleaseGPUTexture(device_, black_);
+    if (blackCube_) SDL_ReleaseGPUTexture(device_, blackCube_);
     if (linearSampler_) SDL_ReleaseGPUSampler(device_, linearSampler_);
     if (pointSampler_) SDL_ReleaseGPUSampler(device_, pointSampler_);
     if (clampSampler_) SDL_ReleaseGPUSampler(device_, clampSampler_);
@@ -421,13 +423,15 @@ void Renderer::beginFrame(const Mat4& viewProjection, const tr::Vec3& cameraPosi
 }
 
 void Renderer::draw(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, bool lit, SDL_GPUTexture* texture, bool alphaTest, const Vec4f& hue,
-                    SDL_GPUTexture* glow, bool twoSided, float alphaReference, SDL_GPUTexture* normalMap, SDL_GPUTexture* glossMap) {
+                    SDL_GPUTexture* glow, bool twoSided, float alphaReference, SDL_GPUTexture* normalMap, SDL_GPUTexture* glossMap,
+                    bool environment) {
     if (!mesh.vertices || mesh.indexCount == 0) return;
     DrawItem item{&mesh, model, tint, lit, texture ? texture : white_, alphaTest, nullptr, false, hue, glow ? glow : black_};
     item.twoSided = twoSided;
     item.alphaReference = alphaReference;
     item.normalMap = normalMap;
     item.glossMap = glossMap;
+    item.environment = environment;
     draws_.push_back(item);
 }
 
@@ -524,10 +528,11 @@ void Renderer::recordParticles(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass
             bound = pipeline;
         }
         SDL_PushGPUVertexUniformData(commands, 0, &vertexUniforms, sizeof vertexUniforms);
-        const SDL_GPUTextureSamplerBinding samplers[9] = {{b.texture, linearSampler_}, {black_, linearSampler_}, {black_, linearSampler_},
-                                                          {black_, linearSampler_}, {white_, clampSampler_}, {shadowMap_, shadowSampler_},
-                                                          {globes_, clampSampler_}, {black_, linearSampler_}, {black_, linearSampler_}};
-        SDL_BindGPUFragmentSamplers(pass, 0, samplers, 9);
+        const SDL_GPUTextureSamplerBinding samplers[10] = {{b.texture, linearSampler_}, {black_, linearSampler_}, {black_, linearSampler_},
+                                                           {black_, linearSampler_}, {white_, clampSampler_}, {shadowMap_, shadowSampler_},
+                                                           {globes_, clampSampler_}, {black_, linearSampler_}, {black_, linearSampler_},
+                                                           {blackCube_, clampSampler_}};
+        SDL_BindGPUFragmentSamplers(pass, 0, samplers, 10);
         // Additive and subtractive use the additive path (rgb x alpha, faded by fog); alpha-blended ones options.y.
         const bool added = b.blendType == 0 || b.blendType == 3;
         SceneFragmentUniforms u{Vec4f{1, 1, 1, 1}, towardsLight_, Vec4f{0, added ? 0.0f : 1.0f, added ? 1.0f : 0.0f, 0}, Vec4f{0, 0, 0, 0},
@@ -643,17 +648,18 @@ void Renderer::recordItem(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pas
         SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof u);
     } else {
         // Unused detail/decal slots are switched off by layers.z/w; the light ramp defaults to opaque white.
-        const SDL_GPUTextureSamplerBinding samplers[9] = {{item.texture, linearSampler_}, {item.glow ? item.glow : black_, linearSampler_},
+        const SDL_GPUTextureSamplerBinding samplers[10] = {{item.texture, linearSampler_}, {item.glow ? item.glow : black_, linearSampler_},
                                                           {item.detail ? item.detail : black_, linearSampler_},
                                                           {item.decal ? item.decal : black_, linearSampler_},
                                                           {item.light ? item.light : white_, clampSampler_},
                                                           {shadowMap_, shadowSampler_}, {globes_, clampSampler_},
                                                           {item.normalMap ? item.normalMap : black_, linearSampler_},
-                                                          {item.glossMap ? item.glossMap : black_, linearSampler_}};
-        SDL_BindGPUFragmentSamplers(pass, 0, samplers, 9);
+                                                          {item.glossMap ? item.glossMap : black_, linearSampler_},
+                                                          {environment_ ? environment_ : blackCube_, clampSampler_}};
+        SDL_BindGPUFragmentSamplers(pass, 0, samplers, 10);
         SceneFragmentUniforms u{item.tint, towardsLight_, Vec4f{item.alphaTest ? item.alphaReference : 0.0f, item.translucent ? 2.0f : 0.0f, item.additive ? (item.forwardLit ? 2.0f : 1.0f) : 0.0f, item.aniso ? 1.0f : 0.0f},
                                 item.hue, lightingUniforms(lighting_, cameraPosition_, shadowMatrix_, shadowsActive_, float(shadowSize)), item.specular, item.layers,
-                                Vec4f{item.normalMap ? 1.0f : 0.0f, item.glossMap ? 1.0f : 0.0f, 0, 0}};
+                                Vec4f{item.normalMap ? 1.0f : 0.0f, item.glossMap ? 1.0f : 0.0f, item.environment && environment_ ? 1.0f : 0.0f, 0}};
         u.lightDirection.w = item.lit ? 1.0f : 0.0f;
         SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof u);
     }

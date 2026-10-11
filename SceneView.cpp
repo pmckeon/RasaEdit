@@ -193,6 +193,12 @@ Vec4f hueFromAbgr(uint32_t colour) {
     return Vec4f{float(colour & 0xFF) / 255.0f, float((colour >> 8) & 0xFF) / 255.0f, float((colour >> 16) & 0xFF) / 255.0f, 1.0f};
 }
 
+// A map entity's hue1 as SetHue takes it (bytes / 255); (0, 0, 0, 255) is the client's "not set" value (w = 0).
+Vec4f entityHue(const tr::HueColour& c) {
+    if (c.red == 0 && c.green == 0 && c.blue == 0 && c.alpha == 255) return Vec4f{0, 0, 0, 0};
+    return Vec4f{float(c.red) / 255.0f, float(c.green) / 255.0f, float(c.blue) / 255.0f, 1.0f};
+}
+
 void unitCube(std::vector<MeshVertex>& vertices, std::vector<uint32_t>& triangles, std::vector<uint32_t>& lines) {
     // Corner k of [0,1]^3: x = bit 0, y = bit 1, z = bit 2.
     for (uint32_t k = 0; k < 8; ++k) {
@@ -282,6 +288,7 @@ SceneView::SceneView(Renderer& renderer, const tr::AssetLibrary& assets, const t
             if (assets_.exists(anm)) objectAnimation = anm;
         }
         p.model = modelFor(mesh, objectAnimation);      // unordered_map nodes are stable
+        p.hue = entityHue(e.hue1);
         placements_.push_back(p);
         minX = std::min(minX, e.location.x); maxX = std::max(maxX, e.location.x);
         minZ = std::min(minZ, e.location.z); maxZ = std::max(maxZ, e.location.z);
@@ -310,6 +317,14 @@ SceneView::SceneView(Renderer& renderer, const tr::AssetLibrary& assets, const t
     if (map_.map.dayLengthSeconds > 0)
         startTimeOfDay_ = float(map_.map.startingSkyTime % map_.map.dayLengthSeconds) / float(map_.map.dayLengthSeconds);
     timeOfDay = startTimeOfDay_;
+}
+
+void SceneView::setClassHues(const std::function<bool(int32_t, tr::HueColour&, tr::HueColour&)>& classHue) {
+    for (size_t k = 0; k < placements_.size() && k < map_.map.entities.size(); ++k) {
+        tr::HueColour hue1 = map_.map.entities[k].hue1, hue2 = map_.map.entities[k].hue2;
+        if (classHue) classHue(map_.map.entities[k].classId, hue1, hue2);
+        placements_[k].hue = entityHue(hue1);
+    }
 }
 
 void SceneView::setRegionSkies(const std::vector<std::pair<int32_t, std::string>>& regionSkies) {
@@ -344,7 +359,7 @@ void SceneView::setRegionSkies(const std::vector<std::pair<int32_t, std::string>
     // regions plus region 0) whose sky is set and loads, and clears the sky when none has one (nothing is kept from an
     // earlier region); the transition-sky slot is unused (gamemap.py SetTransSky(False)). Seen in game: Bane dropships
     // (a layer only _tranz / _war have) in the night sky at Ranja Gorge, whose regions 9 / 49 name no sky.
-    for (const tr::MapRegion& r : map_.map.regions) regionPriority_[r.regionId] = r.priority;
+    readRegionSettings();
     for (size_t k = 0; k < skies_.size(); ++k)
         for (int32_t region : skies_[k].regions) regionSky_[region] = k;
     const size_t regionSkyCount = skies_.size();
@@ -383,19 +398,74 @@ bool insideArea(const AreaShape& a, const tr::Vec3& p) {
 }
 }  // namespace
 
-size_t SceneView::activeSkyIndex() const {
-    if (!skyByRegion || !serverContent_ || serverContent_->regions.empty()) return skyIndex;
-    // Regions containing the camera, plus region 0 (the client always adds DEFAULT_REGION_ID), by priority.
-    std::vector<int32_t> inside{0};
-    for (const MapRegion& r : serverContent_->regions)
-        if (r.enabled && insideArea(r.area, camera_.position)) inside.push_back(r.regionId);
+void SceneView::readRegionSettings() {
+    for (const tr::MapRegion& r : map_.map.regions) {
+        regionPriority_[r.regionId] = r.priority;
+        regionFlags_[r.regionId] = r.enabledFlags;
+    }
+}
+
+std::vector<int32_t> SceneView::regionsAtCamera() const {
+    // regionmanager.py OnUpdateRegions: the regions the player is in (server map_region volumes), then region 0
+    // (DEFAULT_REGION_ID) appended, stably sorted by MapRegion priority, highest first.
+    std::vector<int32_t> inside;
+    if (serverContent_)
+        for (const MapRegion& r : serverContent_->regions)
+            if (r.enabled && r.regionId != 0 && insideArea(r.area, camera_.position)) inside.push_back(r.regionId);
+    inside.push_back(0);
     const auto priority = [&](int32_t id) { const auto it = regionPriority_.find(id); return it == regionPriority_.end() ? 0 : it->second; };
     std::stable_sort(inside.begin(), inside.end(), [&](int32_t a, int32_t b) { return priority(a) > priority(b); });
-    for (int32_t id : inside) {
+    return inside;
+}
+
+size_t SceneView::activeSkyIndex() const {
+    if (!skyByRegion || !serverContent_ || serverContent_->regions.empty()) return skyIndex;
+    // RegionManagerClient's transition (FUN_0077d150): every region whose enabledFlags has bit 0 goes into the sky list;
+    // DoTransitionSky takes the first of them whose sky loads.
+    for (int32_t id : regionsAtCamera()) {
+        const auto flags = regionFlags_.find(id);
+        if (flags == regionFlags_.end() || (flags->second & 0x1) == 0) continue;
         const auto it = regionSky_.find(id);
         if (it != regionSky_.end() && it->second < skies_.size() && skies_[it->second].loaded) return it->second;
     }
     return skyIndex;
+}
+
+void SceneView::setRegionEnvironmentMaps(const std::vector<std::pair<int32_t, std::string>>& regionEnvironmentMaps) {
+    readRegionSettings();
+    regionEnvironmentMap_.clear();
+    std::vector<std::string> names{"env1.dds"};
+    for (const auto& re : regionEnvironmentMaps) {
+        regionEnvironmentMap_[re.first] = tr::toLowerAscii(re.second);
+        if (!re.second.empty()) names.push_back(tr::toLowerAscii(re.second));
+    }
+    for (const std::string& name : names) {
+        if (environmentCubes_.count(name)) continue;
+        SDL_GPUTexture* cube = nullptr;
+        try {
+            tr::Bytes data;
+            if (assets_.tryRead(name, data)) cube = uploadDdsCubeTexture(renderer_.device(), data);
+            else environmentMapErrors_[name] = "not found in the archives";
+        } catch (const std::exception& e) {
+            environmentMapErrors_[name] = e.what();
+        }
+        environmentCubes_[name] = cube;
+    }
+}
+
+std::string SceneView::activeEnvironmentMap() const {
+    std::string name;
+    for (int32_t id : regionsAtCamera()) {
+        const auto flags = regionFlags_.find(id);
+        if (flags == regionFlags_.end() || (flags->second & 0x2) == 0) continue;
+        const auto it = regionEnvironmentMap_.find(id);
+        if (it != regionEnvironmentMap_.end()) name = it->second;
+        break;
+    }
+    // TransitionEnvironmentMap (FUN_0052c620): an empty name becomes "Env1.dds"; a failed load also falls back to it.
+    const auto loaded = [&](const std::string& n) { const auto it = environmentCubes_.find(n); return it != environmentCubes_.end() && it->second; };
+    if (!name.empty() && loaded(name)) return name;
+    return loaded("env1.dds") ? "env1.dds" : "";
 }
 
 bool SceneView::skyFromRegion() const { return skyByRegion && serverContent_ && !serverContent_->regions.empty(); }
@@ -568,6 +638,9 @@ SceneView::~SceneView() {
         for (ModelPiece& piece : m.second.pieces) renderer_.destroyMesh(piece.mesh);
     for (auto& t : textures_)
         if (t.second) SDL_ReleaseGPUTexture(device, t.second);
+    for (auto& t : environmentCubes_)
+        if (t.second) SDL_ReleaseGPUTexture(device, t.second);
+    renderer_.setEnvironmentMap(nullptr);
     for (SDL_GPUTexture* t : {terrainMaterial_.layers, terrainMaterial_.layerIndices, terrainMaterial_.layerWeights})
         if (t) SDL_ReleaseGPUTexture(device, t);
 }
@@ -910,6 +983,11 @@ void SceneView::loadModel(const std::string& name, Model& model) {
             }
             // Pal* materials (ps2x_BaseDeferred*, disassembled 2026-10-11): normal, gloss and glow maps all use UV set 0.
             const bool pal = effect.rfind("paldiff", 0) == 0;
+            // Pal* G-buffer passes (every PalDiff* material except PalDiffMap, disassembled 2026-10-11) compute
+            // 2 x (diffuse + (Hue - 0.5) x diffuse.a) x vertex colour, like the VertColor effects; their vertex colours are
+            // 128 on avatars (x 1). Checked against in-game /dl_showdiffuse at McAllister. Their forward (translucent /
+            // additive phase) shaders are not decoded and keep x 1 without vertex colour.
+            const bool palDeferred = pal && effect.rfind("paldiffmap", 0) != 0 && !additive && !translucent;
             if (pal) glowUvSet = 0;
             // Static pieces attached to a bone are moved by it (as in the OBJ exporter).
             const tr::GeoBone* bone = nullptr;
@@ -968,7 +1046,7 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 v.normalX = n.x; v.normalY = n.y; v.normalZ = n.z;
                 v.tangentX = tangent.x; v.tangentY = tangent.y; v.tangentZ = tangent.z;
                 v.binormalX = binormal.x; v.binormalY = binormal.y; v.binormalZ = binormal.z;
-                v.colour = vertexColour ? packColour(uint8_t(gv.colour >> 16), uint8_t(gv.colour >> 8), uint8_t(gv.colour),     // ARGB
+                v.colour = vertexColour || palDeferred ? packColour(uint8_t(gv.colour >> 16), uint8_t(gv.colour >> 8), uint8_t(gv.colour),     // ARGB
                                                      additive || translucent ? uint8_t(gv.colour >> 24) : 255)
                                         : packColour(255, 255, 255, 255);
                 v.texU = gv.uv.x;
@@ -995,7 +1073,15 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                     part.alphaReference = 0.25f;
                 }
                 part.hued = tr::isHuedEffect(piece.effectName);
-                part.colourScale = vertexColour ? 2.0f : 1.0f;
+                part.colourScale = vertexColour || palDeferred ? 2.0f : 1.0f;
+                part.environment = palDeferred && effect.find("env") != std::string::npos;
+                part.hueUnweighted = effect.rfind("paldiffalpha", 0) == 0 && part.hued;
+                for (const tr::GeoParameter& gp : piece.parameters)
+                    if (gp.key == "Hue") {
+                        float h[4] = {0, 0, 0, 0};
+                        std::sscanf(gp.value.c_str(), "%f %f %f %f", &h[0], &h[1], &h[2], &h[3]);
+                        part.materialHue = Vec4f{h[0], h[1], h[2], 1.0f};
+                    }
                 if (!glowName.empty() && !water) part.glow = texture(glowName);
                 part.flesh = tr::toLowerAscii(piece.swapGroup) == "flesh";
                 part.swapId = piece.swapId;
@@ -1181,6 +1267,10 @@ void SceneView::queueDraws(const Selection& selection) {
     const float aspect = float(renderer_.width()) / float(std::max<uint32_t>(1, renderer_.height()));
     const Mat4 viewProjection = multiply(camera_.projectionMatrix(aspect), camera_.viewMatrix());
     renderer_.beginFrame(viewProjection, camera_.position, lighting());
+    {
+        const auto cube = environmentCubes_.find(activeEnvironmentMap());
+        renderer_.setEnvironmentMap(cube == environmentCubes_.end() || !environmentMaps ? nullptr : cube->second);
+    }
 
     // Frustum test against the clip-space planes of viewProjection (Gribb/Hartmann, depth 0..1).
     const Vec4f& r0 = viewProjection.row0; const Vec4f& r1 = viewProjection.row1;
@@ -1235,9 +1325,14 @@ void SceneView::queueDraws(const Selection& selection) {
                     else if (piece.translucent)
                         renderer_.drawTranslucent(piece.mesh, p.world, scaledTint(Vec4f{tint.x, tint.y, tint.z, tint.w * piece.matDiffuseAlpha}, piece.colourScale),
                                                   showTextures ? piece.texture : nullptr, showTextures ? piece.detail : nullptr, piece.detailUv1);
-                    else renderer_.draw(piece.mesh, p.world, scaledTint(tint, piece.colourScale), true, showTextures ? piece.texture : nullptr, showTextures && piece.alphaTest,
-                                        Vec4f{0, 0, 0, 0}, showTextures ? piece.glow : nullptr, piece.twoSided, piece.alphaReference,
-                                        showTextures && materialMaps ? piece.normalMap : nullptr, showTextures && materialMaps ? piece.glossMap : nullptr);
+                    else {
+                        Vec4f hue = !showTextures || !piece.hued ? Vec4f{0, 0, 0, 0} : p.hue.w > 0.5f ? p.hue : piece.materialHue;
+                        if (hue.w > 0.5f && piece.hueUnweighted) hue.w = 2.0f;
+                        renderer_.draw(piece.mesh, p.world, scaledTint(tint, piece.colourScale), true, showTextures ? piece.texture : nullptr, showTextures && piece.alphaTest,
+                                        hue, showTextures ? piece.glow : nullptr, piece.twoSided, piece.alphaReference,
+                                        showTextures && materialMaps ? piece.normalMap : nullptr, showTextures && materialMaps ? piece.glossMap : nullptr,
+                                        showTextures && materialMaps && piece.environment);
+                    }
                 }
             } else if (p.model && p.model->loaded && p.model->effectOnly) {
                 // Effect-only entity (particle emitters, light cones): with Placeholders on, a cyan wireframe of its bounds.
@@ -1313,10 +1408,12 @@ void SceneView::queueDraws(const Selection& selection) {
                                               showTextures ? piece.texture : nullptr, showTextures ? piece.detail : nullptr, piece.detailUv1);
                     return;
                 }
-                const Vec4f hue = !showTextures || !piece.hued ? Vec4f{0, 0, 0, 0} : piece.flesh ? s.skinHue : partHue;
+                Vec4f hue = !showTextures || !piece.hued ? Vec4f{0, 0, 0, 0} : piece.flesh ? s.skinHue : partHue;
+                if (hue.w > 0.5f && piece.hueUnweighted) hue.w = 2.0f;
                 renderer_.draw(piece.mesh, s.world, scaledTint(tint, piece.colourScale), true, showTextures ? piece.texture : nullptr, showTextures && piece.alphaTest, hue,
                                showTextures ? piece.glow : nullptr, piece.twoSided, piece.alphaReference,
-                               showTextures && materialMaps ? piece.normalMap : nullptr, showTextures && materialMaps ? piece.glossMap : nullptr);
+                               showTextures && materialMaps ? piece.normalMap : nullptr, showTextures && materialMaps ? piece.glossMap : nullptr,
+                               showTextures && materialMaps && piece.environment);
             };
             // Avatars: the base suit minus the swap sets replaced by loaded parts, then each part's swap set
             // from its suit (a part still loading, or failed, leaves the base pieces in place).

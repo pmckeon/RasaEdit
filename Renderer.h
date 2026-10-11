@@ -71,7 +71,7 @@ struct SceneLighting {
     float fogDensity = 0;                        // exp-squared fog, see shaders/lighting.hlsli
     bool showLight = false;                      // debug view like the game's /dl_showlight: 0.2 x light, no albedo
     int debugView = 0;                           // 2: G-buffer normals (N x 0.5 + 0.5, /dl_shownormals), 3: specular intensity
-                                                 // (/dl_showspecintensity)
+                                                 // (/dl_showspecintensity), 4: albedo (/dl_showdiffuse)
     // Sun shadows: a shadow map from the sun over the area around the camera. The game's shadows let part of the sun
     // through: shadowOpacity 0.64 fitted at Alia Das, 12:00 (shadowed ground 1.02 = ambient 0.60 + 0.36 x sun 1.16).
     bool sunShadows = false;
@@ -119,7 +119,7 @@ public:
     // twoSided: no back-face culling for this draw (effects whose passes set CULLMODE = NONE, see SceneView).
     void draw(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, bool lit, SDL_GPUTexture* texture = nullptr, bool alphaTest = false,
               const Vec4f& hue = Vec4f{0, 0, 0, 0}, SDL_GPUTexture* glow = nullptr, bool twoSided = false, float alphaReference = 0.5f,
-              SDL_GPUTexture* normalMap = nullptr, SDL_GPUTexture* glossMap = nullptr);
+              SDL_GPUTexture* normalMap = nullptr, SDL_GPUTexture* glossMap = nullptr, bool environment = false);
     // Back faces of opaque lit draws are culled when true, as in the game: PalGlobalEffect.fx sets CULLMODE = CCW and
     // is begun without state saving (D3DXFX_DONOTSAVESTATE), so it is the baseline; material effects leave it alone
     // except the few that set NONE. false draws everything two-sided (comparison / debugging).
@@ -143,6 +143,9 @@ public:
     // Placed lights' globe maps (GlobeMapFile cube maps), cube k at index k + 1 (index 0 = white = no globe); 6 faces
     // per cube. Call between frames (releases the previous texture).
     void setGlobeMaps(const std::vector<std::vector<tr::Rgba8>>& faces, uint32_t size);
+    // The global environment cube (the game's gGlobalEnvTexture) that Pal*Env* pieces reflect; null = a black cube.
+    // Not owned (SceneView keeps its region cubes); set each frame before record().
+    void setEnvironmentMap(SDL_GPUTexture* cube) { environment_ = cube; }
     void record(SDL_GPUCommandBuffer* commands);
     size_t queuedDraws() const { return draws_.size() + translucentDraws_.size() + additiveDraws_.size() + particleBatches_.size(); }
     size_t queuedParticleVertices() const { return particleVertices_.size(); }
@@ -171,6 +174,7 @@ private:
         float alphaReference = 0.5f;             // alpha test: texels below it are discarded
         SDL_GPUTexture* normalMap = nullptr;     // Pal* materials: normal map (tangent space) and gloss map
         SDL_GPUTexture* glossMap = nullptr;
+        bool environment = false;                // Pal*Env* material: reflects the environment cube by gloss.b
     };
     SDL_GPUShader* createShader(const unsigned char* dxil, size_t dxilSize, const unsigned char* spirv, size_t spirvSize,
                                 const char* entryPoint, SDL_GPUShaderStage stage, uint32_t samplers);
@@ -212,6 +216,8 @@ private:
     SDL_GPUGraphicsPipeline* shadowPipeline_ = nullptr;
     SDL_GPUTexture* shadowMap_ = nullptr;
     SDL_GPUTexture* globes_ = nullptr;            // cube map array; cube 0 white
+    SDL_GPUTexture* environment_ = nullptr;       // not owned
+    SDL_GPUTexture* blackCube_ = nullptr;         // stand-in when there is no environment cube
     SDL_GPUSampler* shadowSampler_ = nullptr;     // comparison sampler
     Mat4 shadowMatrix_;
     bool shadowsActive_ = false;

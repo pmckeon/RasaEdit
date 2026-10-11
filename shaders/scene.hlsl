@@ -21,13 +21,14 @@ cbuffer FragmentUniforms : register(b0, space3)
     float4 lightDirection;    // xyz: towards the light (world space); w: 1 = lit, 0 = unlit
     float4 options;           // x: > 0 = alpha test, discard texture alpha below x; y: 1 = alpha-blended particle, 2 = translucent (lit, texture alpha);
                               // z: 1 = additive, 2 = lit additive (forward-phase pieces); w: 1 = aniso additive
-    float4 hue;               // rgb added to the texel weighted by its alpha (the game's "Hue" effects); w: 1 = on
+    float4 hue;               // rgb - 0.5 added to the texel weighted by its alpha (the game's "Hue" effects); w: 1 = on, 2 = on and not
+                              // weighted (alpha-tested Pal*Hue effects: their alpha is the cut-out)
     float4 sunFront;          // rgb: directional light on surfaces facing it
     float4 sunBack;           // rgb: directional light's back colour (surfaces facing away)
     float4 hemiTop;           // rgb: hemispheric light from above
     float4 hemiBottom;        // rgb: hemispheric light from below
     float4 fogColour;         // rgb; w: 1 = fog on
-    float4 fogRange;          // x: start distance, y: density, z: 1 = light-buffer debug view, w: 2 normals / 3 spec intensity view
+    float4 fogRange;          // x: start distance, y: density, z: 1 = light-buffer debug view, w: 2 normals / 3 spec intensity / 4 albedo view
     float4 cameraPosition;    // xyz
     float4 localCount;        // x: number of placed lights
     float4 localPosition[MAX_LOCAL_LIGHTS];
@@ -40,7 +41,8 @@ cbuffer FragmentUniforms : register(b0, space3)
     float4 specular;          // aniso additive: MatSpecular
     float4 layers;            // x detail on UV set 1, y decal on UV set 1, z has detail, w has decal (aniso additive and
                               // forward-phase pieces)
-    float4 material;          // x: 1 = normal map (t7, tangent frame), y: 1 = gloss map (t8: r spec power, g spec intensity)
+    float4 material;          // x: 1 = normal map (t7, tangent frame), y: 1 = gloss map (t8: r spec power, g spec intensity,
+                              // b environment reflection), z: 1 = environment cube reflection (t9)
 };
 
 [[vk::combinedImageSampler]] Texture2D diffuseTexture : register(t0, space2);
@@ -61,6 +63,8 @@ cbuffer FragmentUniforms : register(b0, space3)
 [[vk::combinedImageSampler]] SamplerState normalMapSampler : register(s7, space2);
 [[vk::combinedImageSampler]] Texture2D glossTexture : register(t8, space2);
 [[vk::combinedImageSampler]] SamplerState glossSampler : register(s8, space2);
+[[vk::combinedImageSampler]] TextureCube environmentTexture : register(t9, space2);
+[[vk::combinedImageSampler]] SamplerState environmentSampler : register(s9, space2);
 
 struct VertexInput
 {
@@ -135,12 +139,14 @@ float4 psMain(VertexOutput input) : SV_Target0
         discard;
     // Hued textures (avatar skin, hair, clothing) are grey with the hue mask in alpha; the game's fallback
     // shader computes diffuse.rgb + Hue.rgb * diffuse.a (decal maps not applied here).
-    float3 albedo = hue.w > 0.5 ? saturate(texel.rgb + hue.rgb * texel.a) : texel.rgb;
+    // The engine stores a HueColor-annotated parameter as colour - 0.5 (effect parameter setter FUN_005bd040), so grey 0.5
+    // is neutral.
+    float3 albedo = hue.w > 1.5 ? saturate(texel.rgb + hue.rgb - 0.5) : hue.w > 0.5 ? saturate(texel.rgb + (hue.rgb - 0.5) * texel.a) : texel.rgb;
     // Detail layer, added around 0.5 grey (the forward TRDiffMapDetMapVertColor pixel shader psPixelShader:
     // (diffuse + detail - 0.5) x lit vertex colour x 2). Set only for forward-phase pieces.
     if (layers.z > 0.5)
         albedo += detailTexture.Sample(detailSampler, layers.x > 0.5 ? input.uv1 : input.uv).rgb - 0.5;
-    const float4 base = input.colour * tint * float4(albedo, 1.0);
+    float4 base = input.colour * tint * float4(albedo, 1.0);
     if (options.z > 0.5)
     {
         // Additive (TRAdditive* effects: glows, light cones, mist): unlit, blended one/one, scaled by texture alpha x
@@ -186,6 +192,16 @@ float4 psMain(VertexOutput input) : SV_Target0
         const float3 m = normalMapTexture.Sample(normalMapSampler, input.uv).rgb * 2.0 - 1.0;
         n = normalize(normalize(input.tangent) * m.x + normalize(input.binormal) * m.y + n * m.z);
     }
+    // Environment reflection (Pal*Env* materials, ps2x_BaseDeferred* / ps2x_DeferredDec*, disassembled 2026-10-11): the
+    // G-buffer albedo is lerp(2 x (diffuse + Hue) x vertex colour, envCube(reflect(-V, N)) with LOD bias 3 - 4 sqrt(gloss.r),
+    // gloss.b), V = normalize(gWorldEyePos - world position), world space; the cube is gGlobalEnvTexture (the region's).
+    if (material.z > 0.5 && material.y > 0.5)
+    {
+        const float4 gloss = glossTexture.Sample(glossSampler, input.uv);
+        const float3 r = reflect(-normalize(view), n);
+        const float3 env = environmentTexture.SampleBias(environmentSampler, r, 3.0 - 4.0 * sqrt(gloss.r)).rgb;
+        base.rgb = lerp(base.rgb, env, gloss.b);
+    }
     SkyLighting s;
     s.towardsLight = normalize(lightDirection.xyz);
     s.sunFront = sunFront.rgb;
@@ -206,6 +222,8 @@ float4 psMain(VertexOutput input) : SV_Target0
             return float4(0, 0, 0, 0);         // translucent (forward) pieces are not in the G-buffer
         if (fogRange.w < 2.5)
             return float4(n * 0.5 + 0.5, 1.0);
+        if (fogRange.w > 3.5)
+            return float4(saturate(base.rgb), 1.0);   // G-buffer albedo (8-bit target: clamped - UNVERIFIED format)
         return float4((material.y > 0.5 ? glossTexture.Sample(glossSampler, input.uv).g : 0.0).xxx, 1.0);
     }
     float3 lit = base.rgb * light + glow;

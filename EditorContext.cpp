@@ -178,6 +178,19 @@ bool EditorContext::openMap(const std::string& name) {
                         try { regionSkies.emplace_back(r.regionId, gameData->stringById(r.sky)); } catch (const std::exception&) {}
                     }
             scene->setRegionSkies(regionSkies);
+            std::vector<std::pair<int32_t, std::string>> regionEnvironmentMaps;
+            for (const tr::MapRegion& r : map->map.regions) {
+                std::string name;
+                if (gameData && r.environmentMap > 0) {
+                    try { name = gameData->stringById(r.environmentMap); } catch (const std::exception&) {}
+                }
+                regionEnvironmentMaps.emplace_back(r.regionId, name);
+            }
+            scene->setRegionEnvironmentMaps(regionEnvironmentMaps);
+            if (gameData)
+                scene->setClassHues([this](int32_t classId, tr::HueColour& hue1, tr::HueColour& hue2) {
+                    try { return gameData->classHue(classId, hue1, hue2); } catch (const std::exception&) { return false; }
+                });
         }
         currentMapName = map->name;
         mapTemplateId = templateId;

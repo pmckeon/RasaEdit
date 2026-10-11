@@ -41,7 +41,31 @@ int main(int argc, char** argv) {
             std::vector<std::pair<int32_t, std::string>> regionSkies;
             for (const tr::MapRegion& r : map.map.regions)
                 if (r.sky > 0) regionSkies.emplace_back(r.regionId, data.stringById(r.sky));
+            if (envValue("RASA_LISTHUES")) {             // distinct per-entity map hues (hue1 / hue2 RGBA bytes)
+                std::map<std::string, int> counts;
+                for (const tr::MapEntity& e : map.map.entities) {
+                    char key[64];
+                    std::snprintf(key, sizeof key, "%3u %3u %3u %3u / %3u %3u %3u %3u", e.hue1.red, e.hue1.green, e.hue1.blue, e.hue1.alpha,
+                                  e.hue2.red, e.hue2.green, e.hue2.blue, e.hue2.alpha);
+                    ++counts[key];
+                }
+                for (const auto& c : counts) std::printf("map hue %s: %d entities\n", c.first.c_str(), c.second);
+            }
+            if (envValue("RASA_LISTREGIONS"))
+                for (const tr::MapRegion& r : map.map.regions) {
+                    const auto name = [&](int32_t id) -> std::string {
+                        if (id <= 0) return "";
+                        try { return data.stringById(id); } catch (const std::exception&) { return "?"; }
+                    };
+                    std::printf("region %d priority %d flags 0x%x env '%s' sky '%s'\n", r.regionId, r.priority, unsigned(r.enabledFlags),
+                                name(r.environmentMap).c_str(), name(r.sky).c_str());
+                }
             scene.setRegionSkies(regionSkies);
+            std::vector<std::pair<int32_t, std::string>> regionEnvironmentMaps;
+            for (const tr::MapRegion& r : map.map.regions)
+                regionEnvironmentMaps.emplace_back(r.regionId, r.environmentMap > 0 ? data.stringById(r.environmentMap) : std::string());
+            scene.setRegionEnvironmentMaps(regionEnvironmentMaps);
+            scene.setClassHues([&](int32_t classId, tr::HueColour& hue1, tr::HueColour& hue2) { return data.classHue(classId, hue1, hue2); });
             // RASA_TIME=<fraction of the day>, RASA_SKY=<index>, RASA_NOSKY=1 / RASA_NOFOG=1 for lighting checks.
             if (const char* t = envValue("RASA_TIME")) scene.timeOfDay = float(std::atof(t));
             if (const char* k = envValue("RASA_SKY")) { scene.skyIndex = size_t(std::atoi(k)); scene.skyByRegion = false; }
@@ -52,8 +76,10 @@ int main(int argc, char** argv) {
             if (const char* g = envValue("RASA_LIGHTGAMMA")) scene.lightColourGamma = float(std::atof(g));
             if (envValue("RASA_NOLIGHTS")) scene.showMapLights = false;
             if (envValue("RASA_SHOWLIGHT")) scene.showLightBuffer = true;
+            if (envValue("RASA_NOENV")) scene.environmentMaps = false;
             if (envValue("RASA_SHOWNORMALS")) scene.debugView = 2;                  // like the game's /dl_shownormals
-            if (envValue("RASA_SHOWSPEC")) scene.debugView = 3;                     // like the game's /dl_showspecintensity     // like the game's /dl_showlight
+            if (envValue("RASA_SHOWSPEC")) scene.debugView = 3;
+            if (envValue("RASA_SHOWDIFFUSE")) scene.debugView = 4;                  // like the game's /dl_showdiffuse                     // like the game's /dl_showspecintensity     // like the game's /dl_showlight
             if (const char* a = envValue("RASA_AMBIENT")) scene.ambientScale = float(std::atof(a));
             if (envValue("RASA_NOMAPS")) scene.materialMaps = false;                // normal / gloss maps off   // scales the sky hemi light
             std::printf("map lights: %zu%s%s\n", scene.mapLights().size(), scene.mapLightsError().empty() ? "" : " - ", scene.mapLightsError().c_str());
@@ -200,6 +226,8 @@ int main(int argc, char** argv) {
             std::printf("sky at the camera: %s%s; hemi top %.2f %.2f %.2f, sun %.2f %.2f %.2f\n", scene.skies()[std::min(scene.activeSkyIndex(), scene.skies().size() - 1)].name.c_str(),
                         scene.skyFromRegion() ? " (by region)" : "", active.hemiTop.x, active.hemiTop.y, active.hemiTop.z, active.sunFront.x, active.sunFront.y, active.sunFront.z);
         }
+        std::printf("environment cube at the camera: %s\n", scene.activeEnvironmentMap().c_str());
+        for (const auto& e : scene.environmentMapErrors()) std::printf("environment cube %s failed: %s\n", e.first.c_str(), e.second.c_str());
         // Particle systems: started (with their warm-up) and run for RASA_PARTICLES seconds more (default 0.5);
         // RASA_NOPARTICLES=1 leaves them out.
         if (envValue("RASA_NOPARTICLES")) scene.showParticles = false;

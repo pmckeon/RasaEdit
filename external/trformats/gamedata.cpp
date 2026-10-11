@@ -731,6 +731,15 @@ int32_t GameData::classCullingLayer(int32_t classId) {
     return py::isInt(layer) ? int32_t(py::asInt(layer)) : 3;
 }
 
+bool GameData::classHue(int32_t classId, HueColour& hue1, HueColour& hue2) {
+    const py::Object* row = py::dictGet(global("generated.client.physicalentityclasshue", "lookup"), classId);
+    if (py::length(row) < 8) return false;
+    const auto byte = [&](size_t k) { return uint8_t(py::asInt(py::item(row, k), 0) & 0xFF); };
+    hue1 = HueColour{byte(0), byte(1), byte(2), byte(3)};
+    hue2 = HueColour{byte(4), byte(5), byte(6), byte(7)};
+    return true;
+}
+
 std::string GameData::mapTemplateName(int32_t templateId) {
     return py::asString(py::dictGet(global("generated.client.maptemplate", "lookup"), templateId));
 }
