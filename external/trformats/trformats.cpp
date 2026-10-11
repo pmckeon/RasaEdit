@@ -475,6 +475,17 @@ Vec3 normalize3(const Vec3& v) {                // D3DXVec3Normalize: zero stays
     return l > 0.0f ? Vec3{v.x / l, v.y / l, v.z / l} : Vec3{};
 }
 
+// The terrain object's grid size (FUN_0090bc70, .thd parser): W = trunc((max.x - min.x) / spacing + 0.1), H likewise
+// in z - e.g. 2048 on Concordia, whose patches give 2176 columns. Sample lookups outside it fail (FUN_0056aa20).
+int64_t tribbleGridColumns(const Terrain& terrain) {
+    const double inv = 1.0 / double(terrain.header.spacing);
+    return std::min<int64_t>(int64_t(double(terrain.header.bounds.max.x - terrain.header.bounds.min.x) * inv + 0.1), terrain.columns);
+}
+int64_t tribbleGridRows(const Terrain& terrain) {
+    const double inv = 1.0 / double(terrain.header.spacing);
+    return std::min<int64_t>(int64_t(double(terrain.header.bounds.max.z - terrain.header.bounds.min.z) * inv + 0.1), terrain.rows);
+}
+
 // FUN_0090b520: sum over the 8 neighbours (in this order) of v x d, d = neighbour - centre, v = (-d.z, 0, d.x),
 // normalised. A neighbour without data leaves the previously fetched position in place (FUN_0056aa20 writes nothing).
 Vec3 tribbleNormal(const Terrain& terrain, uint32_t row, uint32_t column) {
@@ -485,7 +496,7 @@ Vec3 tribbleNormal(const Terrain& terrain, uint32_t row, uint32_t column) {
     Vec3 sum;
     for (const auto& o : offsets) {
         const int64_t x = int64_t(column) + o[0], z = int64_t(row) + o[1];
-        if (x < 0 || z < 0 || x >= int64_t(terrain.columns) || z >= int64_t(terrain.rows)) continue;
+        if (x < 0 || z < 0 || x >= tribbleGridColumns(terrain) || z >= tribbleGridRows(terrain)) continue;
         if (terrain.hasData(uint32_t(z), uint32_t(x))) last = tribbleSamplePosition(terrain, uint32_t(z), uint32_t(x));
         const Vec3 d{last.x - centre.x, last.y - centre.y, last.z - centre.z};
         const Vec3 c = cross3(Vec3{-d.z, 0.0f, d.x}, d);
@@ -553,27 +564,36 @@ Quat d3dxMultiply(const Quat& q1, const Quat& q2) {       // D3DXQuaternionMulti
 }  // namespace
 
 uint32_t tribbleCellsX(const Terrain& terrain) {
-    // FUN_0073b2d0: the column of the bounds' far edge, clamped to the grid, / 32, + 1.
-    const auto column = int64_t((terrain.header.bounds.max.x - terrain.header.bounds.min.x) / terrain.header.spacing + 0.5f);
-    return uint32_t(std::clamp<int64_t>(column, 0, std::max<int64_t>(int64_t(terrain.columns) - 1, 0)) >> 5) + 1;
+    // FUN_0073b2d0: the column of the bounds' far edge (rounded), clamped to W - 1, / 32, + 1.
+    const auto column = int64_t(double(terrain.header.bounds.max.x - terrain.header.bounds.min.x) / terrain.header.spacing + 0.5);
+    return uint32_t(std::clamp<int64_t>(column, 0, std::max<int64_t>(tribbleGridColumns(terrain) - 1, 0)) >> 5) + 1;
 }
 
 uint32_t tribbleCellsZ(const Terrain& terrain) {
-    const auto row = int64_t((terrain.header.bounds.max.z - terrain.header.bounds.min.z) / terrain.header.spacing + 0.5f);
-    return uint32_t(std::clamp<int64_t>(row, 0, std::max<int64_t>(int64_t(terrain.rows) - 1, 0)) >> 5) + 1;
+    const auto row = int64_t(double(terrain.header.bounds.max.z - terrain.header.bounds.min.z) / terrain.header.spacing + 0.5);
+    return uint32_t(std::clamp<int64_t>(row, 0, std::max<int64_t>(tribbleGridRows(terrain) - 1, 0)) >> 5) + 1;
 }
 
 std::vector<TribbleInstance> placeTribbleCell(const Terrain& terrain, const std::vector<TextureLayer>& layers,
                                               const std::vector<TribbleSet>& sets, uint32_t cellIndex) {
     std::vector<TribbleInstance> out;
     if (terrain.columns == 0 || terrain.rows == 0 || sets.empty()) return out;
+    struct Container {
+        std::string mesh;
+        uint32_t seed;
+        float drawDistance;
+        std::vector<TribbleInstance> instances;
+    };
+    std::vector<Container> containers;
     // FUN_0073c830: the cell's rectangle, 33 x 33 samples (edges shared with the neighbours), clamped to the grid
     // (FUN_0094ae30).
     const uint32_t cellsX = tribbleCellsX(terrain);
-    const int64_t x0 = std::min<int64_t>(32 * int64_t(cellIndex % cellsX), terrain.columns - 1);
-    const int64_t z0 = std::min<int64_t>(32 * int64_t(cellIndex / cellsX), terrain.rows - 1);
-    const int64_t x1 = std::min<int64_t>(x0 + 32, terrain.columns - 1);
-    const int64_t z1 = std::min<int64_t>(z0 + 32, terrain.rows - 1);
+    const int64_t gridW = tribbleGridColumns(terrain), gridH = tribbleGridRows(terrain);
+    if (gridW <= 0 || gridH <= 0) return out;
+    const int64_t x0 = std::min<int64_t>(32 * int64_t(cellIndex % cellsX), gridW - 1);
+    const int64_t z0 = std::min<int64_t>(32 * int64_t(cellIndex / cellsX), gridH - 1);
+    const int64_t x1 = std::min<int64_t>(x0 + 32, gridW - 1);
+    const int64_t z1 = std::min<int64_t>(z0 + 32, gridH - 1);
     const int64_t width = x1 - x0 + 1;
     std::vector<TribbleRecord> records(size_t(width * (z1 - z0 + 1)));
     for (int64_t z = z0; z <= z1; ++z)
@@ -657,6 +677,7 @@ std::vector<TribbleInstance> placeTribbleCell(const Terrain& terrain, const std:
                             TribbleInstance instance;
                             instance.set = uint32_t(setIndex);
                             instance.model = uint32_t(m);
+                            instance.layer = uint32_t(layer);
                             instance.position = bilinear(&TribbleRecord::position);
                             const Vec3 up{0.0f, 1.0f, 0.0f};
                             Vec3 normal = model.orientation == 0 || model.orientation == 1 ? up : normalize3(bilinear(&TribbleRecord::normal));
@@ -692,10 +713,33 @@ std::vector<TribbleInstance> placeTribbleCell(const Terrain& terrain, const std:
                             }
                             instance.rotation = rotation;
                             instance.scale = float(random.next() * (double(model.scaleMax) - model.scaleMin) + model.scaleMin);
-                            out.push_back(instance);
+                            // The container for this mesh (FUN_0074c140), created by the first entry using it.
+                            size_t c = 0;
+                            while (c < containers.size() && containers[c].mesh != model.model) ++c;
+                            if (c == containers.size()) containers.push_back(Container{model.model, model.seed, model.drawDistance, {}});
+                            instance.container = uint32_t(c);
+                            instance.containerDrawDistance = containers[c].drawDistance;
+                            containers[c].instances.push_back(instance);
                         }
                     }
             }
+        }
+    }
+    // FUN_00751050: each container shuffles its instances once.
+    for (Container& c : containers) {
+        std::vector<TribbleInstance>& v = c.instances;
+        const uint32_t n = uint32_t(v.size());
+        TribbleRandom random(int32_t(cellIndex + c.seed));
+        const float last = float(int32_t(n) - 1);
+        for (uint32_t k = 0; k < n; ++k) {
+            const float r = float(random.next());
+            const auto other = uint32_t(int64_t(double(r) * double(last)));     // FISTP with truncation
+            if (other != k && other < n) std::swap(v[k], v[other]);
+        }
+        for (uint32_t k = 0; k < n; ++k) {
+            v[k].rank = k;
+            v[k].containerSize = n;
+            out.push_back(v[k]);
         }
     }
     return out;

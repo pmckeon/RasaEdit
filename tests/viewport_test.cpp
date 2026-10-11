@@ -335,6 +335,7 @@ int main(int argc, char** argv) {
         const float particleSeconds = envValue("RASA_PARTICLES") ? float(std::atof(envValue("RASA_PARTICLES"))) : 0.5f;
         // Terrain clutter: every cell around the camera at once, models loaded before the frame (RASA_NOCLUTTER=1: none).
         if (envValue("RASA_NOCLUTTER")) scene.showClutter = false;
+        if (const char* flora = envValue("RASA_FLORA")) scene.clutterDensity = float(std::atof(flora));   // density factor
         else {
             scene.clutterCellsPerFrame = 1000;
             scene.updateClutterCells();
@@ -353,8 +354,8 @@ int main(int argc, char** argv) {
                     for (const tr::TribbleInstance& in : tr::placeTribbleCell(t, map.textureLayers, map.tribbleSets, cell)) {
                         const float dx = in.position.x - c.x, dz = in.position.z - c.z;
                         if (dx * dx + dz * dz > r * r) continue;
-                        std::printf("clutter cell %u %s: %.2f %.2f %.2f scale %.2f\n", cell, map.tribbleSets[in.set].models[in.model].model.c_str(),
-                                    in.position.x, in.position.y, in.position.z, in.scale);
+                        std::printf("clutter cell %u %s: %.2f %.2f %.2f scale %.2f set %s layer %u entry %u rank %u of %u\n", cell, map.tribbleSets[in.set].models[in.model].model.c_str(),
+                                    in.position.x, in.position.y, in.position.z, in.scale, map.tribbleSets[in.set].name.c_str(), in.layer, in.model, in.rank, in.containerSize);
                     }
                 }
             }

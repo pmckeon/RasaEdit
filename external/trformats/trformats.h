@@ -280,6 +280,16 @@ inline bool terrainFlag(uint16_t word, int index) { return ((word >> (8 + index)
 struct TribbleInstance {
     uint32_t set = 0;            // index into the TribbleSet list
     uint32_t model = 0;          // index into that set's models
+    uint32_t layer = 0;          // the sample layer (1-based, texlayers entry layer - 1) that placed it
+    // Drawing: the cell keeps one TribbleGeoContainer per mesh name (FUN_0074c140), created by the first model entry
+    // that uses the mesh (its draw distance and seed apply). When first shown, a container shuffles its instances
+    // (seed cell index + that entry's seed: for i, j = trunc(random x (N - 1)), swap i and j - FUN_00751050) and draws
+    // the first trunc(N x factor), factor = FloraDensity x the RQS flora scalar (1 at full quality). placeTribbleCell
+    // returns each container's instances in shuffled order: draw an instance when rank < trunc(containerSize x factor).
+    uint32_t container = 0;      // container index within the cell (creation order)
+    uint32_t rank = 0;           // position after the shuffle
+    uint32_t containerSize = 0;
+    float containerDrawDistance = 0;
     Vec3 position;
     Quat rotation;               // D3DX quaternion (yaw about +y, then the tilt)
     float scale = 1.0f;

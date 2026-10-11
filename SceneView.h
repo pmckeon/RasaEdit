@@ -120,6 +120,9 @@ public:
     // Terrain clutter (tribbles: grass, ferns, flowers, debris), placed as the client does (tr::placeTribbleCell) in
     // the cells within tribbleCellRange of the camera's cell.
     bool showClutter = true;
+    // The game draws trunc(N x factor) of each clutter container's shuffled instances, factor = FloraDensity x the RQS
+    // flora scalar ("Flora Density I / II" lower it as the frame rate drops); 1 = full quality.
+    float clutterDensity = 1.0f;
     bool showServer = true;             // spawn pools, teleporters, links, objects
     bool showRegions = false;           // map regions (large outlines)
     bool showMissionAreas = true;

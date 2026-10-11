@@ -1490,16 +1490,16 @@ void SceneView::updateClutterCells() {
             if (built++ >= clutterCellsPerFrame) return;
             ClutterCell cell;
             cell.index = index;
-            std::map<std::pair<uint32_t, uint32_t>, size_t> groupOf;
+            std::map<uint32_t, size_t> groupOf;
             tr::Vec3 lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
             for (const tr::TribbleInstance& instance : tr::placeTribbleCell(t, map_.textureLayers, map_.tribbleSets, index)) {
-                const auto key = std::make_pair(instance.set, instance.model);
-                auto found = groupOf.find(key);
+                auto found = groupOf.find(instance.container);           // one group per container (mesh)
                 if (found == groupOf.end()) {
                     const tr::TribbleModel& model = map_.tribbleSets[instance.set].models[instance.model];
                     ClutterGroup group;
                     group.model = modelFor(model.model);
-                    group.drawDistance = model.drawDistance;
+                    group.drawDistance = instance.containerDrawDistance;
+                    const uint32_t key = instance.container;
                     found = groupOf.emplace(key, cell.groups.size()).first;
                     cell.groups.push_back(std::move(group));
                 }
@@ -1617,11 +1617,10 @@ void SceneView::queueDraws(const Selection& selection) {
         }
     }
 
-    // Terrain clutter. Not shadow casters: whether the game's clutter casts sun shadows is not verified.
+    // Terrain clutter (casts sun shadows: in-game /dl_showlight at Concordia noon shows grass and flower shadows).
     drawnClutter_ = 0;
     if (showClutter && showTerrain && map_.hasTerrain) {
         updateClutterCells();
-        renderer_.setShadowCasting(false);
         for (const ClutterCell& cell : clutterCells_) {
             if (cell.groups.empty() || !visible(cell.centre, cell.radius + 5.0f)) continue;
             const float cellDistance = length(subtract(cell.centre, camera_.position));
@@ -1629,14 +1628,16 @@ void SceneView::queueDraws(const Selection& selection) {
                 if (!group.model || !group.model->loaded || cellDistance > group.drawDistance + cell.radius) continue;
                 const tr::Vec3 localCentre = scaled(add(group.model->bounds.min, group.model->bounds.max), 0.5f);
                 const float localRadius = length(subtract(group.model->bounds.max, group.model->bounds.min)) * 0.5f;
-                for (const ClutterInstance& c : group.instances) {
+                // The instances are in the container's shuffled order; the first trunc(N x density) are drawn.
+                const auto shown = size_t(double(group.instances.size()) * double(clutterDensity));
+                for (size_t k = 0; k < shown && k < group.instances.size(); ++k) {
+                    const ClutterInstance& c = group.instances[k];
                     if (!visible(transformPoint(c.world, localCentre), localRadius * c.scale)) continue;
                     drawModelPieces(*group.model, c.world, Vec4f{0, 0, 0, 0}, false);
                     ++drawnClutter_;
                 }
             }
         }
-        renderer_.setShadowCasting(true);
     }
 
     // Particle systems (camera-facing sprites need the view's axes).
