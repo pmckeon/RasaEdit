@@ -740,6 +740,12 @@ bool GameData::classHue(int32_t classId, HueColour& hue1, HueColour& hue2) {
     return true;
 }
 
+std::string GameData::usableStatePackage(int32_t classId, int32_t stateId) {
+    const py::Object* id = py::dictGetTuple(global("generated.client.usabledata", "specialFX"), {classId, stateId, 97});
+    if (!py::isInt(id)) return "";
+    return stringById(int32_t(py::asInt(id)));
+}
+
 std::string GameData::mapTemplateName(int32_t templateId) {
     return py::asString(py::dictGet(global("generated.client.maptemplate", "lookup"), templateId));
 }

@@ -15,6 +15,7 @@ SHADERS = [   # (array name prefix, source, entry point, profile)
     ('shadowFragment', 'scene.hlsl', 'psShadow', 'ps_6_0'),
     ('terrainVertex', 'terrain.hlsl', 'vsMain', 'vs_6_0'),
     ('terrainFragment', 'terrain.hlsl', 'psMain', 'ps_6_0'),
+    ('refractFragment', 'refract.hlsl', 'psRefract', 'ps_6_0'),
 ]
 
 def compile(dxc, source, entry, profile, spirv):

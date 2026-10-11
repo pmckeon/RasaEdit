@@ -68,6 +68,7 @@ int main(int argc, char** argv) {
                 regionEnvironmentMaps.emplace_back(r.regionId, r.environmentMap > 0 ? data.stringById(r.environmentMap) : std::string());
             scene.setRegionEnvironmentMaps(regionEnvironmentMaps);
             scene.setClassHues([&](int32_t classId, tr::HueColour& hue1, tr::HueColour& hue2) { return data.classHue(classId, hue1, hue2); });
+            scene.setUsableStatePackages([&](int32_t classId, int32_t stateId) { return data.usableStatePackage(classId, stateId); });
             // RASA_TIME=<fraction of the day>, RASA_SKY=<index>, RASA_NOSKY=1 / RASA_NOFOG=1 for lighting checks.
             if (const char* t = envValue("RASA_TIME")) scene.timeOfDay = float(std::atof(t));
             if (const char* k = envValue("RASA_SKY")) { scene.skyIndex = size_t(std::atoi(k)); scene.skyByRegion = false; }

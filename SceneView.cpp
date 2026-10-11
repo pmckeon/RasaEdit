@@ -547,7 +547,15 @@ SceneLighting SceneView::lighting() const {
         // Range is used as the property says (the point pass reads LightRange from the light's properties,
         // FUN_00875360), not scaled with the entity.
         const tr::Quat rotation = quatFromMatrix(p.world);
-        for (tr::PlacedLight light : p.model->lights) {
+        // A light on a contact point of an animated bone follows it (e.g. prop_hum_light_rotate_v01's beacon).
+        const std::vector<Mat4> animated = animatedPieceMatrices(*p.model, lightTime);
+        for (size_t k = 0; k < p.model->lights.size(); ++k) {
+            tr::PlacedLight light = p.model->lights[k];
+            const int32_t bone = k < p.model->lightBones.size() ? p.model->lightBones[k] : -1;
+            if (bone >= 0 && size_t(bone) < animated.size()) {
+                light.position = transformPoint(animated[size_t(bone)], light.position);
+                light.worldOrientation = multiplyQuat(quatFromMatrix(animated[size_t(bone)]), light.worldOrientation);
+            }
             light.position = transformPoint(p.world, light.position);
             light.worldOrientation = multiplyQuat(rotation, light.worldOrientation);
             consider(light);
@@ -1053,7 +1061,14 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 const std::string animationName = name.substr(bar + 1, bar2 == std::string::npos ? std::string::npos : bar2 - bar - 1);
                 tr::GeoModel skeletonGeo;
                 if (bar2 != std::string::npos) skeletonGeo = tr::readGeo(assets_.read(name.substr(bar2 + 1)));
-                skin = skinMatrices(geo, tr::readAnimation(assets_.read(animationName)), 0.0f, bar2 != std::string::npos ? &skeletonGeo : nullptr);
+                const tr::Animation animation = tr::readAnimation(assets_.read(animationName));
+                skin = skinMatrices(geo, animation, 0.0f, bar2 != std::string::npos ? &skeletonGeo : nullptr);
+                if (bar2 == std::string::npos && animation.duration > 0.0f) {
+                    model.animation = animation;
+                    model.skeleton.bones = geo.bones;
+                    model.restInverse.clear();
+                    for (const Mat4& m : skin) model.restInverse.push_back(affineInverse(m));
+                }
             } catch (const std::exception& e) {
                 SDL_Log("pose %s: %s; drawing the bind pose", name.c_str(), e.what());
             }
@@ -1092,11 +1107,10 @@ void SceneView::loadModel(const std::string& name, Model& model) {
             // Not drawn (counted as effect pieces): helper shapes - effects that sample a diffuse map but have none
             // (e.g. vfx_eloh_lilly_pollen.geo, a 207 m particle-emitter sheet whose contact point names its .pfx) - and
             // camera-facing billboard sprites (TRSphBillboard), which would show as fixed quads.
-            // Also refraction shells (TRRefract, e.g. around npc_eloh_hologram_large): they only distort what is behind
-            // them, and drawn solid they hid the additive hologram inside.
+            // Refraction shells (TRRefract, e.g. around npc_eloh_hologram_large) are drawn by their own pass (refract.hlsl).
             const bool helperShape = piece.diffuseTexture.empty() && effect.find("diffmap") != std::string::npos;
             const bool refraction = effect.rfind("trrefract", 0) == 0;
-            if ((!namedAdditive && helperShape) || refraction || effect.find("billboard") != std::string::npos) {
+            if ((!namedAdditive && helperShape) || effect.find("billboard") != std::string::npos) {
                 ++effectPieces;
                 continue;
             }
@@ -1124,6 +1138,7 @@ void SceneView::loadModel(const std::string& name, Model& model) {
             const bool hair = effect.rfind("trhair", 0) == 0 && !additive && !translucent;
             const bool palDeferred = (pal && effect.rfind("paldiffmap", 0) != 0 && !additive && !translucent) || hair;
             if (pal || hair) glowUvSet = 0;
+            if (refraction) glowUvSet = 1;                 // TRRefract: the normal map is on UV set 1 (vertex shader: v4)
             // TR* deferred materials (stage 3): which maps fill slots 1 and 2, and their UV sets (vertex shader array element =
             // the *TexCoord parameters, e.g. vsDiffDetDecEnvDeferredArray[DetailTexCoord x 3 + DecalTexCoord]).
             const TrDescription trDesc = (!additive && !translucent && !water) ? trDescription(effect) : TrDescription{};
@@ -1156,6 +1171,19 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                         if (geo.bones[k].name == boneName) found = int(k);
                     palette.push_back(found);
                 }
+            // Animated models: a piece whose every vertex follows one bone (weight >= 0.999) can be moved per frame.
+            int rigidBone = -1;
+            if (!palette.empty() && !model.restInverse.empty()) {
+                bool rigid = true;
+                for (const tr::GeoVertex& gv : piece.vertices) {
+                    int vertexBone = -1;
+                    for (uint32_t i = 0; i < 4; ++i)
+                        if (tr::blendWeight(gv, i) >= 0.999f && tr::blendIndex(gv, i) < palette.size()) vertexBone = palette[tr::blendIndex(gv, i)];
+                    if (vertexBone < 0 || (rigidBone >= 0 && vertexBone != rigidBone)) { rigid = false; break; }
+                    rigidBone = vertexBone;
+                }
+                if (!rigid) rigidBone = -1;
+            }
             std::vector<MeshVertex> vertices;
             vertices.reserve(piece.vertices.size());
             for (const tr::GeoVertex& gv : piece.vertices) {
@@ -1192,7 +1220,8 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 v.normalX = n.x; v.normalY = n.y; v.normalZ = n.z;
                 v.tangentX = tangent.x; v.tangentY = tangent.y; v.tangentZ = tangent.z;
                 v.binormalX = binormal.x; v.binormalY = binormal.y; v.binormalZ = binormal.z;
-                v.colour = vertexColour || palDeferred ? packColour(uint8_t(gv.colour >> 16), uint8_t(gv.colour >> 8), uint8_t(gv.colour),     // ARGB
+                v.colour = refraction ? packColour(255, 255, 255, uint8_t(gv.colour >> 24))    // TRRefract uses the vertex alpha only
+                         : vertexColour || palDeferred ? packColour(uint8_t(gv.colour >> 16), uint8_t(gv.colour >> 8), uint8_t(gv.colour),     // ARGB
                                                      additive || translucent || trDesc.kind1 == 1 ? uint8_t(gv.colour >> 24) : 255)
                                         : packColour(255, 255, 255, 255);
                 v.texU = gv.uv.x;
@@ -1224,11 +1253,44 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                     part.alphaTest = true;
                     part.alphaReference = 0.25f;
                 }
+                // PalDiffAlpha* (all five effects; deferred pixel shaders ps2x_*AlphaTest*, verified 2026-10-12) always kill
+                // diffuse.a < 0.5, whatever AlphaTestEnable says (e.g. the memory tree's foliage sets none).
+                if (effect.rfind("paldiffalpha", 0) == 0) {
+                    part.alphaTest = true;
+                    part.alphaReference = 0.5f;
+                }
                 part.hued = tr::isHuedEffect(piece.effectName);
                 part.colourScale = vertexColour || palDeferred ? 2.0f : 1.0f;
                 part.environment = palDeferred && effect.find("env") != std::string::npos;
                 part.hueUnweighted = effect.rfind("paldiffalpha", 0) == 0 && part.hued;
                 part.hairCutout = hair;
+                part.animBone = rigidBone;
+                if (refraction) {
+                    // TRRefract (refract.hlsl): diffuse on UV set 0 x TexCoordTransform0, normal map on UV set 1 x
+                    // TexCoordTransform1 (both MATRIX_COLUMNS in its vertex shader), ModifierTexture = the edge fade ramp,
+                    // MatDiffuse x gModulateScale 0.5.
+                    part.refract = true;
+                    RefractMaterial& m = part.refractMaterial;
+                    m.diffuse = part.texture;
+                    for (const tr::GeoParameter& gp : piece.parameters) {
+                        if (gp.key == "NormalMapTexture") m.normalMap = texture(gp.value);
+                        else if (gp.key == "ModifierTexture") m.fade = texture(gp.value);
+                        else if (gp.key == "RefractionDisplacement") m.displacement = float(std::atof(gp.value.c_str()));
+                        else if (gp.key == "MatDiffuse") {
+                            float c[4] = {1, 1, 1, 1};
+                            std::sscanf(gp.value.c_str(), "%f %f %f %f", &c[0], &c[1], &c[2], &c[3]);
+                            m.matDiffuse = Vec4f{c[0] * 0.5f, c[1] * 0.5f, c[2] * 0.5f, c[3] * 0.5f};
+                        } else if (gp.key == "TexCoordTransform0" || gp.key == "TexCoordTransform1") {
+                            float e[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+                            std::istringstream values(gp.value);
+                            for (float& x : e) values >> x;
+                            const Vec4f u{e[0], e[4], e[8], 0}, v{e[1], e[5], e[9], 0};
+                            if (gp.key.back() == '0') { m.transform0u = u; m.transform0v = v; }
+                            else { m.transform1u = u; m.transform1v = v; }
+                        }
+                    }
+                }
+                if (rigidBone >= 0) model.animated = true;
                 if (trDesc.known) {
                     TrMaterial& m = part.trMaterial;
                     m.active = true;
@@ -1367,6 +1429,7 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                     light.position = transformPoint(frame, light.offset);
                     light.worldOrientation = multiplyQuat(target->rotation, light.worldOrientation);
                     model.lights.push_back(light);
+                    model.lightBones.push_back(target->bone);
                 }
             }
         }
@@ -1458,6 +1521,37 @@ void SceneView::advanceParticles(float dt) {
     for (LiveParticles& l : liveParticles_) l.instance->update(dt);
 }
 
+std::vector<Mat4> SceneView::animatedPieceMatrices(const Model& model, float time) const {
+    std::vector<Mat4> matrices;
+    if (!model.animated || model.animation.duration <= 0.0f) return matrices;
+    // Looping is assumed (the object animation's playback mode is not decoded); the phase is the editor's clock.
+    const float t = std::fmod(std::max(time, 0.0f), model.animation.duration);
+    const std::vector<Mat4> skin = skinMatrices(model.skeleton, model.animation, t);
+    matrices.resize(skin.size());
+    for (size_t k = 0; k < skin.size() && k < model.restInverse.size(); ++k) matrices[k] = multiply(skin[k], model.restInverse[k]);
+    return matrices;
+}
+
+// ------------------------------------------------------------------------------------------
+// Special-FX accessories of usable objects
+// ------------------------------------------------------------------------------------------
+std::vector<SceneView::Model*> SceneView::stateAccessories(int32_t classId, int32_t stateId) {
+    std::vector<Model*> models;
+    if (!usablePackageFor_) return models;
+    std::string package;
+    try { package = usablePackageFor_(classId, stateId); } catch (const std::exception&) { return models; }
+    if (package.empty()) return models;
+    try {
+        const tr::SfxPackage p = tr::readSfxPackage(assets_.read(package));
+        // The accessory is posed in the first frame of its animation (playback is not implemented).
+        for (const tr::SfxAccessory& a : p.accessories)
+            if (!a.mesh.empty()) models.push_back(modelFor(a.mesh, a.animation));
+    } catch (const std::exception& e) {
+        SDL_Log("special fx %s: %s", package.c_str(), e.what());
+    }
+    return models;
+}
+
 // ------------------------------------------------------------------------------------------
 // Terrain clutter
 // ------------------------------------------------------------------------------------------
@@ -1528,6 +1622,7 @@ void SceneView::queueDraws(const Selection& selection) {
     const float aspect = float(renderer_.width()) / float(std::max<uint32_t>(1, renderer_.height()));
     const Mat4 viewProjection = multiply(camera_.projectionMatrix(aspect), camera_.viewMatrix());
     renderer_.beginFrame(viewProjection, camera_.position, lighting());
+    renderer_.setCameraAxes(camera_.right(), camera_.up(), camera_.forward());
     {
         const auto cube = environmentCubes_.find(activeEnvironmentMap());
         renderer_.setEnvironmentMap(cube == environmentCubes_.end() || !environmentMaps ? nullptr : cube->second);
@@ -1565,14 +1660,23 @@ void SceneView::queueDraws(const Selection& selection) {
     auto waterTint = [](bool selected) { return Vec4f{0.22f, 0.42f, 0.58f, selected ? 0.75f : 0.55f}; };
 
     // A placed model's pieces, as map entities draw them (entityHue: the entity's hue when set, w = 1).
-    auto drawModelPieces = [&](const Model& model, const Mat4& world, const Vec4f& entityHue, bool selected) {
+    auto drawModelPieces = [&](const Model& model, const Mat4& placementWorld, const Vec4f& entityHue, bool selected) {
+        const std::vector<Mat4> animatedMatrices = animatedPieceMatrices(model, lightTime);
+        auto pieceWorld = [&](const ModelPiece& piece) {
+            return piece.animBone >= 0 && size_t(piece.animBone) < animatedMatrices.size() ? multiply(placementWorld, animatedMatrices[size_t(piece.animBone)]) : placementWorld;
+        };
         if (showEffects)       // additive pieces: glows, holograms, light cones
             for (const ModelPiece& piece : model.pieces)
-                if (piece.additive) drawEffect(piece, world);
+                if (piece.additive) drawEffect(piece, pieceWorld(piece));
         if (!model.hasSolid) return;
         const Vec4f tint = modelTint(selected);
         for (const ModelPiece& piece : model.pieces) {
             if (piece.additive) continue;
+            const Mat4 world = pieceWorld(piece);
+            if (piece.refract) {
+                if (showTextures && showEffects) renderer_.drawRefract(piece.mesh, world, piece.refractMaterial);
+                continue;
+            }
             if (piece.water) renderer_.drawTranslucent(piece.mesh, world, waterTint(selected));
             else if (piece.translucent)
                 renderer_.drawTranslucent(piece.mesh, world, scaledTint(Vec4f{tint.x, tint.y, tint.z, tint.w * piece.matDiffuseAlpha}, piece.colourScale),
@@ -1728,6 +1832,9 @@ void SceneView::queueDraws(const Selection& selection) {
                 for (const ModelPiece& piece : part.model->pieces)
                     if (piece.swapId == part.swapsetId) drawPiece(piece, part.hue);
             }
+            for (const Model* accessory : s.accessories)
+                if (accessory && accessory->loaded)
+                    for (const ModelPiece& piece : accessory->pieces) drawPiece(piece, Vec4f{0, 0, 0, 0});
         } else {
             renderer_.draw(unitBoxLines_, multiply(s.world, boxMatrix(tr::Bounds{tr::Vec3{-0.5f, 0, -0.5f}, tr::Vec3{0.5f, 2, 0.5f}})), colour, false);
         }
@@ -2131,6 +2238,7 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
         s.position = t.position;
         s.world = yawPlacement(t.position, t.rotation);
         s.model = modelFor(meshForClass(t.classId));
+        s.accessories = stateAccessories(t.classId, 56);
         s.colour = markerColour::teleporter;
         s.ringRadius = 2.0f;
         s.facing = true;

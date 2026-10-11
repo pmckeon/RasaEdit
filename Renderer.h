@@ -43,6 +43,17 @@ struct TrMaterial {
     Vec4f transform2u = Vec4f{1, 0, 0, 0}, transform2v = Vec4f{0, 1, 0, 0};
 };
 
+// TRRefract (screen-space distortion shells; shaders/refract.hlsl): the frame after opaque geometry, offset by the normal map.
+struct RefractMaterial {
+    SDL_GPUTexture* diffuse = nullptr;     // UV set 0 x transform 0
+    SDL_GPUTexture* normalMap = nullptr;   // UV set 1 x transform 1
+    SDL_GPUTexture* fade = nullptr;        // ModifierTexture: edge fade ramp (alpha)
+    float displacement = 0;                // RefractionDisplacement
+    Vec4f matDiffuse = Vec4f{0.5f, 0.5f, 0.5f, 0.5f};   // MatDiffuse x gModulateScale 0.5
+    Vec4f transform0u = Vec4f{1, 0, 0, 0}, transform0v = Vec4f{0, 1, 0, 0};
+    Vec4f transform1u = Vec4f{1, 0, 0, 0}, transform1v = Vec4f{0, 1, 0, 0};
+};
+
 // Material of the game's TRAdditiveAnisoSpecMapDiffMap[DetMapDecMap]VertColor effects (shader in effects.glm, verified by disassembly):
 //   albedo = lerp(diffuse + detail - 0.5, decal, decal.a);  alpha = diffuse.a * vertex.a * MatDiffuse.a
 //   colour = 4 * alpha * albedo * (albedo * vertex.rgb + LightTexture(0.5, max(N.V, 0)).a * MatSpecular)
@@ -142,6 +153,10 @@ public:
 
     // Frame: begin, queue draws, then record everything into a command buffer.
     void beginFrame(const Mat4& viewProjection, const tr::Vec3& cameraPosition, const SceneLighting& lighting);
+    // The view's axes in world space (refraction works in view space); call after beginFrame.
+    void setCameraAxes(const tr::Vec3& right, const tr::Vec3& up, const tr::Vec3& forward) { cameraRight_ = right; cameraUp_ = up; cameraForward_ = forward; }
+    // A refraction shell, drawn after the opaque geometry over a copy of the frame (alpha blended, depth written, two-sided).
+    void drawRefract(const GpuMesh& mesh, const Mat4& model, const RefractMaterial& material);
     // texture nullptr draws untextured (white); alphaTest discards texels with alpha below alphaReference.
     // hue (w = 1) adds hue.rgb weighted by the texture alpha, as the game's "Hue" effects do (avatar skin, hair, clothing).
     // glow (sampled with the second UV set) is added after lighting, as the game's glow buffer is.
@@ -228,6 +243,12 @@ private:
     SDL_GPUGraphicsPipeline* terrainPipeline_ = nullptr;
     SDL_GPUGraphicsPipeline* culledTerrainPipeline_ = nullptr;   // back faces culled
     SDL_GPUGraphicsPipeline* translucentPipeline_ = nullptr;
+    SDL_GPUGraphicsPipeline* refractPipeline_ = nullptr;
+    SDL_GPUShader* refractFragment_ = nullptr;
+    SDL_GPUTexture* frameCopy_ = nullptr;      // the colour target after opaque geometry, sampled by refraction
+    struct RefractItem { const GpuMesh* mesh; Mat4 model; RefractMaterial material; };
+    std::vector<RefractItem> refractDraws_;
+    tr::Vec3 cameraRight_{1, 0, 0}, cameraUp_{0, 1, 0}, cameraForward_{0, 0, 1};
     SDL_GPUGraphicsPipeline* additivePipeline_ = nullptr;
     SDL_GPUGraphicsPipeline* subtractivePipeline_ = nullptr;   // particles: destination - source
     // Particles: this frame's vertices (uploaded in record()) and their draws.

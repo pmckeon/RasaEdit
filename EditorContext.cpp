@@ -187,10 +187,12 @@ bool EditorContext::openMap(const std::string& name) {
                 regionEnvironmentMaps.emplace_back(r.regionId, name);
             }
             scene->setRegionEnvironmentMaps(regionEnvironmentMaps);
-            if (gameData)
+            if (gameData) {
                 scene->setClassHues([this](int32_t classId, tr::HueColour& hue1, tr::HueColour& hue2) {
                     try { return gameData->classHue(classId, hue1, hue2); } catch (const std::exception&) { return false; }
                 });
+                scene->setUsableStatePackages([this](int32_t classId, int32_t stateId) { return gameData->usableStatePackage(classId, stateId); });
+            }
         }
         currentMapName = map->name;
         mapTemplateId = templateId;

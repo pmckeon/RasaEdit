@@ -9,6 +9,13 @@
 
 namespace {
 
+struct RefractUniforms {   // shaders/refract.hlsl RefractUniforms
+    Vec4f matDiffuse;
+    Vec4f params;
+    Vec4f cameraRight, cameraUp, cameraForward;
+    Vec4f transform[4];
+};
+
 struct VertexUniforms {
     Mat4 viewProjection;
     Mat4 model;
@@ -127,6 +134,8 @@ Renderer::Renderer(SDL_GPUDevice* device) : device_(device) {
                                     "psMain", SDL_GPU_SHADERSTAGE_FRAGMENT, 5);
     shadowFragment_ = createShader(shadowFragmentDxil, sizeof shadowFragmentDxil, shadowFragmentSpirv, sizeof shadowFragmentSpirv, "psShadow",
                                    SDL_GPU_SHADERSTAGE_FRAGMENT, 1);
+    refractFragment_ = createShader(refractFragmentDxil, sizeof refractFragmentDxil, refractFragmentSpirv, sizeof refractFragmentSpirv, "psRefract",
+                                    SDL_GPU_SHADERSTAGE_FRAGMENT, 4);
     if (!SDL_GPUTextureSupportsFormat(device_, depthFormat_, SDL_GPU_TEXTURETYPE_2D, SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET))
         depthFormat_ = SDL_GPU_TEXTUREFORMAT_D24_UNORM;
     trianglePipeline_ = createPipeline(sceneVertex_, sceneFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST);
@@ -137,6 +146,7 @@ Renderer::Renderer(SDL_GPUDevice* device) : device_(device) {
     translucentPipeline_ = createPipeline(sceneVertex_, sceneFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST, 1);
     additivePipeline_ = createPipeline(sceneVertex_, sceneFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST, 2);
     subtractivePipeline_ = createPipeline(sceneVertex_, sceneFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST, 3);
+    refractPipeline_ = createPipeline(sceneVertex_, refractFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST, 4);
     linearSampler_ = createSampler(device_, true, true);
     pointSampler_ = createSampler(device_, false, false);
     clampSampler_ = createSampler(device_, true, false);
@@ -226,9 +236,10 @@ Renderer::~Renderer() {
     if (shadowFragment_) SDL_ReleaseGPUShader(device_, shadowFragment_);
     if (particleBuffer_) SDL_ReleaseGPUBuffer(device_, particleBuffer_);
     if (particleTransfer_) SDL_ReleaseGPUTransferBuffer(device_, particleTransfer_);
-    for (SDL_GPUGraphicsPipeline* p : {trianglePipeline_, culledTrianglePipeline_, linePipeline_, terrainPipeline_, culledTerrainPipeline_, translucentPipeline_, additivePipeline_, subtractivePipeline_})
+    for (SDL_GPUGraphicsPipeline* p : {trianglePipeline_, culledTrianglePipeline_, linePipeline_, terrainPipeline_, culledTerrainPipeline_, translucentPipeline_, additivePipeline_, subtractivePipeline_, refractPipeline_})
         if (p) SDL_ReleaseGPUGraphicsPipeline(device_, p);
-    for (SDL_GPUShader* s : {sceneVertex_, sceneFragment_, terrainVertex_, terrainFragment_})
+    if (frameCopy_) SDL_ReleaseGPUTexture(device_, frameCopy_);
+    for (SDL_GPUShader* s : {sceneVertex_, sceneFragment_, terrainVertex_, terrainFragment_, refractFragment_})
         if (s) SDL_ReleaseGPUShader(device_, s);
 }
 
@@ -287,10 +298,12 @@ SDL_GPUGraphicsPipeline* Renderer::createPipeline(SDL_GPUShader* vertexShader, S
 
     SDL_GPUColorTargetDescription target = {};
     target.format = colourFormat_;
-    if (blend != 0) {                                  // 1: alpha blend, 2: additive (one, one), 3: reverse subtract (one, one)
+    if (blend != 0) {                                  // 1: alpha blend, 2: additive (one, one), 3: reverse subtract (one, one),
+                                                       // 4: alpha blend with depth writes (refraction)
         target.blend_state.enable_blend = true;
-        target.blend_state.src_color_blendfactor = blend >= 2 ? SDL_GPU_BLENDFACTOR_ONE : SDL_GPU_BLENDFACTOR_SRC_ALPHA;
-        target.blend_state.dst_color_blendfactor = blend >= 2 ? SDL_GPU_BLENDFACTOR_ONE : SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+        const bool added = blend == 2 || blend == 3;
+        target.blend_state.src_color_blendfactor = added ? SDL_GPU_BLENDFACTOR_ONE : SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+        target.blend_state.dst_color_blendfactor = added ? SDL_GPU_BLENDFACTOR_ONE : SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
         target.blend_state.color_blend_op = blend == 3 ? SDL_GPU_BLENDOP_REVERSE_SUBTRACT : SDL_GPU_BLENDOP_ADD;
         target.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
         target.blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
@@ -314,7 +327,7 @@ SDL_GPUGraphicsPipeline* Renderer::createPipeline(SDL_GPUShader* vertexShader, S
     info.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
     info.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS_OR_EQUAL;
     info.depth_stencil_state.enable_depth_test = true;
-    info.depth_stencil_state.enable_depth_write = blend == 0;
+    info.depth_stencil_state.enable_depth_write = blend == 0 || blend == 4;
     info.target_info.color_target_descriptions = &target;
     info.target_info.num_color_targets = 1;
     info.target_info.depth_stencil_format = depthFormat_;
@@ -330,6 +343,7 @@ void Renderer::resize(uint32_t width, uint32_t height) {
     if (colour_ && width == width_ && height == height_) return;
     if (colour_) SDL_ReleaseGPUTexture(device_, colour_);       // SDL defers destruction until the GPU is done with it
     if (depth_) SDL_ReleaseGPUTexture(device_, depth_);
+    if (frameCopy_) SDL_ReleaseGPUTexture(device_, frameCopy_);
     SDL_GPUTextureCreateInfo info = {};
     info.type = SDL_GPU_TEXTURETYPE_2D;
     info.width = width;
@@ -341,6 +355,9 @@ void Renderer::resize(uint32_t width, uint32_t height) {
     info.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
     colour_ = SDL_CreateGPUTexture(device_, &info);
     if (!colour_) fail("SDL_CreateGPUTexture (colour target)");
+    info.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    frameCopy_ = SDL_CreateGPUTexture(device_, &info);
+    if (!frameCopy_) fail("SDL_CreateGPUTexture (frame copy)");
     info.format = depthFormat_;
     info.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET;
     depth_ = SDL_CreateGPUTexture(device_, &info);
@@ -437,6 +454,7 @@ void Renderer::beginFrame(const Mat4& viewProjection, const tr::Vec3& cameraPosi
     draws_.clear();
     translucentDraws_.clear();
     additiveDraws_.clear();
+    refractDraws_.clear();
     particleVertices_.clear();
     particleBatches_.clear();
 }
@@ -459,6 +477,11 @@ void Renderer::draw(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, b
         item.decal = trMaterial->slot2;
     }
     draws_.push_back(item);
+}
+
+void Renderer::drawRefract(const GpuMesh& mesh, const Mat4& model, const RefractMaterial& material) {
+    if (!mesh.vertices || mesh.indexCount == 0) return;
+    refractDraws_.push_back(RefractItem{&mesh, model, material});
 }
 
 void Renderer::drawTranslucent(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, SDL_GPUTexture* texture, SDL_GPUTexture* detail,
@@ -594,7 +617,8 @@ void Renderer::record(SDL_GPUCommandBuffer* commands) {
     depth.texture = depth_;
     depth.clear_depth = 1.0f;
     depth.load_op = SDL_GPU_LOADOP_CLEAR;
-    depth.store_op = SDL_GPU_STOREOP_DONT_CARE;
+    const bool refraction = !refractDraws_.empty() && frameCopy_;
+    depth.store_op = refraction ? SDL_GPU_STOREOP_STORE : SDL_GPU_STOREOP_DONT_CARE;
     depth.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
     depth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
     depth.cycle = true;
@@ -605,6 +629,49 @@ void Renderer::record(SDL_GPUCommandBuffer* commands) {
     for (const DrawItem& item : translucentDraws_) recordItem(commands, pass, item, bound);     // after all opaque geometry
     for (const DrawItem& item : additiveDraws_) recordItem(commands, pass, item, bound);        // glows, holograms, light cones
     recordParticles(commands, pass);
+    if (refraction) {
+        // Refraction last, over a copy of the finished frame: in game the additive hologram shows through its refraction
+        // shell (which writes depth), so it must already be in the frame (the phase registration order in FUN_00858480 -
+        // Water, Refraction, Translucent, Flora, Additive - is not the draw order). Exact phase order NOT traced.
+        SDL_EndGPURenderPass(pass);
+        SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(commands);
+        SDL_GPUTextureLocation from = {}, to = {};
+        from.texture = colour_;
+        to.texture = frameCopy_;
+        SDL_CopyGPUTextureToTexture(copy, &from, &to, width_, height_, 1, false);
+        SDL_EndGPUCopyPass(copy);
+        colour.load_op = SDL_GPU_LOADOP_LOAD;
+        depth.load_op = SDL_GPU_LOADOP_LOAD;
+        depth.store_op = SDL_GPU_STOREOP_DONT_CARE;
+        depth.cycle = false;
+        pass = SDL_BeginGPURenderPass(commands, &colour, 1, &depth);
+        SDL_BindGPUGraphicsPipeline(pass, refractPipeline_);
+        for (const RefractItem& item : refractDraws_) {
+            SDL_GPUBufferBinding vertexBinding = {item.mesh->vertices, 0};
+            SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
+            SDL_GPUBufferBinding indexBinding = {item.mesh->indices, 0};
+            SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_32BIT);
+            const VertexUniforms vertexUniforms{viewProjection_, item.model};
+            SDL_PushGPUVertexUniformData(commands, 0, &vertexUniforms, sizeof vertexUniforms);
+            const RefractMaterial& m = item.material;
+            const SDL_GPUTextureSamplerBinding samplers[4] = {{m.diffuse ? m.diffuse : white_, linearSampler_}, {m.normalMap ? m.normalMap : white_, linearSampler_},
+                                                              {m.fade ? m.fade : white_, clampSampler_}, {frameCopy_, clampSampler_}};
+            SDL_BindGPUFragmentSamplers(pass, 0, samplers, 4);
+            RefractUniforms u{};
+            u.matDiffuse = m.matDiffuse;
+            u.params = Vec4f{m.displacement, 1.0f / float(width_), 1.0f / float(height_), 0};
+            u.cameraRight = Vec4f{cameraRight_.x, cameraRight_.y, cameraRight_.z, 0};
+            u.cameraUp = Vec4f{cameraUp_.x, cameraUp_.y, cameraUp_.z, 0};
+            u.cameraForward = Vec4f{cameraForward_.x, cameraForward_.y, cameraForward_.z, 0};
+            u.transform[0] = m.transform0u;
+            u.transform[1] = m.transform0v;
+            u.transform[2] = m.transform1u;
+            u.transform[3] = m.transform1v;
+            SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof u);
+            SDL_DrawGPUIndexedPrimitives(pass, item.mesh->indexCount, 1, 0, 0, 0);
+        }
+        bound = nullptr;
+    }
     SDL_EndGPURenderPass(pass);
 }
 

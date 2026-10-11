@@ -159,6 +159,10 @@ public:
     // generated.client.physicalentityclasshue: (r, g, b, a, r2, g2, b2, a2) bytes; client/gamemap.py uses it in place of the
     // map entity's own hues when the class has a row. false when it has none.
     bool classHue(int32_t classId, HueColour& hue1, HueColour& hue2);
+    // The special-FX package (.pkg asset name) a usable class shows in a use state: generated.client.usabledata
+    // specialFX[(classId, stateId, USE_STATE_NULL 97)] through the string table, as client/augmentations/usable.py
+    // GetStatePkgId / AttachStateSFX. "" if none.
+    std::string usableStatePackage(int32_t classId, int32_t stateId);
     std::string mapTemplateName(int32_t templateId);          // generated.client.maptemplate
     std::vector<int32_t> contextIdsForMapTemplate(int32_t templateId);   // generated.client.gamecontext [3]
     bool radarInfo(int32_t contextId, int32_t regionId, RadarInfo& info); // false if the context has no radar

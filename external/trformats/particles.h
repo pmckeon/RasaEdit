@@ -192,6 +192,26 @@ struct ParticleSystem {
 
 ParticleSystem readParticleSystem(const Bytes& data);
 
+// Special-FX package (.pkg, specialfx.glm, 2,637 files): a chunk file `SFXP` v1 whose children are events, one chunk
+// each, created by tag (TRasa::SfxManager FUN_00751260: ACCY, ACBM, ACTR, SND, BEAM, BONE, CAM!, OPAC, AOPC, SLIT, MOTB,
+// PFXA, PFX, PFXP, PFXS, PFXT, PROJ, STOP, TCKL, TRNS, TRN2, HUEB, TIME, TODE, APKG, SCRF, SCRO, CAMO). Only the accessory
+// event is decoded: `ACCY` v1-8 (SfxAccessoryEvent unserializer FUN_0075fdd0; all 859 in the shipped packages parse
+// exactly): u8, asset mesh, asset animation, u8, [v2+: asset, asset, u8], [v3+: u8 bool, asset (a nested package)],
+// [v4+: asset x3], [v5+: u8], [v7+: u8 bool], [v8+: f32]; an asset is an ISTR (name), INON (none) or ITNI (id) chunk.
+// What the unnamed fields do (attachment point, looping, timing) is NOT decoded.
+struct SfxAccessory {
+    std::string mesh;            // e.g. arch_hum_outpost_waypoint_fx.geo
+    std::string animation;       // played on it (e.g. arch_hum_outpost_waypoint.anm)
+    std::string animation2;      // the v2+ asset after it (often the same animation)
+    std::string package;         // v3+ nested package (e.g. a light), "" if none
+    uint32_t version = 0;
+};
+struct SfxPackage {
+    std::vector<uint32_t> events;                // every event's tag, in order
+    std::vector<SfxAccessory> accessories;
+};
+SfxPackage readSfxPackage(const Bytes& data);
+
 // Particle systems a model carries: "psys" values "<contact point id>,<file>.pfx" from its contact points, its GBOD
 // property table and its pieces' user data (the same value often appears in several), without duplicates.
 // 2,147 of 2,203 references in the shipped models name an existing contact point.

@@ -49,6 +49,17 @@ std::string readIstr(ByteReader& r) {
     return text;
 }
 
+// An asset reference (assId unserializer FUN_005ac5c0): ISTR name, INON none, ITNI numeric id.
+std::string readAsset(ByteReader& r) {
+    const Chunk c = readChunk(r);
+    std::string value;
+    if (c.tag == fourcc("ISTR")) value = r.cstr();
+    else if (c.tag == fourcc("ITNI")) value = "#" + std::to_string(r.u32());
+    else if (c.tag != fourcc("INON")) throw FormatError("asset: unexpected " + tagName(c.tag));
+    r.seek(c.end);
+    return value;
+}
+
 class Reader {
 public:
     explicit Reader(ByteReader& r) : r_(r) {}
@@ -406,6 +417,48 @@ const GeoContactPoint* findContactPoint(const GeoModel& model, uint32_t id) {
     for (const GeoContactPoint& cp : model.contactPoints)
         if (cp.id == id) return &cp;
     return nullptr;
+}
+
+}  // namespace tr
+
+namespace tr {
+
+SfxPackage readSfxPackage(const Bytes& data) {
+    ByteReader r(data);
+    if (data.size() < 8 || std::memcmp(data.data(), "CHNKBLXX", 8) != 0) throw FormatError("pkg: not a chunk file");
+    r.seek(8);
+    const Chunk root = readChunk(r);
+    if (root.tag != fourcc("SFXP")) throw FormatError("pkg: expected SFXP but found " + tagName(root.tag));
+    SfxPackage package;
+    while (r.tell() < root.end) {
+        const Chunk event = readChunk(r);
+        package.events.push_back(event.tag);
+        if (event.tag == fourcc("ACCY")) {
+            SfxAccessory a;
+            a.version = event.version;
+            r.u8();
+            a.mesh = readAsset(r);
+            a.animation = readAsset(r);
+            r.u8();
+            if (event.version > 1) {
+                a.animation2 = readAsset(r);
+                readAsset(r);
+                r.u8();
+            }
+            if (event.version > 2) {
+                r.u8();
+                a.package = readAsset(r);
+            }
+            if (event.version > 3) for (int k = 0; k < 3; ++k) readAsset(r);
+            if (event.version > 4) r.u8();
+            if (event.version > 6) r.u8();
+            if (event.version > 7) r.f32();
+            finish(r, event);
+            package.accessories.push_back(a);
+        }
+        r.seek(event.end);
+    }
+    return package;
 }
 
 }  // namespace tr

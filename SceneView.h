@@ -141,6 +141,10 @@ public:
     // it differs from (0, 0, 0, 255) (DAT_00d08b38), as SetHue (Hue and Hue2 of every piece, bytes / 255, FUN_00408ae0).
     // Otherwise each piece keeps its material's stored Hue. classHue gives the table row (false: none).
     void setClassHues(const std::function<bool(int32_t, tr::HueColour&, tr::HueColour&)>& classHue);
+    // Special-FX packages of usable classes per use state (GameData::usableStatePackage); call before setServerContent.
+    // Server teleporters show their USE_TS_STATE_1 (56) package - Rasa.NET puts world teleporters in that state
+    // (DynamicObjectManager) - as accessory models (`ACCY` events, tr::readSfxPackage), e.g. the waypoint's beam.
+    void setUsableStatePackages(std::function<std::string(int32_t classId, int32_t stateId)> packageFor) { usablePackageFor_ = std::move(packageFor); }
     const std::vector<SkyChoice>& skies() const { return skies_; }
     size_t skyIndex = 0;                    // into skies(); the sky of region 0 by default (used when not by region)
     // Sky by region, as the client does (regionmanager.py OnUpdateRegions: the regions the player is in plus region 0,
@@ -210,6 +214,9 @@ private:
         Vec4f materialHue = Vec4f{0, 0, 0, 0};
         TrMaterial trMaterial;                 // TR* deferred material (stage 3), trMaterial.active
         bool hairCutout = false;               // TRHair: cut out by the normal map's alpha
+        int animBone = -1;
+        bool refract = false;                  // TRRefract: drawn by Renderer::drawRefract with refractMaterial
+        RefractMaterial refractMaterial;                     // animated model: the one skeleton bone this piece is skinned to (-1: static)
         // Phase pieces of non-TRAdditive effects are drawn with their forward technique (verified in game: absent from
         // /dl_showdiffuse): lit per vertex, detail layer, opacity x MatDiffuse alpha.
         bool forwardLit = false;
@@ -242,7 +249,16 @@ private:
         // Lights on contact points ("lsys" .ltmp templates), in model space: position = contact point frame x Offset,
         // spot/globe orientation = frame rotation x the template's. Placed per entity in lighting().
         std::vector<tr::PlacedLight> lights;
+        std::vector<int32_t> lightBones;       // per light: its contact point's skeleton bone (-1: none)
+        // Animation playback (map objects with an X.anm named like their model): pieces skinned wholly to one bone are
+        // built in the first frame and drawn with skin(t)[bone] x inverse(skin(0)[bone]); others stay in frame 0.
+        tr::GeoModel skeleton;                 // bones only
+        tr::Animation animation;
+        std::vector<Mat4> restInverse;         // per bone: inverse of the frame-0 skin matrix
+        bool animated = false;
     };
+    // Per-piece matrices of an animated model at time t (loops over the animation's duration); empty if not animated.
+    std::vector<Mat4> animatedPieceMatrices(const Model& model, float time) const;
     struct Placement {
         Mat4 world;                 // entity placement
         Mat4 boxWorld;              // placement * local bounds (for placeholders and selection)
@@ -267,6 +283,7 @@ private:
         Mat4 world;                     // position + yaw (unit scale)
         Model* model = nullptr;         // the base suit for avatars
         std::vector<AvatarDraw> avatarParts;    // each replaces the base model's pieces of its swap set
+        std::vector<Model*> accessories;        // the use state's special-FX accessory models (drawn at the same placement)
         Vec4f skinHue;                  // w: 1 = hue flesh pieces
         Vec4f colour;
         float ringRadius = 0;           // spawn radius / trigger radius (0: none)
@@ -331,6 +348,8 @@ private:
     const WorldContent* serverContent_ = nullptr;
     const WorldDatabase* serverDatabase_ = nullptr;
     std::function<std::string(int32_t)> serverMeshForClass_;
+    std::function<std::string(int32_t, int32_t)> usablePackageFor_;
+    std::vector<Model*> stateAccessories(int32_t classId, int32_t stateId);
     AvatarResolver serverAvatarFor_;
     std::unordered_map<std::string, Model> models_;
     struct ParticleFile {
