@@ -117,6 +117,9 @@ public:
     bool showEffects = true;
     bool showParticles = true;          // particle systems attached to models (.pfx on "psys" contact points)
     float particleDistance = 200.0f;
+    // Terrain clutter (tribbles: grass, ferns, flowers, debris), placed as the client does (tr::placeTribbleCell) in
+    // the cells within tribbleCellRange of the camera's cell.
+    bool showClutter = true;
     bool showServer = true;             // spawn pools, teleporters, links, objects
     bool showRegions = false;           // map regions (large outlines)
     bool showMissionAreas = true;
@@ -179,6 +182,8 @@ public:
     // Why an entity draws the way it does: "model", "water", "effect (no geometry)", "failed: ...", etc.
     std::string modelStatus(size_t entityIndex) const;
     size_t drawnEntities() const { return drawnEntities_; }
+    size_t drawnClutter() const { return drawnClutter_; }
+    size_t clutterInstances() const;             // in the cells currently built
 
 private:
     struct ModelPiece {
@@ -344,4 +349,35 @@ private:
     size_t modelsLoaded_ = 0;
     size_t modelsFailed_ = 0;
     size_t drawnEntities_ = 0;
+
+    // Terrain clutter cells (32 x 32 samples). The client keeps the cells within 3 of the camera's cell
+    // (FUN_0073b930), shows a model's instances while the camera is within the model's drawDistance of the cell
+    // (FUN_0074c040; the cell point it measures from is taken as the instances' bounding sphere - UNVERIFIED), and
+    // draws round(count x density factor) of each model's shuffled instances (FUN_00751050), the factor being
+    // FloraDensity x the RQS flora scalar - 1 at full quality, which the editor assumes.
+    struct ClutterInstance {
+        Model* model = nullptr;
+        Mat4 world;
+        tr::Vec3 position;
+        float scale = 1;
+    };
+    struct ClutterGroup {                        // one tribble model's instances in a cell
+        Model* model = nullptr;
+        float drawDistance = 0;
+        std::vector<ClutterInstance> instances;
+    };
+    struct ClutterCell {
+        uint32_t index = 0;
+        tr::Vec3 centre;
+        float radius = 0;
+        std::vector<ClutterGroup> groups;
+    };
+    static constexpr int tribbleCellRange = 3;
+public:
+    int clutterCellsPerFrame = 4;                // cells built per frame (viewport_test builds them all at once)
+    // Builds missing clutter cells around the camera (up to clutterCellsPerFrame) and drops far ones; queueDraws calls it.
+    void updateClutterCells();
+private:
+    std::vector<ClutterCell> clutterCells_;
+    size_t drawnClutter_ = 0;
 };

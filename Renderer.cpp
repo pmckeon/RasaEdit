@@ -452,6 +452,7 @@ void Renderer::draw(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, b
     item.glossMap = glossMap;
     item.environment = environment;
     item.trHairCutout = hairCutout;
+    item.castsShadow = shadowCasting_;
     if (trMaterial && trMaterial->active) {
         item.tr = *trMaterial;
         item.detail = trMaterial->slot1;         // slot 1 / 2 maps use the detail (t2) and decal (t3) bindings
@@ -619,7 +620,7 @@ void Renderer::recordShadows(SDL_GPUCommandBuffer* commands) {
     SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, nullptr, 0, &depth);
     SDL_BindGPUGraphicsPipeline(pass, shadowPipeline_);
     for (const DrawItem& item : draws_) {
-        if (item.mesh->lines || !item.lit) continue;
+        if (item.mesh->lines || !item.lit || !item.castsShadow) continue;
         SDL_GPUBufferBinding vertexBinding = {item.mesh->vertices, 0};
         SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
         SDL_GPUBufferBinding indexBinding = {item.mesh->indices, 0};

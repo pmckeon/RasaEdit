@@ -31,6 +31,7 @@ struct ViewSettings {
     bool showEntities = true;
     bool showEffects = true;
     bool showParticles = true;   // particle systems (.pfx) on models' contact points
+    bool showClutter = true;     // terrain clutter (tribbles: grass, ferns, flowers, debris)
     bool showPlaceholders = true;
     float drawDistance = 1200.0f;
     float flySpeed = 20.0f;      // metres per second

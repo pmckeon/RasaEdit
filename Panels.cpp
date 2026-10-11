@@ -396,6 +396,7 @@ void ViewportPanel::applyOptions(const ViewSettings& view, SceneView& scene) con
     scene.showEntities = view.showEntities;
     scene.showEffects = view.showEffects;
     scene.showParticles = view.showParticles;
+    scene.showClutter = view.showClutter;
     scene.showPlaceholders = view.showPlaceholders;
     scene.showServer = options.showServer;
     scene.showMissionAreas = options.showMissionAreas;
@@ -438,6 +439,11 @@ void ViewportPanel::draw(EditorContext& ctx, const char* title, Selection& selec
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Particle systems (.pfx) on models' contact points, within %.0f m: %zu running, %zu particles", scene.particleDistance,
                           scene.liveParticleSystems(), scene.liveParticles());
+    ImGui::SameLine();
+    ImGui::Checkbox("Clutter", &ctx.view.showClutter);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Terrain clutter (grass, ferns, flowers, debris) from the terrain's tribble sets, placed as the game does,\n"
+                          "in the 7 x 7 cells of 32 m around the camera: %zu instances, %zu drawn", scene.clutterInstances(), scene.drawnClutter());
     ImGui::SameLine();
     ImGui::Checkbox("Placeholders", &ctx.view.showPlaceholders);
     if (serverControls_) {

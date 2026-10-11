@@ -146,6 +146,8 @@ public:
     // hue (w = 1) adds hue.rgb weighted by the texture alpha, as the game's "Hue" effects do (avatar skin, hair, clothing).
     // glow (sampled with the second UV set) is added after lighting, as the game's glow buffer is.
     // twoSided: no back-face culling for this draw (effects whose passes set CULLMODE = NONE, see SceneView).
+    // Whether later draw() calls go into the sun shadow map (default on).
+    void setShadowCasting(bool on) { shadowCasting_ = on; }
     void draw(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, bool lit, SDL_GPUTexture* texture = nullptr, bool alphaTest = false,
               const Vec4f& hue = Vec4f{0, 0, 0, 0}, SDL_GPUTexture* glow = nullptr, bool twoSided = false, float alphaReference = 0.5f,
               SDL_GPUTexture* normalMap = nullptr, SDL_GPUTexture* glossMap = nullptr, bool environment = false,
@@ -207,6 +209,7 @@ private:
         bool environment = false;                // Pal*Env* material: reflects the environment cube by gloss.b
         TrMaterial tr;                           // TR* deferred material (tr.active)
         bool trHairCutout = false;               // TRHair: kill where the normal map's alpha < 0.5
+        bool castsShadow = true;                 // drawn into the sun shadow map (see setShadowCasting)
     };
     SDL_GPUShader* createShader(const unsigned char* dxil, size_t dxilSize, const unsigned char* spirv, size_t spirvSize,
                                 const char* entryPoint, SDL_GPUShaderStage stage, uint32_t samplers);
@@ -273,6 +276,7 @@ private:
     SceneLighting lighting_;
     Vec4f cameraPosition_;
     std::vector<DrawItem> draws_;
+    bool shadowCasting_ = true;
     std::vector<DrawItem> translucentDraws_;
     std::vector<DrawItem> additiveDraws_;
 };

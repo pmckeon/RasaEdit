@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <map>
 #include <sstream>
 #include <chrono>
 #include <cmath>
@@ -1458,6 +1459,68 @@ void SceneView::advanceParticles(float dt) {
 }
 
 // ------------------------------------------------------------------------------------------
+// Terrain clutter
+// ------------------------------------------------------------------------------------------
+size_t SceneView::clutterInstances() const {
+    size_t n = 0;
+    for (const ClutterCell& cell : clutterCells_)
+        for (const ClutterGroup& group : cell.groups) n += group.instances.size();
+    return n;
+}
+
+void SceneView::updateClutterCells() {
+    const tr::Terrain& t = map_.terrain;
+    if (t.columns == 0 || map_.tribbleSets.empty()) return;
+    const uint32_t cellsX = tr::tribbleCellsX(t), cellsZ = tr::tribbleCellsZ(t);
+    // FUN_0073b930: the camera's sample / 32, then the cells within tribbleCellRange of it.
+    const int64_t column = int64_t((camera_.position.x - t.header.bounds.min.x) / t.header.spacing);
+    const int64_t row = int64_t((camera_.position.z - t.header.bounds.min.z) / t.header.spacing);
+    const int64_t cx = column >> 5, cz = row >> 5;
+    auto wanted = [&](uint32_t index) {
+        const int64_t x = index % cellsX, z = index / cellsX;
+        return std::llabs(x - cx) <= tribbleCellRange && std::llabs(z - cz) <= tribbleCellRange;
+    };
+    clutterCells_.erase(std::remove_if(clutterCells_.begin(), clutterCells_.end(), [&](const ClutterCell& c) { return !wanted(c.index); }),
+                        clutterCells_.end());
+    int built = 0;
+    for (int64_t z = std::max<int64_t>(cz - tribbleCellRange, 0); z <= std::min<int64_t>(cz + tribbleCellRange, int64_t(cellsZ) - 1); ++z)
+        for (int64_t x = std::max<int64_t>(cx - tribbleCellRange, 0); x <= std::min<int64_t>(cx + tribbleCellRange, int64_t(cellsX) - 1); ++x) {
+            const uint32_t index = uint32_t(z * cellsX + x);
+            if (std::any_of(clutterCells_.begin(), clutterCells_.end(), [&](const ClutterCell& c) { return c.index == index; })) continue;
+            if (built++ >= clutterCellsPerFrame) return;
+            ClutterCell cell;
+            cell.index = index;
+            std::map<std::pair<uint32_t, uint32_t>, size_t> groupOf;
+            tr::Vec3 lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
+            for (const tr::TribbleInstance& instance : tr::placeTribbleCell(t, map_.textureLayers, map_.tribbleSets, index)) {
+                const auto key = std::make_pair(instance.set, instance.model);
+                auto found = groupOf.find(key);
+                if (found == groupOf.end()) {
+                    const tr::TribbleModel& model = map_.tribbleSets[instance.set].models[instance.model];
+                    ClutterGroup group;
+                    group.model = modelFor(model.model);
+                    group.drawDistance = model.drawDistance;
+                    found = groupOf.emplace(key, cell.groups.size()).first;
+                    cell.groups.push_back(std::move(group));
+                }
+                ClutterInstance c;
+                c.model = cell.groups[found->second].model;
+                c.world = placementMatrix(instance.position, instance.rotation, instance.scale);
+                c.position = instance.position;
+                c.scale = instance.scale;
+                cell.groups[found->second].instances.push_back(c);
+                lo = tr::Vec3{std::min(lo.x, c.position.x), std::min(lo.y, c.position.y), std::min(lo.z, c.position.z)};
+                hi = tr::Vec3{std::max(hi.x, c.position.x), std::max(hi.y, c.position.y), std::max(hi.z, c.position.z)};
+            }
+            if (!cell.groups.empty()) {
+                cell.centre = scaled(add(lo, hi), 0.5f);
+                cell.radius = length(subtract(hi, lo)) * 0.5f;
+            }
+            clutterCells_.push_back(std::move(cell));
+        }
+}
+
+// ------------------------------------------------------------------------------------------
 // Frame
 // ------------------------------------------------------------------------------------------
 void SceneView::queueDraws(const Selection& selection) {
@@ -1501,6 +1564,32 @@ void SceneView::queueDraws(const Selection& selection) {
     };
     auto waterTint = [](bool selected) { return Vec4f{0.22f, 0.42f, 0.58f, selected ? 0.75f : 0.55f}; };
 
+    // A placed model's pieces, as map entities draw them (entityHue: the entity's hue when set, w = 1).
+    auto drawModelPieces = [&](const Model& model, const Mat4& world, const Vec4f& entityHue, bool selected) {
+        if (showEffects)       // additive pieces: glows, holograms, light cones
+            for (const ModelPiece& piece : model.pieces)
+                if (piece.additive) drawEffect(piece, world);
+        if (!model.hasSolid) return;
+        const Vec4f tint = modelTint(selected);
+        for (const ModelPiece& piece : model.pieces) {
+            if (piece.additive) continue;
+            if (piece.water) renderer_.drawTranslucent(piece.mesh, world, waterTint(selected));
+            else if (piece.translucent)
+                renderer_.drawTranslucent(piece.mesh, world, scaledTint(Vec4f{tint.x, tint.y, tint.z, tint.w * piece.matDiffuseAlpha}, piece.colourScale),
+                                          showTextures ? piece.texture : nullptr, showTextures ? piece.detail : nullptr, piece.detailUv1);
+            else {
+                Vec4f hue = !showTextures || !piece.hued ? Vec4f{0, 0, 0, 0} : entityHue.w > 0.5f ? entityHue : piece.materialHue;
+                if (hue.w > 0.5f && piece.hueUnweighted) hue.w = 2.0f;
+                renderer_.draw(piece.mesh, world, scaledTint(tint, piece.colourScale), true, showTextures ? piece.texture : nullptr, showTextures && piece.alphaTest,
+                                hue, showTextures ? piece.glow : nullptr, piece.twoSided, piece.alphaReference,
+                                showTextures && materialMaps ? piece.normalMap : nullptr, showTextures && materialMaps ? piece.glossMap : nullptr,
+                                showTextures && materialMaps && piece.environment,
+                                showTextures && materialMaps && piece.trMaterial.active ? &piece.trMaterial : nullptr,
+                                showTextures && piece.hairCutout);
+            }
+        }
+    };
+
     drawnEntities_ = 0;
     if (showEntities) {
         const float maxDistance2 = drawDistance * drawDistance;
@@ -1512,29 +1601,9 @@ void SceneView::queueDraws(const Selection& selection) {
             if (!visible(p.centre, p.radius)) continue;
             ++drawnEntities_;
             const bool selected = int(k) == selectedEntity;
-            if (p.model && p.model->loaded && showEffects) {      // additive pieces: glows, holograms, light cones
-                for (const ModelPiece& piece : p.model->pieces)
-                    if (piece.additive) drawEffect(piece, p.world);
-            }
+            if (p.model && p.model->loaded) drawModelPieces(*p.model, p.world, p.hue, selected);
             if (p.model && p.model->loaded && p.model->hasSolid) {
-                const Vec4f tint = modelTint(selected);
-                for (const ModelPiece& piece : p.model->pieces) {
-                    if (piece.additive) continue;
-                    if (piece.water) renderer_.drawTranslucent(piece.mesh, p.world, waterTint(selected));
-                    else if (piece.translucent)
-                        renderer_.drawTranslucent(piece.mesh, p.world, scaledTint(Vec4f{tint.x, tint.y, tint.z, tint.w * piece.matDiffuseAlpha}, piece.colourScale),
-                                                  showTextures ? piece.texture : nullptr, showTextures ? piece.detail : nullptr, piece.detailUv1);
-                    else {
-                        Vec4f hue = !showTextures || !piece.hued ? Vec4f{0, 0, 0, 0} : p.hue.w > 0.5f ? p.hue : piece.materialHue;
-                        if (hue.w > 0.5f && piece.hueUnweighted) hue.w = 2.0f;
-                        renderer_.draw(piece.mesh, p.world, scaledTint(tint, piece.colourScale), true, showTextures ? piece.texture : nullptr, showTextures && piece.alphaTest,
-                                        hue, showTextures ? piece.glow : nullptr, piece.twoSided, piece.alphaReference,
-                                        showTextures && materialMaps ? piece.normalMap : nullptr, showTextures && materialMaps ? piece.glossMap : nullptr,
-                                        showTextures && materialMaps && piece.environment,
-                                        showTextures && materialMaps && piece.trMaterial.active ? &piece.trMaterial : nullptr,
-                                        showTextures && piece.hairCutout);
-                    }
-                }
+                // drawn above
             } else if (p.model && p.model->loaded && p.model->effectOnly) {
                 // Effect-only entity (particle emitters, light cones): with Placeholders on, a cyan wireframe of its bounds.
                 if (showEffects && showPlaceholders && p.hasBounds && !selected) renderer_.draw(unitBoxLines_, p.boxWorld, markerColour::placeholder, false);
@@ -1546,6 +1615,28 @@ void SceneView::queueDraws(const Selection& selection) {
             }
             if (selected) renderer_.draw(unitBoxLines_, p.boxWorld, Vec4f{1.0f, 0.85f, 0.1f, 1}, false);
         }
+    }
+
+    // Terrain clutter. Not shadow casters: whether the game's clutter casts sun shadows is not verified.
+    drawnClutter_ = 0;
+    if (showClutter && showTerrain && map_.hasTerrain) {
+        updateClutterCells();
+        renderer_.setShadowCasting(false);
+        for (const ClutterCell& cell : clutterCells_) {
+            if (cell.groups.empty() || !visible(cell.centre, cell.radius + 5.0f)) continue;
+            const float cellDistance = length(subtract(cell.centre, camera_.position));
+            for (const ClutterGroup& group : cell.groups) {
+                if (!group.model || !group.model->loaded || cellDistance > group.drawDistance + cell.radius) continue;
+                const tr::Vec3 localCentre = scaled(add(group.model->bounds.min, group.model->bounds.max), 0.5f);
+                const float localRadius = length(subtract(group.model->bounds.max, group.model->bounds.min)) * 0.5f;
+                for (const ClutterInstance& c : group.instances) {
+                    if (!visible(transformPoint(c.world, localCentre), localRadius * c.scale)) continue;
+                    drawModelPieces(*group.model, c.world, Vec4f{0, 0, 0, 0}, false);
+                    ++drawnClutter_;
+                }
+            }
+        }
+        renderer_.setShadowCasting(true);
     }
 
     // Particle systems (camera-facing sprites need the view's axes).

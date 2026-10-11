@@ -397,34 +397,308 @@ std::vector<TribbleSet> readTribbleSets(const GlmArchive& glm) {
     if (!entry) return {};                     // optional: 16 of the 66 shipped terrains have none
     const Bytes data = glm.read(*entry);
     ByteReader r(data);
-    r.u32();                                   // version
+    r.u32();                                   // version (1)
     const uint32_t count = r.u32();
     std::vector<TribbleSet> sets;
     for (uint32_t k = 0; k < count; ++k) {
         TribbleSet set;
         set.name = r.cstr();
-        set.unknown = r.u32();
+        set.format = r.u32();
+        if (set.format < 1 || set.format > 5) throw FormatError("tribbleset.tab: unknown set format " + std::to_string(set.format));
         const uint32_t models = r.u32();
         for (uint32_t m = 0; m < models; ++m) {
             TribbleModel model;
             model.model = r.cstr();
-            const size_t block = r.tell();
-            model.raw = r.bytes(57);
-            ByteReader b(data, block, block + 57);
-            model.density = b.f32();
-            model.drawDistance = b.f32();
-            b.seek(block + 28);
-            model.rotationRange = b.f32();
-            model.scaleMin = b.f32();
-            model.scaleMax = b.f32();
-            b.seek(block + 44);
-            model.seed = b.u32();
+            const float density = r.f32();
+            model.density = density < 0.001f ? 0.001f : density > 100.0f ? 100.0f : density;
+            model.drawDistance = std::max(r.f32(), 1.0f);
+            model.orientation = r.u32();
+            model.randomYaw = r.u32();
+            model.heightMin = r.f32();
+            model.heightMax = r.f32();
+            // FUN_009125f0: each slope limit clamped to 0 .. pi/2.
+            auto slope = [](float s) { return s < 0.0f ? 0.0f : double(s) > 1.5707963705062866 ? 1.5707963705062866f : s; };
+            model.slopeMin = slope(r.f32());
+            model.slopeMax = slope(r.f32());
+            if (set.format >= 2) {
+                model.scaleMin = r.f32();
+                model.scaleMax = r.f32();
+            }
+            model.flags = r.u32() != 0 ? 1u : 0u;
+            model.seed = r.u32();
+            if (set.format == 3) model.unknown54 = r.u32() != 0 ? 1 : 0;
+            else if (set.format >= 4) model.unknown54 = r.u8() != 0 ? 1 : 0;
+            if (set.format == 5) {
+                model.unknown24 = r.f32();
+                model.unknown28 = r.f32();
+            }
             set.models.push_back(std::move(model));
         }
         sets.push_back(std::move(set));
     }
     if (r.remaining() != 0) throw FormatError("tribbleset.tab: trailing bytes");
     return sets;
+}
+
+namespace {
+
+// TRasa::BasicRandomGenerator: Park-Miller "minimal standard" with multiplier 48271 (Schrage's method,
+// FUN_00957260), value = state * 2^-31 (FUN_0074b8f0; the scale 0x30000000 at 0x00c2b764).
+struct TribbleRandom {
+    int32_t state;
+    explicit TribbleRandom(int32_t seed) : state(seed == 0 ? 0x156 : seed) {}
+    double next() {
+        const int32_t hi = state / 44488, lo = state % 44488;
+        int32_t t = int32_t(int64_t(48271) * lo - int64_t(3399) * hi);
+        if (t < 0) t += 0x7fffffff;
+        state = t;
+        return double(t % 0x7fffffff) * (1.0 / 2147483648.0);
+    }
+};
+
+// The 28-byte cell record (FUN_00565170 / FUN_00565010) and the normal the block keeps beside it (FUN_0090b520).
+struct TribbleRecord {
+    Vec3 position;
+    Vec3 normal;
+    bool clutter = false;                      // flag 2 (record + 0xE)
+    const TerrainSample* sample = nullptr;
+};
+
+Vec3 tribbleSamplePosition(const Terrain& terrain, uint32_t row, uint32_t column) {
+    return Vec3{terrain.worldX(column), terrain.worldHeightAt(row, column), terrain.worldZ(row)};
+}
+
+Vec3 cross3(const Vec3& a, const Vec3& b) { return Vec3{a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x}; }
+float dot3(const Vec3& a, const Vec3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+Vec3 normalize3(const Vec3& v) {                // D3DXVec3Normalize: zero stays zero
+    const float l = std::sqrt(dot3(v, v));
+    return l > 0.0f ? Vec3{v.x / l, v.y / l, v.z / l} : Vec3{};
+}
+
+// FUN_0090b520: sum over the 8 neighbours (in this order) of v x d, d = neighbour - centre, v = (-d.z, 0, d.x),
+// normalised. A neighbour without data leaves the previously fetched position in place (FUN_0056aa20 writes nothing).
+Vec3 tribbleNormal(const Terrain& terrain, uint32_t row, uint32_t column) {
+    static const int offsets[8][2] = {{-1, 0}, {-1, 1}, {0, 1}, {1, 1}, {1, 0}, {1, -1}, {0, -1}, {-1, -1}};   // (dx, dz)
+    Vec3 last;
+    if (terrain.hasData(row, column)) last = tribbleSamplePosition(terrain, row, column);
+    const Vec3 centre = last;
+    Vec3 sum;
+    for (const auto& o : offsets) {
+        const int64_t x = int64_t(column) + o[0], z = int64_t(row) + o[1];
+        if (x < 0 || z < 0 || x >= int64_t(terrain.columns) || z >= int64_t(terrain.rows)) continue;
+        if (terrain.hasData(uint32_t(z), uint32_t(x))) last = tribbleSamplePosition(terrain, uint32_t(z), uint32_t(x));
+        const Vec3 d{last.x - centre.x, last.y - centre.y, last.z - centre.z};
+        const Vec3 c = cross3(Vec3{-d.z, 0.0f, d.x}, d);
+        sum = Vec3{sum.x + c.x, sum.y + c.y, sum.z + c.z};
+    }
+    return normalize3(sum);
+}
+
+// FUN_0074d010: the four (layer, weight / 255) pairs sorted by layer, then weight (insertion sort FUN_0074e8c0);
+// the first pair of `layer` times (1 - weight) of every pair after it.
+float tribbleLayerWeight(const TerrainSample& sample, uint8_t layer) {
+    struct Pair { uint8_t layer; float weight; };
+    Pair pairs[4];
+    bool found = false;
+    for (int k = 0; k < 4; ++k) {
+        pairs[k] = Pair{sampleLayer(sample, k).layerIndex, float(sampleLayer(sample, k).weight * (1.0 / 255.0))};
+        if (pairs[k].layer == layer) found = true;
+    }
+    if (!found) return 0.0f;
+    std::stable_sort(pairs, pairs + 4, [](const Pair& a, const Pair& b) { return a.layer < b.layer || (a.layer == b.layer && a.weight < b.weight); });
+    int i = 0;
+    while (pairs[i].layer != layer) ++i;
+    float w = pairs[i].weight;
+    for (int k = i + 1; k < 4; ++k) w *= 1.0f - pairs[k].weight;
+    return w;
+}
+
+// The terrain coverage test FUN_0074bc20 uses to decide which layers a cell has (FUN_0072aa20 + FUN_0093fdd0, as
+// slotCoverage without the rounding).
+bool tribbleLayerPresent(const TerrainSample& sample, int index) {
+    const uint8_t layer = sampleLayer(sample, index).layerIndex;
+    if (layer == 0) return false;
+    float weight = 0.0f;
+    for (int k = 0; k < 4; ++k)
+        if (sampleLayer(sample, k).layerIndex == layer) {
+            weight = sampleLayer(sample, k).weight * (1.0f / 255.0f);
+            break;
+        }
+    if (weight <= 0.001f) return false;
+    for (int k = 0; k < 4; ++k)
+        if (sampleLayer(sample, k).layerIndex > layer) weight *= 1.0f - sampleLayer(sample, k).weight * (1.0f / 255.0f);
+    return weight > 0.001f;
+}
+
+// 10 % fade at each end of a band (the same in the height and slope tests of FUN_0074c3a0).
+float tribbleBandFade(float t, bool fadeLow) {
+    if (fadeLow && 0.1 > double(t)) return float(double(t) * 10.0);
+    if (double(t) > 0.9) return float((1.0 - double(t)) * 10.0);
+    return 1.0f;
+}
+
+Quat d3dxRotationAxis(const Vec3& axis, float angle) {
+    const Vec3 a = normalize3(axis);
+    const float s = std::sin(angle * 0.5f);
+    return Quat{a.x * s, a.y * s, a.z * s, std::cos(angle * 0.5f)};
+}
+
+Quat d3dxMultiply(const Quat& q1, const Quat& q2) {       // D3DXQuaternionMultiply: rotation q1 followed by q2
+    return Quat{q2.w * q1.x + q2.x * q1.w + q2.y * q1.z - q2.z * q1.y,
+                q2.w * q1.y - q2.x * q1.z + q2.y * q1.w + q2.z * q1.x,
+                q2.w * q1.z + q2.x * q1.y - q2.y * q1.x + q2.z * q1.w,
+                q2.w * q1.w - q2.x * q1.x - q2.y * q1.y - q2.z * q1.z};
+}
+
+}  // namespace
+
+uint32_t tribbleCellsX(const Terrain& terrain) {
+    // FUN_0073b2d0: the column of the bounds' far edge, clamped to the grid, / 32, + 1.
+    const auto column = int64_t((terrain.header.bounds.max.x - terrain.header.bounds.min.x) / terrain.header.spacing + 0.5f);
+    return uint32_t(std::clamp<int64_t>(column, 0, std::max<int64_t>(int64_t(terrain.columns) - 1, 0)) >> 5) + 1;
+}
+
+uint32_t tribbleCellsZ(const Terrain& terrain) {
+    const auto row = int64_t((terrain.header.bounds.max.z - terrain.header.bounds.min.z) / terrain.header.spacing + 0.5f);
+    return uint32_t(std::clamp<int64_t>(row, 0, std::max<int64_t>(int64_t(terrain.rows) - 1, 0)) >> 5) + 1;
+}
+
+std::vector<TribbleInstance> placeTribbleCell(const Terrain& terrain, const std::vector<TextureLayer>& layers,
+                                              const std::vector<TribbleSet>& sets, uint32_t cellIndex) {
+    std::vector<TribbleInstance> out;
+    if (terrain.columns == 0 || terrain.rows == 0 || sets.empty()) return out;
+    // FUN_0073c830: the cell's rectangle, 33 x 33 samples (edges shared with the neighbours), clamped to the grid
+    // (FUN_0094ae30).
+    const uint32_t cellsX = tribbleCellsX(terrain);
+    const int64_t x0 = std::min<int64_t>(32 * int64_t(cellIndex % cellsX), terrain.columns - 1);
+    const int64_t z0 = std::min<int64_t>(32 * int64_t(cellIndex / cellsX), terrain.rows - 1);
+    const int64_t x1 = std::min<int64_t>(x0 + 32, terrain.columns - 1);
+    const int64_t z1 = std::min<int64_t>(z0 + 32, terrain.rows - 1);
+    const int64_t width = x1 - x0 + 1;
+    std::vector<TribbleRecord> records(size_t(width * (z1 - z0 + 1)));
+    for (int64_t z = z0; z <= z1; ++z)
+        for (int64_t x = x0; x <= x1; ++x) {
+            TribbleRecord& rec = records[size_t((z - z0) * width + (x - x0))];
+            rec.sample = &terrain.sampleAt(uint32_t(z), uint32_t(x));
+            rec.position = tribbleSamplePosition(terrain, uint32_t(z), uint32_t(x));
+            rec.normal = tribbleNormal(terrain, uint32_t(z), uint32_t(x));
+            rec.clutter = terrain.hasData(uint32_t(z), uint32_t(x)) && terrainFlag(rec.sample->word, 2);
+        }
+    auto record = [&](int64_t x, int64_t z) -> const TribbleRecord& { return records[size_t((z - z0) * width + (x - x0))]; };
+
+    // FUN_0074bc20: the layers present anywhere in the rectangle, ascending; per layer its texlayers entry's sets.
+    bool present[256] = {};
+    for (const TribbleRecord& rec : records)
+        for (int k = 0; k < 4; ++k)
+            if (tribbleLayerPresent(*rec.sample, k)) present[sampleLayer(*rec.sample, k).layerIndex] = true;
+    const float spacing = terrain.header.spacing;
+    for (int layer = 1; layer < 256; ++layer) {
+        if (!present[layer] || size_t(layer) > layers.size()) continue;
+        for (const std::string& setName : layers[size_t(layer - 1)].tribbleSets) {
+            size_t setIndex = 0;
+            while (setIndex < sets.size() && sets[setIndex].name != setName) ++setIndex;
+            if (setIndex == sets.size()) continue;
+            const TribbleSet& set = sets[setIndex];
+            for (size_t m = 0; m < set.models.size(); ++m) {
+                const TribbleModel& model = set.models[m];
+                TribbleRandom random(int32_t(cellIndex + model.seed));              // FUN_0074c2c0
+                for (int64_t z = z0; z <= z1; ++z)
+                    for (int64_t x = x0; x <= x1; ++x) {
+                        // FUN_0074c3a0: how many instances this sample gets.
+                        const TribbleRecord& rec = record(x, z);
+                        if (!rec.clutter) continue;
+                        const float weight = tribbleLayerWeight(*rec.sample, uint8_t(layer));
+                        if (0.001f > weight) continue;
+                        float heightFade = 1.0f;
+                        if (1e-5f < model.heightMin) {
+                            const float above = rec.position.y - model.heightMin, band = model.heightMax - model.heightMin;
+                            if (above < 0.0f || band <= above) continue;
+                            heightFade = tribbleBandFade(above / band, true);
+                            if (heightFade == 0.0f) continue;
+                        }
+                        const float ny = std::clamp(rec.normal.y, 0.0f, 1.0f);
+                        const float angle = std::acos(ny) - model.slopeMin, slopeBand = model.slopeMax - model.slopeMin;
+                        if (angle < 0.0f || slopeBand <= angle) continue;
+                        const float slopeFade = tribbleBandFade(angle / slopeBand, model.slopeMin != 0.0f);
+                        if (slopeFade == 0.0f) continue;
+                        const float expected = float(double(model.density) * weight * heightFade * slopeFade * double(spacing * spacing));
+                        int count = int(expected);
+                        const double r = random.next();
+                        if (double(float(expected - float(count))) >= r) ++count;
+
+                        // FUN_0074c690: place them. Offsets reach a whole sample each way; a draw towards a missing
+                        // neighbour (the rectangle's edge) is dropped.
+                        const bool hasLeft = x != x0, hasRight = x != x1, hasBack = z != z0, hasFront = z != z1;
+                        auto neighbour = [&](int index) -> const TribbleRecord& { return record(x + index % 3 - 1, z + index / 3 - 1); };
+                        for (; count > 0; --count) {
+                            float rx = float(random.next() - 0.5);
+                            float rz = float(random.next() - 0.5);
+                            if ((!hasLeft && rx < 0.0f) || (!hasRight && rx > 0.0f) || (!hasBack && rz < 0.0f) || (!hasFront && rz > 0.0f)) continue;
+                            // 3 x 3 neighbourhood index = 3 (dz + 1) + (dx + 1); a = lerp(i0, i1, rz'), b = lerp(i2, i3, rz'),
+                            // result = lerp(a, b, rx'). In the negative quadrants rx' = -2 rx starts at the far sample.
+                            int i0, i1, i2, i3;
+                            float tx, tz;
+                            if (0.0f > rx) {
+                                if (0.0f > rz) { i0 = 0; i1 = 3; i2 = 1; i3 = 4; tz = float(rz * -2.0); }
+                                else { i0 = 3; i1 = 6; i2 = 4; i3 = 7; tz = rz + rz; }
+                                tx = float(rx * -2.0);
+                            } else {
+                                if (0.0f > rz) { i0 = 1; i1 = 4; i2 = 2; i3 = 5; tz = float(rz * -2.0); }
+                                else { i0 = 4; i1 = 7; i2 = 5; i3 = 8; tz = rz + rz; }
+                                tx = rx + rx;
+                            }
+                            auto bilinear = [&](Vec3 TribbleRecord::*field) {
+                                const Vec3& p0 = neighbour(i0).*field; const Vec3& p1 = neighbour(i1).*field;
+                                const Vec3& p2 = neighbour(i2).*field; const Vec3& p3 = neighbour(i3).*field;
+                                const Vec3 a{tz * (p1.x - p0.x) + p0.x, (p1.y - p0.y) * tz + p0.y, p0.z + (p1.z - p0.z) * tz};
+                                const Vec3 b{(p3.x - p2.x) * tz + p2.x, p2.y + (p3.y - p2.y) * tz, p2.z + (p3.z - p2.z) * tz};
+                                return Vec3{tx * (b.x - a.x) + a.x, a.y + (b.y - a.y) * tx, a.z + tx * (b.z - a.z)};
+                            };
+                            TribbleInstance instance;
+                            instance.set = uint32_t(setIndex);
+                            instance.model = uint32_t(m);
+                            instance.position = bilinear(&TribbleRecord::position);
+                            const Vec3 up{0.0f, 1.0f, 0.0f};
+                            Vec3 normal = model.orientation == 0 || model.orientation == 1 ? up : normalize3(bilinear(&TribbleRecord::normal));
+                            if (model.orientation == 1) {
+                                const float tiltX = float((random.next() - 0.5) * 0.2);
+                                const float tiltZ = float((random.next() - 0.5) * 0.2);
+                                normal = normalize3(Vec3{tiltX + normal.x, normal.y + 0.0f, tiltZ + normal.z});
+                            } else if (model.orientation == 2 || model.orientation == 4) {
+                                if (model.orientation == 2) normal = normalize3(Vec3{normal.x, float(normal.y + 1.0), normal.z});
+                                const Vec3 v{float(random.next() - 0.5), 0.0f, float(random.next() - 0.5)};
+                                Vec3 c = cross3(v, normal);
+                                const double length = random.next() * 0.15;
+                                const float squared = float(double(c.x) * c.x + double(c.y) * c.y + double(c.z) * c.z);
+                                const float s = squared > 0.0f ? float(length / std::sqrt(squared)) : 0.0f;
+                                c = Vec3{s * c.x, c.y * s, s * c.z};
+                                normal = normalize3(Vec3{c.x + normal.x, c.y + normal.y, c.z + normal.z});
+                            }
+                            float yaw = 0.0f;
+                            if (model.randomYaw == 1) {
+                                const double turn = random.next() * 3.1415927410125732;
+                                yaw = float(turn + turn);
+                            }
+                            Quat rotation = d3dxRotationAxis(up, yaw);
+                            // FUN_0043cf30 / FUN_0043ce70: each component equal within 0.01, absolute or relative.
+                            auto close = [](float a, float b) {
+                                const float d = std::fabs(a - b);
+                                return d <= 0.0099999998f || d <= std::max(std::fabs(a), std::fabs(b)) * 0.0099999998f;
+                            };
+                            if (!(close(normal.x, up.x) && close(normal.y, up.y) && close(normal.z, up.z))) {
+                                const Vec3 axis = normalize3(cross3(normal, up));
+                                const float tilt = std::acos(up.x * normal.x + up.y * normal.y + up.z * normal.z);
+                                rotation = d3dxMultiply(rotation, d3dxRotationAxis(axis, -tilt));
+                            }
+                            instance.rotation = rotation;
+                            instance.scale = float(random.next() * (double(model.scaleMax) - model.scaleMin) + model.scaleMin);
+                            out.push_back(instance);
+                        }
+                    }
+            }
+        }
+    }
+    return out;
 }
 
 // ------------------------------------------------------------------------------------------

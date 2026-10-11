@@ -333,6 +333,32 @@ int main(int argc, char** argv) {
         if (envValue("RASA_TWOSIDED")) renderer.cullBackFaces = false;
         if (envValue("RASA_NOENTITIES")) scene.showEntities = false;
         const float particleSeconds = envValue("RASA_PARTICLES") ? float(std::atof(envValue("RASA_PARTICLES"))) : 0.5f;
+        // Terrain clutter: every cell around the camera at once, models loaded before the frame (RASA_NOCLUTTER=1: none).
+        if (envValue("RASA_NOCLUTTER")) scene.showClutter = false;
+        else {
+            scene.clutterCellsPerFrame = 1000;
+            scene.updateClutterCells();
+            scene.loadPending(1e9);
+            std::printf("terrain clutter: %zu instances around the camera\n", scene.clutterInstances());
+            // RASA_LISTCLUTTER=<metres>: every clutter instance within that distance (horizontally) of the camera.
+            if (const char* within = envValue("RASA_LISTCLUTTER")) {
+                const float r = float(std::atof(within));
+                const tr::Terrain& t = map.terrain;
+                const uint32_t cellsX = tr::tribbleCellsX(t), cellsZ = tr::tribbleCellsZ(t);
+                for (uint32_t cell = 0; cell < cellsX * cellsZ; ++cell) {
+                    const float cx0 = t.header.bounds.min.x + float(cell % cellsX) * 32.0f * t.header.spacing;
+                    const float cz0 = t.header.bounds.min.z + float(cell / cellsX) * 32.0f * t.header.spacing;
+                    const tr::Vec3& c = scene.camera().position;
+                    if (c.x < cx0 - r - 1 || c.x > cx0 + 33 + r || c.z < cz0 - r - 1 || c.z > cz0 + 33 + r) continue;
+                    for (const tr::TribbleInstance& in : tr::placeTribbleCell(t, map.textureLayers, map.tribbleSets, cell)) {
+                        const float dx = in.position.x - c.x, dz = in.position.z - c.z;
+                        if (dx * dx + dz * dz > r * r) continue;
+                        std::printf("clutter cell %u %s: %.2f %.2f %.2f scale %.2f\n", cell, map.tribbleSets[in.set].models[in.model].model.c_str(),
+                                    in.position.x, in.position.y, in.position.z, in.scale);
+                    }
+                }
+            }
+        }
         scene.advanceParticles(0.0f);
         for (float t = 0; t < particleSeconds; t += 1.0f / 30.0f) scene.advanceParticles(1.0f / 30.0f);
         std::printf("particle systems running: %zu, %zu particles\n", scene.liveParticleSystems(), scene.liveParticles());
@@ -343,6 +369,7 @@ int main(int argc, char** argv) {
         if (const char* sel = envValue("RASA_SELECT")) highlighted = Selection{SelectionKind::MapEntity, size_t(std::atoi(sel))};
         scene.queueDraws(highlighted);
         std::printf("draws queued: %zu (entities drawn %zu), particle vertices %zu\n", renderer.queuedDraws(), scene.drawnEntities(), renderer.queuedParticleVertices());
+        std::printf("clutter drawn: %zu\n", scene.drawnClutter());
         std::printf("terrain chunks: %zu, %zu at full detail\n", scene.terrainChunkCount(), scene.terrainChunksAtFullDetail());
         {
             tr::Vec3 rayOrigin, rayDirection, ground;

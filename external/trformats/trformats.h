@@ -127,7 +127,8 @@ std::string toLowerAscii(std::string text);
 //       Patches do NOT share edges: patch column p covers samples p*128 .. p*128+127 (world x =
 //       boundsMin.x + sample * spacing). Patches may be absent (treat as no data).
 //   Sample: u16 word, 4 x { u8 layerIndex, u8 weight }, u8[2] unused.
-//   word: bits 0-8 integer height, bits 9-11 surface category, bits 12-15 fractional height.
+//   word: bits 0-8 integer height, bits 9-11 surface category, bits 12-15 fractional height. (The game reads the
+//       word big-endian: 12-bit height + three flags; see terrainFlag. Bit 8 here is flag 0, not height.)
 //   World height: h13 = (integer << 4) | fraction;  y = h13 * 2 * boundsMax.y / 8192 - boundsMax.y
 //   World position of grid sample (row, column): x = boundsMin.x + column * spacing,
 //                                                z = boundsMin.z + row * spacing
@@ -227,25 +228,66 @@ struct TextureLayer {
 };
 std::vector<TextureLayer> readTextureLayers(const GlmArchive& glm);
 
-// t<id>_tribbleset.tab (optional; empty result if absent): u32 version, u32 setCount,
-//   setCount x { name\0, u32 UNKNOWN, u32 modelCount, modelCount x { model.geo\0, 57-byte block } }
-// Named block fields are guesses from their values; the full block is kept in `raw`.
+// t<id>_tribbleset.tab (optional; empty result if absent) - terrain clutter ("tribbles": grass, ferns, flowers,
+// debris). Layout verified in tabula_rasa.exe (FUN_0072d040, entry readers FUN_0072dd40 format 1 / FUN_0072df60
+// formats 2-5) and on all 50 shipped files (every byte parsed; all are version 1, every set format 5):
+//   u32 version (1), u32 setCount,
+//   setCount x { name\0, u32 format (1-5), u32 modelCount, modelCount x {
+//       model.geo\0, f32 density (clamped 0.001..100), f32 drawDistance (at least 1), u32 orientation,
+//       u32 randomYaw, f32 heightMin, f32 heightMax, f32 slopeMin, f32 slopeMax (radians, clamped 0..pi/2),
+//       [format >= 2: f32 scaleMin, f32 scaleMax], u32 flags, u32 seed,
+//       [format 3: u32 unknown54 | format >= 4: u8 unknown54], [format 5: f32 unknown24, f32 unknown28] } }
+// The texlayers.tab entry of a terrain layer names its sets (TextureLayer::tribbleSets).
 struct TribbleModel {
     std::string model;
-    float density = 0;           // +0
-    float drawDistance = 0;      // +4
-    float rotationRange = 0;     // +28
-    float scaleMin = 0;          // +32
-    float scaleMax = 0;          // +36
-    uint32_t seed = 0;           // +44
-    Bytes raw;
+    float density = 0.1f;        // instances per square metre at full layer weight
+    float drawDistance = 25.0f;  // the cell visibility radius is the largest of a cell's models (FUN_0074c140)
+    // 0 upright, 1 upright + random tilt (+-0.1 in x and z), 2 halfway between up and the terrain normal + random
+    // tilt, 3 terrain normal, 4 terrain normal + random tilt (FUN_0074c690; see placeTribbleCell)
+    uint32_t orientation = 0;
+    uint32_t randomYaw = 1;      // 1: a random turn about the up axis
+    float heightMin = -1e10f;    // height band (only applied when heightMin > 1e-5; 10 % fades at both ends)
+    float heightMax = 1e10f;
+    float slopeMin = 0.0f;       // slope band, radians (acos of the normal's y; 10 % fades)
+    float slopeMax = 3.1415999f;  // default before reading (the reader clamps to pi/2)
+    float scaleMin = 1.0f;
+    float scaleMax = 1.0f;
+    uint32_t flags = 0;          // bit 0 kept at entry + 0x4c; meaning UNKNOWN (not read by the placement code)
+    uint32_t seed = 0;           // random stream = cell index + seed (0 -> 342)
+    uint8_t unknown54 = 0;       // UNKNOWN (not read by the placement code)
+    float unknown24 = 25.0f;     // UNKNOWN (format 5 only; not read by the placement code)
+    float unknown28 = 1.0f;
 };
 struct TribbleSet {
     std::string name;
-    uint32_t unknown = 0;
+    uint32_t format = 0;
     std::vector<TribbleModel> models;
 };
 std::vector<TribbleSet> readTribbleSets(const GlmArchive& glm);
+
+// Terrain sample flags. The .tpc word is big-endian in the game's reader (FUN_0094d6b0; writer FUN_0094d540):
+// height12 = word_be >> 4, flags 0-2 = word_be bits 0-2. In terms of the little-endian `word` stored here, flag n is
+// bit 8 + n - so flag 0 is the bit heightInteger() includes as height bit 12 (worldHeight sinks samples without it by
+// boundsMax.y), and flags 1 and 2 are surfaceCategory() bits 0 and 1. The in-memory sample keeps them as byte + 4
+// bits 0-2 (FUN_0090a3f0), copied into the 28-byte cell record at + 0xC / 0xD / 0xE (FUN_00565010).
+// Flag 0 feeds the terrain base mask (see terrain layer blending); flag 2 allows terrain clutter.
+inline bool terrainFlag(uint16_t word, int index) { return ((word >> (8 + index)) & 0x1) != 0; }
+
+// Terrain clutter placement, as TribbleLayer builds one cell (tabula_rasa.exe FUN_0074bc20 / FUN_0074c2c0 /
+// FUN_0074c3a0 / FUN_0074c690). Cells are 32 x 32 samples, numbered row-major (tribbleCellsX across); a cell covers
+// samples x0 .. x0 + 32, z0 .. z0 + 32 inclusive (clamped to the grid). The client keeps the cells within 3 of the
+// camera's cell (FUN_0073b930).
+struct TribbleInstance {
+    uint32_t set = 0;            // index into the TribbleSet list
+    uint32_t model = 0;          // index into that set's models
+    Vec3 position;
+    Quat rotation;               // D3DX quaternion (yaw about +y, then the tilt)
+    float scale = 1.0f;
+};
+uint32_t tribbleCellsX(const Terrain& terrain);
+uint32_t tribbleCellsZ(const Terrain& terrain);
+std::vector<TribbleInstance> placeTribbleCell(const Terrain& terrain, const std::vector<TextureLayer>& layers,
+                                              const std::vector<TribbleSet>& sets, uint32_t cellIndex);
 
 // ------------------------------------------------------------------------------------------
 // .map (format 2.43 - 2.45, as read by the client's client/gamemap.py)
