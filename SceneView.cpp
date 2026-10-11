@@ -640,22 +640,38 @@ SceneLighting SceneView::skyLightingAt() const {
     l.hemiTop = vec4(scaled(top, ambientScale));
     l.hemiBottom = vec4(scaled(bottom, ambientScale));
 
-    // Directional light: the brightest layer light at this time (the sun by day, the moon by night).
+    // Directional lights: every enabled layer light applies (RenderMode 99 maps to an active mode, FUN_00887550; verified
+    // against in-game /dl_showlight at Alia Das 08:00, where the second layer light lights shadowed ground). The brightest
+    // gets the sun shadow map; the others are drawn unshadowed (extra directional lights).
     l.sunFront = Vec4f{0, 0, 0, 1};
     l.sunBack = Vec4f{0, 0, 0, 1};
-    float best = -1;
+    struct Directional { tr::Vec3 towards; tr::Vec3 front; tr::Vec3 back; float shadowOpacity; };
+    std::vector<Directional> directional;
     for (const tr::SkyLayer& layer : sky.layers) {
         if (!layer.enabled || !showSun) continue;
         for (const tr::SkyLight& light : layer.lights) {
             if (light.hemi || !light.active) continue;
             const tr::Vec3 front = tr::skyLightColour(light, 3, t);
-            if (luminance(front) <= best) continue;
-            best = luminance(front);
+            const tr::Vec3 back = tr::skyLightColour(light, 4, t);
+            if (luminance(front) <= 0.0f && luminance(back) <= 0.0f) continue;
             const tr::Vec3 travel = tr::skyLayerDirection(layer, light.orientation, t);
-            l.towardsLight = normalized(tr::Vec3{-travel.x, -travel.y, -travel.z});
-            l.sunFront = vec4(front);
+            directional.push_back(Directional{normalized(tr::Vec3{-travel.x, -travel.y, -travel.z}), front, back, tr::skyLightShadowOpacity(light, t)});
+        }
+    }
+    std::stable_sort(directional.begin(), directional.end(), [&](const Directional& a, const Directional& b) { return luminance(a.front) > luminance(b.front); });
+    for (size_t k = 0; k < directional.size(); ++k) {
+        const Directional& d = directional[k];
+        if (k == 0) {
+            l.towardsLight = d.towards;
+            l.sunFront = vec4(d.front);
+            l.sunBack = vec4(d.back);
             l.sunShadows = showShadows;
-            l.sunBack = vec4(tr::skyLightColour(light, 4, t));
+            l.shadowOpacity = d.shadowOpacity;
+        } else if (l.extraDirectionalCount < SceneLighting::maxExtraDirectional) {
+            const int e = l.extraDirectionalCount++;
+            l.extraTowards[e] = d.towards;
+            l.extraFront[e] = vec4(d.front);
+            l.extraBack[e] = vec4(d.back);
         }
     }
 

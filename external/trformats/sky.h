@@ -28,6 +28,7 @@ struct SkyLightKey {
     float ambientIntensity = 0;       // "AIntensity" (UNKNOWN use)
     float specularIntensity = 0;      // "SIntensity" (UNKNOWN use)
     float brightness = 1;             // "DBrightness" (UNKNOWN use)
+    float shadowOpacity = 1;          // "ShadowOpacity": type-3 keys form the light's shadow-opacity track (FUN_00841470)
 };
 
 struct SkyLight {
@@ -104,6 +105,10 @@ std::vector<PlacedLight> readLights(const Bytes& data, const std::map<std::strin
 
 // Day-cycle sampling: keys wrap around (time 1 = time 0), linear interpolation.
 Vec3 skyLightColour(const SkyLight& light, uint32_t keyType, float time);   // colour * DIntensity; 0 if no such keys
+// A directional sky light's ShadowOpacity at a time: the type-3 keys' ShadowOpacity, interpolated linearly with wrap-around
+// (TRasa::SkyLight: FUN_00840ba0 puts type-3 keys in a separate track, FUN_00841470 samples it, FUN_00840990 sets the
+// light's ShadowOpacity, which the shadowed TRDirLight pass applies as visibility = 1 - opacity x occlusion). 1 without keys.
+float skyLightShadowOpacity(const SkyLight& light, float time);
 SkyFogKey sampleSkyFog(const Sky& sky, float time);                           // all zero if the sky has no fog frames
 float sampleLayerAlpha(const SkyLayer& layer, float time);                    // 1 if no alpha keys
 // A layer-space direction rotated into the world at time: initial yaw/pitch/roll, then RotsPerDay turns about the

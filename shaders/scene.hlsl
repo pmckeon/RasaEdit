@@ -38,6 +38,9 @@ cbuffer FragmentUniforms : register(b0, space3)
     float4 localRotation[MAX_LOCAL_LIGHTS];
     row_major float4x4 shadowMatrix;   // world -> sun shadow map clip space
     float4 shadowParams;              // x: 1 = sun shadows on, y: opacity, z: 1 / map size
+    float4 extraTowards[MAX_EXTRA_DIRECTIONAL];   // further directional sky lights: towards the light, w = 1 in use
+    float4 extraFront[MAX_EXTRA_DIRECTIONAL];
+    float4 extraBack[MAX_EXTRA_DIRECTIONAL];
     float4 specular;          // aniso additive: MatSpecular
     float4 layers;            // x detail on UV set 1, y decal on UV set 1, z has detail, w has decal (aniso additive and
                               // forward-phase pieces)
@@ -192,11 +195,11 @@ float4 psMain(VertexOutput input) : SV_Target0
             SkyLighting sf;
             sf.towardsLight = normalize(lightDirection.xyz);
             sf.sunFront = sunFront.rgb;
-            sf.sunBack = sunBack.rgb;
+            sf.sunBack = float3(0, 0, 0);       // forward gDirLight: Color only
             sf.hemiTop = hemiTop.rgb;
             sf.hemiBottom = hemiBottom.rgb;
             sf.sunVisibility = 1.0;
-            rgb *= skyLight(nf, sf) + localLights(input.world, nf, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner, localRotation,
+            rgb *= skyLight(nf, sf) + extraSkyLight(nf, extraTowards, extraFront, extraBack, true) + localLights(input.world, nf, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner, localRotation,
                                                   globeMaps, globeSampler);
         }
         const float3 added = rgb * texel.a * input.colour.a * (options.z > 1.5 ? tint.a : 1.0);
@@ -258,14 +261,14 @@ float4 psMain(VertexOutput input) : SV_Target0
     SkyLighting s;
     s.towardsLight = normalize(lightDirection.xyz);
     s.sunFront = sunFront.rgb;
-    s.sunBack = sunBack.rgb;
+    s.sunBack = options.y > 1.5 ? float3(0, 0, 0) : sunBack.rgb;   // translucent = forward pieces: no back colour
     s.hemiTop = hemiTop.rgb;
     s.hemiBottom = hemiBottom.rgb;
     // Glow maps add after lighting (the game's glow buffer, added in trhdrcomposite before fog).
     const float3 glow = glowTexture.Sample(glowSampler, input.uv1).rgb + ((trBits & 0x8) ? trEmissive.rgb : float3(0, 0, 0));
     // Translucent draws are forward pieces: the game's forward vertex shader has no shadow term.
     s.sunVisibility = options.y > 1.5 ? 1.0 : sunShadow(shadowMap, shadowSampler, shadowMatrix, shadowParams, input.world, n);
-    const float3 light = skyLight(n, s) + localLights(input.world, n, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner, localRotation,
+    const float3 light = skyLight(n, s) + extraSkyLight(n, extraTowards, extraFront, extraBack, options.y > 1.5) + localLights(input.world, n, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner, localRotation,
                                                          globeMaps, globeSampler);
     if (fogRange.z > 0.5)
         return float4(light * 0.2, 1.0);       // the game's light buffer (x OO_LIGHT_MULTIPLIER), as /dl_showlight shows it
@@ -289,6 +292,9 @@ float4 psMain(VertexOutput input) : SV_Target0
         const float4 gloss = material.y > 0.5 ? glossTexture.Sample(glossSampler, input.uv)
                                               : float4(saturate(trSpecular.x), trSpecular.y * trGloss, 0, 0);
         const float3 v = normalize(view);
+        [unroll] for (int k = 0; k < MAX_EXTRA_DIRECTIONAL; ++k)
+            if (extraTowards[k].w > 0.5)
+                lit += extraFront[k].rgb * specularFactor(n, v, extraTowards[k].xyz, gloss.r, gloss.g);
         lit += sunFront.rgb * specularFactor(n, v, s.towardsLight, gloss.r, gloss.g) * s.sunVisibility +
                localSpecular(input.world, n, v, gloss.r, gloss.g, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner);
     }

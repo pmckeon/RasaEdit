@@ -31,6 +31,9 @@ struct LightingUniforms {
     Vec4f localRotation[SceneLighting::maxLocalLights];
     Mat4 shadowMatrix;             // world -> sun shadow map clip space
     Vec4f shadowParams;            // x: 1 = sun shadows on, y: opacity, z: 1 / map size
+    Vec4f extraTowards[SceneLighting::maxExtraDirectional];   // xyz towards the light; w: 1 = in use
+    Vec4f extraFront[SceneLighting::maxExtraDirectional];
+    Vec4f extraBack[SceneLighting::maxExtraDirectional];
 };
 
 struct SceneFragmentUniforms {
@@ -63,6 +66,13 @@ LightingUniforms lightingUniforms(const SceneLighting& l, const Vec4f& cameraPos
     u.shadowParams = Vec4f{shadows ? 1.0f : 0.0f, l.shadowOpacity, 1.0f / mapSize, 0};
     u.sunFront = l.sunFront;
     u.sunBack = l.sunBack;
+    for (int k = 0; k < SceneLighting::maxExtraDirectional; ++k) {
+        const bool used = k < l.extraDirectionalCount;
+        const tr::Vec3 t = used ? normalized(l.extraTowards[k]) : tr::Vec3{0, 1, 0};
+        u.extraTowards[k] = Vec4f{t.x, t.y, t.z, used ? 1.0f : 0.0f};
+        u.extraFront[k] = used ? l.extraFront[k] : Vec4f{0, 0, 0, 0};
+        u.extraBack[k] = used ? l.extraBack[k] : Vec4f{0, 0, 0, 0};
+    }
     u.hemiTop = l.hemiTop;
     u.hemiBottom = l.hemiBottom;
     u.fogColour = Vec4f{l.fogColour.x, l.fogColour.y, l.fogColour.z, l.fog ? 1.0f : 0.0f};

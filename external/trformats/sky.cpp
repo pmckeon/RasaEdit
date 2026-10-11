@@ -186,6 +186,7 @@ SkyLight readLight(const XmlNode& node) {
             key.ambientIntensity = number(k, "AIntensity");
             key.specularIntensity = number(k, "SIntensity");
             key.brightness = number(k, "DBrightness", 1);
+            key.shadowOpacity = number(k, "ShadowOpacity", 1);
             light.keys.push_back(key);
         }
     std::sort(light.keys.begin(), light.keys.end(), [](const SkyLightKey& a, const SkyLightKey& b) { return a.time < b.time; });
@@ -331,6 +332,14 @@ Vec3 skyLightColour(const SkyLight& light, uint32_t keyType, float time) {
         return V3{k.colour.x * k.diffuseIntensity, k.colour.y * k.diffuseIntensity, k.colour.z * k.diffuseIntensity};
     });
     return Vec3{c.x, c.y, c.z};
+}
+
+float skyLightShadowOpacity(const SkyLight& light, float time) {
+    std::vector<const SkyLightKey*> keys;
+    for (const SkyLightKey& k : light.keys)
+        if (k.type == 3) keys.push_back(&k);
+    if (keys.empty()) return 1.0f;
+    return cyclic<SkyLightKey, V3>(keys, time, [](const SkyLightKey& k) { return V3{k.shadowOpacity, 0, 0}; }).x;
 }
 
 SkyFogKey sampleSkyFog(const Sky& sky, float time) {

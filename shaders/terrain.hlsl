@@ -37,6 +37,9 @@ cbuffer FragmentUniforms : register(b0, space3)
     float4 localRotation[MAX_LOCAL_LIGHTS];
     row_major float4x4 shadowMatrix;   // world -> sun shadow map clip space
     float4 shadowParams;              // x: 1 = sun shadows on, y: opacity, z: 1 / map size
+    float4 extraTowards[MAX_EXTRA_DIRECTIONAL];   // further directional sky lights: towards the light, w = 1 in use
+    float4 extraFront[MAX_EXTRA_DIRECTIONAL];
+    float4 extraBack[MAX_EXTRA_DIRECTIONAL];
     float4 tilings[32];       // metres per repeat for layers 0..127 (four per entry)
 };
 
@@ -124,7 +127,7 @@ float4 psMain(VertexOutput input) : SV_Target0
     s.hemiTop = hemiTop.rgb;
     s.hemiBottom = hemiBottom.rgb;
     s.sunVisibility = sunShadow(shadowMap, shadowSampler, shadowMatrix, shadowParams, input.world, n);
-    const float3 light = skyLight(n, s) + localLights(input.world, n, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner, localRotation,
+    const float3 light = skyLight(n, s) + extraSkyLight(n, extraTowards, extraFront, extraBack, false) + localLights(input.world, n, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner, localRotation,
                                                          globeMaps, globeSampler);
     if (fogRange.w > 1.5)
         return float4(fogRange.w < 2.5 ? n * 0.5 + 0.5 : fogRange.w > 3.5 ? saturate(colour) : float3(0, 0, 0), 1.0);   // normals / spec / albedo views

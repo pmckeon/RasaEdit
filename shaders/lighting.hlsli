@@ -15,11 +15,27 @@ struct SkyLighting
     float sunVisibility;              // 1 = fully sunlit (sun shadows)
 };
 
+#define MAX_EXTRA_DIRECTIONAL 3
+
+// Further directional sky lights (TRDirLight each: sat(N.L) x (LightColor - LightBackColor), no shadow map). forwardPiece:
+// the forward gDirLight array has Color only.
+float3 extraSkyLight(float3 n, float4 towards[MAX_EXTRA_DIRECTIONAL], float4 front[MAX_EXTRA_DIRECTIONAL],
+                     float4 back[MAX_EXTRA_DIRECTIONAL], bool forwardPiece)
+{
+    float3 sum = float3(0, 0, 0);
+    [unroll] for (int k = 0; k < MAX_EXTRA_DIRECTIONAL; ++k)
+        if (towards[k].w > 0.5)
+            sum += saturate(dot(n, towards[k].xyz)) * (front[k].rgb - (forwardPiece ? float3(0, 0, 0) : back[k].rgb));
+    return sum;
+}
+
 float3 skyLight(float3 n, SkyLighting s)
 {
     const float ndl = dot(n, s.towardsLight);
     const float3 hemi = lerp(s.hemiBottom, s.hemiTop, n.y * 0.5 + 0.5);
-    return hemi + s.sunFront * saturate(ndl) * s.sunVisibility + s.sunBack * saturate(-ndl);
+    // TRDirLight (deferred, with and without shadows): sat(N.L) x (LightColor x visibility - LightBackColor) - the back colour
+    // is subtracted on the lit side. The forward gDirLight has no back colour (callers pass sunBack = 0 for forward pieces).
+    return hemi + saturate(ndl) * (s.sunFront * s.sunVisibility - s.sunBack);
 }
 
 // Placed lights (the map's lights.xml), up to 16 per frame, nearest the camera first. Formulas from the game's

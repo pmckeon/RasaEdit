@@ -92,10 +92,19 @@ struct SceneLighting {
     bool showLight = false;                      // debug view like the game's /dl_showlight: 0.2 x light, no albedo
     int debugView = 0;                           // 2: G-buffer normals (N x 0.5 + 0.5, /dl_shownormals), 3: specular intensity
                                                  // (/dl_showspecintensity), 4: albedo (/dl_showdiffuse)
-    // Sun shadows: a shadow map from the sun over the area around the camera. The game's shadows let part of the sun
-    // through: shadowOpacity 0.64 fitted at Alia Das, 12:00 (shadowed ground 1.02 = ambient 0.60 + 0.36 x sun 1.16).
+    // Sun shadows: a shadow map from the sun over the area around the camera; visibility = 1 - shadowOpacity x occlusion
+    // (TRDirLight's shadowed pass, g_ShadowOpacity), shadowOpacity = the sun key track's ShadowOpacity at the time of day
+    // (tr::skyLightShadowOpacity; e.g. 0.75 at 12:00 in sky_foreas_wilderness_default_tranz.sky).
     bool sunShadows = false;
-    float shadowOpacity = 0.64f;
+    float shadowOpacity = 1.0f;
+    // Further directional sky lights (every enabled layer light applies, not only the sun: e.g. the second "Light" of
+    // sky_foreas_wilderness_default_tranz.sky, orange at dawn / dusk, ShadowOpacity 0). Drawn without the shadow map
+    // (exact for ShadowOpacity 0; UNVERIFIED for others).
+    static constexpr int maxExtraDirectional = 3;
+    int extraDirectionalCount = 0;
+    tr::Vec3 extraTowards[maxExtraDirectional];
+    Vec4f extraFront[maxExtraDirectional] = {};
+    Vec4f extraBack[maxExtraDirectional] = {};
     SDL_FColor clearColour{0.55f, 0.66f, 0.78f, 1.0f};   // background (the sky colour with sky lighting)
     // Placed lights, laid out as the shaders' arrays (shaders/lighting.hlsli): position xyz + range; colour rgb *
     // intensity + fade share; spot direction + cos(outer half angle) (-2 = point); x = cos(inner half angle).
