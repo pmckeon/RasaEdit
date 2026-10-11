@@ -313,12 +313,74 @@ std::vector<PlacedLight> readLights(const Bytes& data, const std::map<std::strin
         if (p.count("GlobeMapFile")) light.globeMap = p.at("GlobeMapFile");
         light.coneAngle = number(p, "ConeAngle", 45);
         light.penumbraAngle = number(p, "PenumbraAngle", 60);
+        light.id = p.count("ID") ? std::strtoull(p.at("ID").c_str(), nullptr, 10) : 0;
         light.width = number(p, "Width", 0);
         light.length = number(p, "Length", 0);
         light.falloffPercentVec = vec3(p, "FalloffPercentVec", Vec3{});
         out.push_back(std::move(light));
     }
     return out;
+}
+
+std::vector<LightModifier> readLightModifiers(const Bytes& data) {
+    const XmlNode root = XmlParser(data).document();
+    std::vector<LightModifier> out;
+    const XmlNode* mods = root.child("Mods");
+    if (!mods) return out;
+    for (const XmlNode& m : mods->children) {
+        if (m.tag != "Mod") continue;
+        LightModifier mod;
+        mod.lightId = std::strtoull(m.attribute("LightID").c_str(), nullptr, 10);
+        for (const XmlNode& t : m.children) {
+            if (t.tag != "Track") continue;
+            LightModifierTrack track;
+            const XmlNode* object = t.child("PropertyObject");
+            const std::string cls = object ? object->attribute("class") : "";
+            const Properties p = properties(&t);
+            track.enabled = flag(p, "Enabled", true);
+            if (cls == "IntensityModifier") {
+                track.kind = LightModifierTrack::Kind::Intensity;
+                track.intensity1 = number(p, "Intensity1");
+                track.intensity2 = number(p, "Intensity2");
+            } else if (cls == "ColorModifier") {
+                track.kind = LightModifierTrack::Kind::Color;
+                track.colour1 = vec3(p, "Color1", Vec3{1, 1, 1});
+                track.colour2 = vec3(p, "Color2", Vec3{1, 1, 1});
+            } else if (cls == "RotationModifier") {
+                track.kind = LightModifierTrack::Kind::Rotation;
+                track.axis = vec3(p, "RotationAxis", Vec3{0, 1, 0});
+            } else if (cls == "PositionModifier") {
+                track.kind = LightModifierTrack::Kind::Position;
+                track.offset1 = vec3(p, "Offset1", Vec3{});
+                track.offset2 = vec3(p, "Offset2", Vec3{});
+            }
+            if (const XmlNode* keys = t.child("Keys"))
+                for (const XmlNode& k : keys->children)
+                    if (k.tag == "Key")
+                        track.keys.emplace_back(std::strtof(k.attribute("time").c_str(), nullptr), std::strtof(k.attribute("weight").c_str(), nullptr));
+            mod.tracks.push_back(std::move(track));
+        }
+        out.push_back(std::move(mod));
+    }
+    return out;
+}
+
+float lightModifierWeight(const LightModifierTrack& track, float elapsed) {
+    const auto& k = track.keys;
+    if (k.empty()) return 1.0f;
+    if (k.size() == 1) return k.front().second;
+    const float last = k.back().first;
+    float t = elapsed;
+    if (last > 0.0f && t > last) t = std::fmod(t, last);
+    t = std::clamp(t, 0.0f, last);
+    float weight = k.front().second;
+    for (size_t i = 0; i + 1 < k.size(); ++i)
+        if (k[i].first <= t && t <= k[i + 1].first) {
+            const float span = k[i + 1].first - k[i].first;
+            if (span <= 1e-6f) return k[i + 1].second;
+            return k[i].second + (t - k[i].first) / span * (k[i + 1].second - k[i].second);
+        }
+    return weight;
 }
 
 Vec3 PlacedLight::direction() const {

@@ -96,11 +96,38 @@ struct PlacedLight {
     std::string globeMap;             // GlobeMapFile: a cube map the light projects around itself ("" = none)
     float coneAngle = 45;             // spot, degrees
     float penumbraAngle = 60;         // spot, degrees
+    uint64_t id = 0;                  // "ID": what a lights.xml <Mod LightID="..."> refers to
     float width = 0;                  // plane: Width, Length (the box's full x / y extents), FalloffPercentVec (x y z)
     float length = 0;
     Vec3 falloffPercentVec;
     Vec3 direction() const;           // spot: the direction it shines
 };
+
+// Light modifiers (lights.xml <Mods>; tabula_rasa.exe, decompiled 2026-10-12). A <Mod LightID> holds tracks; each track is
+// one modifier and (time, weight) keys. Per frame (FUN_00852c30 -> FUN_00853c80) the elapsed time (speed 1.0,
+// FUN_007cb070) is wrapped by fmod with the track's last key time (the list's loop flag is set, FUN_007caf20,
+// FUN_00853d50), the weight is interpolated linearly between the surrounding keys (FUN_00848c40 / FUN_00849d80), and the
+// modifier sets a light property, replacing it (slot 28 of each modifier class):
+//   Intensity = Intensity1 + w (Intensity2 - Intensity1); Color = lerp(Color1, Color2, w) (endpoint order by analogy);
+//   LocalOrientation = rotation about RotationAxis by clamp(w 2 pi, 0, 2 pi); Offset = lerp(Offset1, Offset2, w)
+//   (UNVERIFIED endpoint order). LightID 0 is skipped (FUN_007df550). Range / cone / penumbra / back-colour modifiers
+//   exist in the exe but are not read here.
+struct LightModifierTrack {
+    enum class Kind : uint8_t { Intensity, Color, Rotation, Position, Other };
+    Kind kind = Kind::Other;
+    bool enabled = true;
+    float intensity1 = 0, intensity2 = 0;
+    Vec3 colour1, colour2;
+    Vec3 axis{0, 1, 0};
+    Vec3 offset1, offset2;
+    std::vector<std::pair<float, float>> keys;    // (time in seconds, weight), in file order
+};
+struct LightModifier {
+    uint64_t lightId = 0;
+    std::vector<LightModifierTrack> tracks;
+};
+std::vector<LightModifier> readLightModifiers(const Bytes& data);
+float lightModifierWeight(const LightModifierTrack& track, float elapsedSeconds);   // looping, as above
 
 // overrides: property name -> value, applied over every light's own properties (as the engine sets a contact point's
 // "beginlight" ... "endlight" pairs by property name on an attached template, FUN_00816bf0 / FUN_00884cf0).

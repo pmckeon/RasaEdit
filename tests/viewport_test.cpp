@@ -79,6 +79,8 @@ int main(int argc, char** argv) {
             if (envValue("RASA_NOLIGHTS")) scene.showMapLights = false;
             if (envValue("RASA_SHOWLIGHT")) scene.showLightBuffer = true;
             if (envValue("RASA_NOENV")) scene.environmentMaps = false;
+            if (const char* lt = envValue("RASA_LIGHTTIME")) scene.lightTime = float(std::atof(lt));   // light modifier time, s
+            if (envValue("RASA_NOLIGHTMODS")) scene.animateLights = false;
             if (envValue("RASA_SHOWNORMALS")) scene.debugView = 2;                  // like the game's /dl_shownormals
             if (envValue("RASA_SHOWSPEC")) scene.debugView = 3;
             if (envValue("RASA_SHOWDIFFUSE")) scene.debugView = 4;                  // like the game's /dl_showdiffuse                     // like the game's /dl_showspecintensity     // like the game's /dl_showlight

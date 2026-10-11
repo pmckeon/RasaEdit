@@ -647,6 +647,7 @@ void ViewportPanel::render(EditorContext& ctx, SDL_GPUCommandBuffer* commands, c
     if (!visible_ || !ctx.scene || !ctx.renderer) return;
     applyOptions(ctx.view, *ctx.scene);
     ctx.scene->advanceParticles(ImGui::GetIO().DeltaTime);
+    ctx.scene->advanceLights(ImGui::GetIO().DeltaTime);          // light modifiers (flicker, rotating globes)
     ctx.scene->queueDraws(selection);
     ctx.renderer->record(commands);
 }

@@ -358,6 +358,7 @@ SceneView::SceneView(Renderer& renderer, const tr::AssetLibrary& assets, const t
     if (!map_.lightsXml.empty()) {
         try {
             mapLights_ = tr::readLights(map_.lightsXml);
+            lightModifiers_ = tr::readLightModifiers(map_.lightsXml);
             loadGlobeMaps();
         } catch (const std::exception& e) {
             mapLightsError_ = e.what();
@@ -539,7 +540,7 @@ SceneLighting SceneView::lighting() const {
         const float gap = std::max(0.0f, length(subtract(light.position, camera_.position)) - reach);
         if (gap <= drawDistance) nearest.emplace_back(gap, light);
     };
-    for (const tr::PlacedLight& light : mapLights_) consider(light);
+    for (const tr::PlacedLight& light : mapLights_) consider(animateLights ? modifiedLight(light) : light);
     for (const Placement& p : placements_) {
         if (p.neverDrawn || !p.model || !p.model->loaded || p.model->lights.empty()) continue;
         // Range is used as the property says (the point pass reads LightRange from the light's properties,
@@ -628,6 +629,41 @@ void SceneView::loadGlobeMaps() {
         }
     }
     renderer_.setGlobeMaps(faces, size);
+}
+
+// A map light with its lights.xml modifiers applied at lightTime (see tr::LightModifier).
+tr::PlacedLight SceneView::modifiedLight(const tr::PlacedLight& light) const {
+    if (light.id == 0 || lightModifiers_.empty()) return light;
+    tr::PlacedLight out = light;
+    for (const tr::LightModifier& mod : lightModifiers_) {
+        if (mod.lightId != light.id) continue;
+        for (const tr::LightModifierTrack& track : mod.tracks) {
+            if (!track.enabled) continue;
+            const float w = tr::lightModifierWeight(track, lightTime);
+            switch (track.kind) {
+                case tr::LightModifierTrack::Kind::Intensity:
+                    out.intensity = track.intensity1 + w * (track.intensity2 - track.intensity1);
+                    break;
+                case tr::LightModifierTrack::Kind::Color:
+                    out.colour = add(track.colour1, scaled(subtract(track.colour2, track.colour1), w));
+                    break;
+                case tr::LightModifierTrack::Kind::Rotation: {
+                    const float angle = std::clamp(w * 6.2831853f, 0.0f, 6.2831853f);
+                    const tr::Vec3 a = normalized(track.axis);
+                    const float s = std::sin(angle * 0.5f);
+                    out.worldOrientation = tr::Quat{a.x * s, a.y * s, a.z * s, std::cos(angle * 0.5f)};
+                    break;
+                }
+                case tr::LightModifierTrack::Kind::Position:
+                    // Offset: the light's child-node translation (see "Lights on models"); for map lights added to Position.
+                    out.position = add(light.position, add(track.offset1, scaled(subtract(track.offset2, track.offset1), w)));
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+    return out;
 }
 
 SceneLighting SceneView::skyLightingAt() const {

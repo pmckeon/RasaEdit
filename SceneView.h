@@ -7,6 +7,8 @@
 #include "sky.h"
 #include "WorldDatabase.h"
 
+#include <algorithm>
+#include <algorithm>
 #include <deque>
 #include <map>
 #include <functional>
@@ -166,6 +168,10 @@ public:
     bool showSun = true;                    // the sky's sun/moon
     bool showShadows = true;                // sun shadows
     const std::vector<tr::PlacedLight>& mapLights() const { return mapLights_; }
+    // Light modifier time in seconds (advanced by advanceLights; the game's tracks loop), and the switch.
+    float lightTime = 0;
+    bool animateLights = true;
+    void advanceLights(float dt) { lightTime += std::clamp(dt, 0.0f, 0.1f); }
     const std::string& mapLightsError() const { return mapLightsError_; }
     // The frame lighting for the current sky, time and toggles (also used by queueDraws).
     SceneLighting lighting() const;
@@ -310,6 +316,8 @@ private:
     std::vector<int32_t> regionsAtCamera() const;       // the client's region list at the camera, highest priority first
     float startTimeOfDay_ = 0.5f;
     std::vector<tr::PlacedLight> mapLights_;
+    std::vector<tr::LightModifier> lightModifiers_;                // lights.xml <Mods>
+    tr::PlacedLight modifiedLight(const tr::PlacedLight& light) const;
     std::string mapLightsError_;
     std::vector<ServerPlacement> serverPlacements_;
     const WorldContent* serverContent_ = nullptr;
