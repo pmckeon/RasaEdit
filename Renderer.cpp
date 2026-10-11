@@ -41,6 +41,7 @@ struct SceneFragmentUniforms {
     LightingUniforms lighting;
     Vec4f specular;                // aniso additive: MatSpecular
     Vec4f layers;                  // aniso additive: x detail uses UV set 1, y decal uses UV set 1, z 1 = has detail, w 1 = has decal
+    Vec4f material;                // x: 1 = normal map, y: 1 = gloss map
 };
 
 struct TerrainFragmentUniforms {
@@ -60,7 +61,7 @@ LightingUniforms lightingUniforms(const SceneLighting& l, const Vec4f& cameraPos
     u.hemiTop = l.hemiTop;
     u.hemiBottom = l.hemiBottom;
     u.fogColour = Vec4f{l.fogColour.x, l.fogColour.y, l.fogColour.z, l.fog ? 1.0f : 0.0f};
-    u.fogRange = Vec4f{l.fogStart, l.fogDensity, l.showLight ? 1.0f : 0.0f, 0};
+    u.fogRange = Vec4f{l.fogStart, l.fogDensity, l.showLight ? 1.0f : 0.0f, float(l.debugView)};
     u.cameraPosition = cameraPosition;
     u.localCount = Vec4f{float(l.localCount), 0, 0, 0};
     for (int i = 0; i < SceneLighting::maxLocalLights; ++i) {
@@ -104,7 +105,7 @@ Renderer::Renderer(SDL_GPUDevice* device) : device_(device) {
     sceneVertex_ = createShader(sceneVertexDxil, sizeof sceneVertexDxil, sceneVertexSpirv, sizeof sceneVertexSpirv, "vsMain",
                                 SDL_GPU_SHADERSTAGE_VERTEX, 0);
     sceneFragment_ = createShader(sceneFragmentDxil, sizeof sceneFragmentDxil, sceneFragmentSpirv, sizeof sceneFragmentSpirv, "psMain",
-                                  SDL_GPU_SHADERSTAGE_FRAGMENT, 7);
+                                  SDL_GPU_SHADERSTAGE_FRAGMENT, 9);
     terrainVertex_ = createShader(terrainVertexDxil, sizeof terrainVertexDxil, terrainVertexSpirv, sizeof terrainVertexSpirv, "vsMain",
                                   SDL_GPU_SHADERSTAGE_VERTEX, 0);
     terrainFragment_ = createShader(terrainFragmentDxil, sizeof terrainFragmentDxil, terrainFragmentSpirv, sizeof terrainFragmentSpirv,
@@ -148,12 +149,14 @@ Renderer::Renderer(SDL_GPUDevice* device) : device_(device) {
         buffer.slot = 0;
         buffer.pitch = sizeof(MeshVertex);
         buffer.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
-        SDL_GPUVertexAttribute attributes[5] = {};
-        const uint32_t offsets[5] = {uint32_t(offsetof(MeshVertex, positionX)), uint32_t(offsetof(MeshVertex, normalX)), uint32_t(offsetof(MeshVertex, colour)),
-                                     uint32_t(offsetof(MeshVertex, texU)), uint32_t(offsetof(MeshVertex, texU1))};
-        const SDL_GPUVertexElementFormat formats[5] = {SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM,
-                                                       SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2};
-        for (uint32_t k = 0; k < 5; ++k) {
+        SDL_GPUVertexAttribute attributes[7] = {};
+        const uint32_t offsets[7] = {uint32_t(offsetof(MeshVertex, positionX)), uint32_t(offsetof(MeshVertex, normalX)), uint32_t(offsetof(MeshVertex, colour)),
+                                     uint32_t(offsetof(MeshVertex, texU)), uint32_t(offsetof(MeshVertex, texU1)), uint32_t(offsetof(MeshVertex, tangentX)),
+                                     uint32_t(offsetof(MeshVertex, binormalX))};
+        const SDL_GPUVertexElementFormat formats[7] = {SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM,
+                                                       SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3,
+                                                       SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3};
+        for (uint32_t k = 0; k < 7; ++k) {
             attributes[k].location = k;
             attributes[k].format = formats[k];
             attributes[k].offset = offsets[k];
@@ -164,7 +167,7 @@ Renderer::Renderer(SDL_GPUDevice* device) : device_(device) {
         info.vertex_input_state.vertex_buffer_descriptions = &buffer;
         info.vertex_input_state.num_vertex_buffers = 1;
         info.vertex_input_state.vertex_attributes = attributes;
-        info.vertex_input_state.num_vertex_attributes = 5;
+        info.vertex_input_state.num_vertex_attributes = 7;
         info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
         info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
         info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
@@ -241,7 +244,7 @@ SDL_GPUGraphicsPipeline* Renderer::createPipeline(SDL_GPUShader* vertexShader, S
     buffer.slot = 0;
     buffer.pitch = sizeof(MeshVertex);
     buffer.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
-    SDL_GPUVertexAttribute attributes[5] = {};
+    SDL_GPUVertexAttribute attributes[7] = {};
     attributes[0].location = 0;
     attributes[0].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3;
     attributes[0].offset = offsetof(MeshVertex, positionX);
@@ -257,6 +260,12 @@ SDL_GPUGraphicsPipeline* Renderer::createPipeline(SDL_GPUShader* vertexShader, S
     attributes[4].location = 4;
     attributes[4].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
     attributes[4].offset = offsetof(MeshVertex, texU1);
+    attributes[5].location = 5;
+    attributes[5].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3;
+    attributes[5].offset = offsetof(MeshVertex, tangentX);
+    attributes[6].location = 6;
+    attributes[6].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3;
+    attributes[6].offset = offsetof(MeshVertex, binormalX);
 
     SDL_GPUColorTargetDescription target = {};
     target.format = colourFormat_;
@@ -276,7 +285,7 @@ SDL_GPUGraphicsPipeline* Renderer::createPipeline(SDL_GPUShader* vertexShader, S
     info.vertex_input_state.vertex_buffer_descriptions = &buffer;
     info.vertex_input_state.num_vertex_buffers = 1;
     info.vertex_input_state.vertex_attributes = attributes;
-    info.vertex_input_state.num_vertex_attributes = 5;
+    info.vertex_input_state.num_vertex_attributes = 7;
     info.primitive_type = primitive;
     info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
     info.rasterizer_state.cull_mode = cullBack ? SDL_GPU_CULLMODE_BACK : SDL_GPU_CULLMODE_NONE;
@@ -412,11 +421,13 @@ void Renderer::beginFrame(const Mat4& viewProjection, const tr::Vec3& cameraPosi
 }
 
 void Renderer::draw(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, bool lit, SDL_GPUTexture* texture, bool alphaTest, const Vec4f& hue,
-                    SDL_GPUTexture* glow, bool twoSided, float alphaReference) {
+                    SDL_GPUTexture* glow, bool twoSided, float alphaReference, SDL_GPUTexture* normalMap, SDL_GPUTexture* glossMap) {
     if (!mesh.vertices || mesh.indexCount == 0) return;
     DrawItem item{&mesh, model, tint, lit, texture ? texture : white_, alphaTest, nullptr, false, hue, glow ? glow : black_};
     item.twoSided = twoSided;
     item.alphaReference = alphaReference;
+    item.normalMap = normalMap;
+    item.glossMap = glossMap;
     draws_.push_back(item);
 }
 
@@ -513,10 +524,10 @@ void Renderer::recordParticles(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass
             bound = pipeline;
         }
         SDL_PushGPUVertexUniformData(commands, 0, &vertexUniforms, sizeof vertexUniforms);
-        const SDL_GPUTextureSamplerBinding samplers[7] = {{b.texture, linearSampler_}, {black_, linearSampler_}, {black_, linearSampler_},
+        const SDL_GPUTextureSamplerBinding samplers[9] = {{b.texture, linearSampler_}, {black_, linearSampler_}, {black_, linearSampler_},
                                                           {black_, linearSampler_}, {white_, clampSampler_}, {shadowMap_, shadowSampler_},
-                                                          {globes_, clampSampler_}};
-        SDL_BindGPUFragmentSamplers(pass, 0, samplers, 7);
+                                                          {globes_, clampSampler_}, {black_, linearSampler_}, {black_, linearSampler_}};
+        SDL_BindGPUFragmentSamplers(pass, 0, samplers, 9);
         // Additive and subtractive use the additive path (rgb x alpha, faded by fog); alpha-blended ones options.y.
         const bool added = b.blendType == 0 || b.blendType == 3;
         SceneFragmentUniforms u{Vec4f{1, 1, 1, 1}, towardsLight_, Vec4f{0, added ? 0.0f : 1.0f, added ? 1.0f : 0.0f, 0}, Vec4f{0, 0, 0, 0},
@@ -632,14 +643,17 @@ void Renderer::recordItem(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pas
         SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof u);
     } else {
         // Unused detail/decal slots are switched off by layers.z/w; the light ramp defaults to opaque white.
-        const SDL_GPUTextureSamplerBinding samplers[7] = {{item.texture, linearSampler_}, {item.glow ? item.glow : black_, linearSampler_},
+        const SDL_GPUTextureSamplerBinding samplers[9] = {{item.texture, linearSampler_}, {item.glow ? item.glow : black_, linearSampler_},
                                                           {item.detail ? item.detail : black_, linearSampler_},
                                                           {item.decal ? item.decal : black_, linearSampler_},
                                                           {item.light ? item.light : white_, clampSampler_},
-                                                          {shadowMap_, shadowSampler_}, {globes_, clampSampler_}};
-        SDL_BindGPUFragmentSamplers(pass, 0, samplers, 7);
+                                                          {shadowMap_, shadowSampler_}, {globes_, clampSampler_},
+                                                          {item.normalMap ? item.normalMap : black_, linearSampler_},
+                                                          {item.glossMap ? item.glossMap : black_, linearSampler_}};
+        SDL_BindGPUFragmentSamplers(pass, 0, samplers, 9);
         SceneFragmentUniforms u{item.tint, towardsLight_, Vec4f{item.alphaTest ? item.alphaReference : 0.0f, item.translucent ? 2.0f : 0.0f, item.additive ? (item.forwardLit ? 2.0f : 1.0f) : 0.0f, item.aniso ? 1.0f : 0.0f},
-                                item.hue, lightingUniforms(lighting_, cameraPosition_, shadowMatrix_, shadowsActive_, float(shadowSize)), item.specular, item.layers};
+                                item.hue, lightingUniforms(lighting_, cameraPosition_, shadowMatrix_, shadowsActive_, float(shadowSize)), item.specular, item.layers,
+                                Vec4f{item.normalMap ? 1.0f : 0.0f, item.glossMap ? 1.0f : 0.0f, 0, 0}};
         u.lightDirection.w = item.lit ? 1.0f : 0.0f;
         SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof u);
     }

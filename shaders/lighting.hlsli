@@ -94,6 +94,57 @@ float3 localLights(float3 world, float3 n, int count, float4 position[MAX_LOCAL_
     return sum;
 }
 
+// Specular, from the game's TRDirLight / TRPointLight / TRSpotLight "WithSpec" passes (effects.glm, disassembled
+// 2026-10-11). sp = specular power, i = specular intensity from the G-buffer (Pal* materials: gloss map r and g):
+//   a = sat(20 N.L) i;  scale = min(a (0.865019 sp^2 + 0.35) + a sat(1 - N.V)^2, 1.25);
+//   exponent = 8 + 245 sp^2 (1 - sat(1 - N.V));  spec = scale (N.H)^exponent, only where N.L > 0, N.H > 0 and sp > 0.
+// The pass multiplies it by the light colour (and a point/spot light's fade x intensity, the sun's shadow factor) and
+// writes it to the specular buffer, which trhdrcomposite adds untinted.
+float specularFactor(float3 n, float3 v, float3 l, float sp, float i)
+{
+    const float ndl = dot(n, l);
+    const float sp2 = sp * sp;
+    if (ndl <= 0.0 || sp2 <= 0.0)
+        return 0.0;
+    const float a = saturate(20.0 * ndl) * i;
+    const float edge = saturate(1.0 - dot(n, v));
+    const float scale = min(a * (0.865018964 * sp2 + 0.35) + a * edge * edge, 1.25);
+    const float exponent = 8.0 + 245.0 * sp2 * (1.0 - edge);
+    const float ndh = dot(n, normalize(v + l));
+    return ndh > 0.0 ? scale * pow(ndh, exponent) : 0.0;
+}
+
+// Placed lights' specular: the same fade and cone as localLights (globe maps not applied to the specular - UNVERIFIED).
+float3 localSpecular(float3 world, float3 n, float3 v, float sp, float i, int count, float4 position[MAX_LOCAL_LIGHTS],
+                     float4 colour[MAX_LOCAL_LIGHTS], float4 spot[MAX_LOCAL_LIGHTS], float4 spotInner[MAX_LOCAL_LIGHTS])
+{
+    float3 sum = float3(0, 0, 0);
+    for (int k = 0; k < count; ++k)
+    {
+        const float3 toLight = position[k].xyz - world;
+        const float d = length(toLight);
+        const float range = position[k].w;
+        if (d >= range)
+            continue;
+        const bool isSpot = spot[k].w > -1.5;
+        const float along = isSpot ? dot(-toLight, spot[k].xyz) : d;
+        if (isSpot && along <= 0.0)
+            continue;
+        const float start = min(colour[k].w, 0.970225 * range);
+        const float end = 0.985 * range;
+        const float fade = 1.0 - saturate((along - start) / max(end - start, 0.000001));
+        float cone = 1.0;
+        if (isSpot)
+        {
+            const float c = along / max(d, 0.0001);
+            const float cosCone = spotInner[k].x, cosPenumbra = spot[k].w;
+            cone = c >= cosCone ? 1.0 : (c >= cosPenumbra ? 1.0 - (cosCone - c) / max(cosCone - cosPenumbra, 0.000001) : 0.0);
+        }
+        sum += colour[k].rgb * specularFactor(n, v, toLight / max(d, 0.0001), sp, i) * fade * cone;
+    }
+    return sum;
+}
+
 // The game's fog (trhdrcomposite): visibility = exp(-(density * max(d - start, 0))^2), lerp to the fog colour.
 // fogColour.w: 1 = on; fogRange: x start distance, y density.
 float3 applyFog(float3 rgb, float distance, float4 fogColour, float4 fogRange)

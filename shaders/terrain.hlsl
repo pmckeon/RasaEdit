@@ -126,6 +126,8 @@ float4 psMain(VertexOutput input) : SV_Target0
     s.sunVisibility = sunShadow(shadowMap, shadowSampler, shadowMatrix, shadowParams, input.world, n);
     const float3 light = skyLight(n, s) + localLights(input.world, n, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner, localRotation,
                                                          globeMaps, globeSampler);
+    if (fogRange.w > 1.5)
+        return float4(fogRange.w < 2.5 ? n * 0.5 + 0.5 : float3(0, 0, 0), 1.0);   // normals / spec intensity debug views
     if (fogRange.z > 0.5)
         return float4(light * 0.2, 1.0);       // the game's light buffer (x OO_LIGHT_MULTIPLIER), as /dl_showlight shows it
     const float3 lit = colour * light;

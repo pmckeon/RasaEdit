@@ -142,6 +142,8 @@ public:
     bool showFog = true;                    // distance fog in the sky colour (the .sky's own "Used" flag is false everywhere)
     bool showMapLights = true;              // the map's lights.xml (up to 16 nearest the camera)
     bool showLightBuffer = false;
+    int debugView = 0;                      // 2: normals, 3: specular intensity (like the game's /dl_shownormals, /dl_showspecintensity)
+    bool materialMaps = true;               // normal and gloss maps (Pal* materials); off for comparison
     std::unordered_map<std::string, int> globeIndex_;    // lower-case GlobeMapFile -> cube index (1-based; 0 = none)
     std::string globeErrors_;
     void loadGlobeMaps();
@@ -170,6 +172,10 @@ private:
         SDL_GPUTexture* glow = nullptr;        // GlowTexture (owned by textures_), added after lighting
         bool additive = false;                 // Additive phase: drawn additively with Effects on, not pickable
         bool translucent = false;              // Translucent phase: alpha-blended, lit
+        // Pal* materials (PalDiffNormalGloss...): normal map and gloss map (r spec power, g spec intensity); see
+        // CLAUDE.md "Material maps". Environment reflection (gloss b) not applied yet.
+        SDL_GPUTexture* normalMap = nullptr;
+        SDL_GPUTexture* glossMap = nullptr;
         // Phase pieces of non-TRAdditive effects are drawn with their forward technique (verified in game: absent from
         // /dl_showdiffuse): lit per vertex, detail layer, opacity x MatDiffuse alpha.
         bool forwardLit = false;

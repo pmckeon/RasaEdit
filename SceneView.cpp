@@ -403,6 +403,7 @@ bool SceneView::skyFromRegion() const { return skyByRegion && serverContent_ && 
 SceneLighting SceneView::lighting() const {
     SceneLighting l = skyLightingAt();
     l.showLight = showLightBuffer;
+    l.debugView = debugView;
     if (!showMapLights) return l;
     // Placed lights: the enabled ones nearest the camera (distance to their range sphere), up to the shader's limit.
     // Candidates: the map's lights.xml, and lights on map entities' models (contact point "lsys" templates) placed
@@ -907,6 +908,9 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 if (gp.key == "GlowTexture") glowName = gp.value;
                 if (gp.key == "GlowTexCoord") glowUvSet = std::atoi(gp.value.c_str());
             }
+            // Pal* materials (ps2x_BaseDeferred*, disassembled 2026-10-11): normal, gloss and glow maps all use UV set 0.
+            const bool pal = effect.rfind("paldiff", 0) == 0;
+            if (pal) glowUvSet = 0;
             // Static pieces attached to a bone are moved by it (as in the OBJ exporter).
             const tr::GeoBone* bone = nullptr;
             if (!piece.skinned && !piece.boneName.empty())
@@ -932,10 +936,13 @@ void SceneView::loadModel(const std::string& name, Model& model) {
             vertices.reserve(piece.vertices.size());
             for (const tr::GeoVertex& gv : piece.vertices) {
                 tr::Vec3 p = transformPoint(boneMatrix, gv.position);
-                tr::Vec3 n = subtract(transformPoint(boneMatrix, gv.normal), transformPoint(boneMatrix, tr::Vec3{0, 0, 0}));
+                const tr::Vec3 origin = transformPoint(boneMatrix, tr::Vec3{0, 0, 0});
+                tr::Vec3 n = subtract(transformPoint(boneMatrix, gv.normal), origin);
+                tr::Vec3 tangent = subtract(transformPoint(boneMatrix, gv.tangent), origin);
+                tr::Vec3 binormal = subtract(transformPoint(boneMatrix, gv.binormal), origin);
                 if (!palette.empty()) {
                     // Linear blend skinning: sum of weight * (posed world * inverse bind world) over up to 4 bones.
-                    tr::Vec3 sp{0, 0, 0}, sn{0, 0, 0};
+                    tr::Vec3 sp{0, 0, 0}, sn{0, 0, 0}, st{0, 0, 0}, sb{0, 0, 0};
                     float total = 0;
                     for (uint32_t i = 0; i < 4; ++i) {
                         const float w = tr::blendWeight(gv, i);
@@ -943,17 +950,24 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                         if (w <= 0 || slot >= palette.size() || palette[slot] < 0) continue;
                         const Mat4& m = skin[size_t(palette[slot])];
                         sp = add(sp, scaled(transformPoint(m, gv.position), w));
-                        sn = add(sn, scaled(subtract(transformPoint(m, gv.normal), transformPoint(m, tr::Vec3{0, 0, 0})), w));
+                        const tr::Vec3 o = transformPoint(m, tr::Vec3{0, 0, 0});
+                        sn = add(sn, scaled(subtract(transformPoint(m, gv.normal), o), w));
+                        st = add(st, scaled(subtract(transformPoint(m, gv.tangent), o), w));
+                        sb = add(sb, scaled(subtract(transformPoint(m, gv.binormal), o), w));
                         total += w;
                     }
                     if (total > 0) {
                         p = scaled(sp, 1.0f / total);
                         n = sn;
+                        tangent = st;
+                        binormal = sb;
                     }
                 }
                 MeshVertex v;
                 v.positionX = p.x; v.positionY = p.y; v.positionZ = p.z;
                 v.normalX = n.x; v.normalY = n.y; v.normalZ = n.z;
+                v.tangentX = tangent.x; v.tangentY = tangent.y; v.tangentZ = tangent.z;
+                v.binormalX = binormal.x; v.binormalY = binormal.y; v.binormalZ = binormal.z;
                 v.colour = vertexColour ? packColour(uint8_t(gv.colour >> 16), uint8_t(gv.colour >> 8), uint8_t(gv.colour),     // ARGB
                                                      additive || translucent ? uint8_t(gv.colour >> 24) : 255)
                                         : packColour(255, 255, 255, 255);
@@ -987,6 +1001,11 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 part.swapId = piece.swapId;
                 part.additive = additive;
                 part.translucent = translucent;
+                if (pal && !water)
+                    for (const tr::GeoParameter& gp : piece.parameters) {
+                        if (gp.key == "NormalMapTexture") part.normalMap = texture(gp.value);
+                        if (gp.key == "GlossMapTexture") part.glossMap = texture(gp.value);
+                    }
                 part.forwardLit = (additive || translucent) && !namedAdditive && !aniso;
                 if (part.forwardLit)
                     for (const tr::GeoParameter& gp : piece.parameters) {
@@ -1217,7 +1236,8 @@ void SceneView::queueDraws(const Selection& selection) {
                         renderer_.drawTranslucent(piece.mesh, p.world, scaledTint(Vec4f{tint.x, tint.y, tint.z, tint.w * piece.matDiffuseAlpha}, piece.colourScale),
                                                   showTextures ? piece.texture : nullptr, showTextures ? piece.detail : nullptr, piece.detailUv1);
                     else renderer_.draw(piece.mesh, p.world, scaledTint(tint, piece.colourScale), true, showTextures ? piece.texture : nullptr, showTextures && piece.alphaTest,
-                                        Vec4f{0, 0, 0, 0}, showTextures ? piece.glow : nullptr, piece.twoSided, piece.alphaReference);
+                                        Vec4f{0, 0, 0, 0}, showTextures ? piece.glow : nullptr, piece.twoSided, piece.alphaReference,
+                                        showTextures && materialMaps ? piece.normalMap : nullptr, showTextures && materialMaps ? piece.glossMap : nullptr);
                 }
             } else if (p.model && p.model->loaded && p.model->effectOnly) {
                 // Effect-only entity (particle emitters, light cones): with Placeholders on, a cyan wireframe of its bounds.
@@ -1295,7 +1315,8 @@ void SceneView::queueDraws(const Selection& selection) {
                 }
                 const Vec4f hue = !showTextures || !piece.hued ? Vec4f{0, 0, 0, 0} : piece.flesh ? s.skinHue : partHue;
                 renderer_.draw(piece.mesh, s.world, scaledTint(tint, piece.colourScale), true, showTextures ? piece.texture : nullptr, showTextures && piece.alphaTest, hue,
-                               showTextures ? piece.glow : nullptr, piece.twoSided, piece.alphaReference);
+                               showTextures ? piece.glow : nullptr, piece.twoSided, piece.alphaReference,
+                               showTextures && materialMaps ? piece.normalMap : nullptr, showTextures && materialMaps ? piece.glossMap : nullptr);
             };
             // Avatars: the base suit minus the swap sets replaced by loaded parts, then each part's swap set
             // from its suit (a part still loading, or failed, leaves the base pieces in place).

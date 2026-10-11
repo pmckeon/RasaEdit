@@ -51,8 +51,11 @@ int main(int argc, char** argv) {
             if (envValue("RASA_NOSHADOWS")) scene.showShadows = false;
             if (const char* g = envValue("RASA_LIGHTGAMMA")) scene.lightColourGamma = float(std::atof(g));
             if (envValue("RASA_NOLIGHTS")) scene.showMapLights = false;
-            if (envValue("RASA_SHOWLIGHT")) scene.showLightBuffer = true;     // like the game's /dl_showlight
-            if (const char* a = envValue("RASA_AMBIENT")) scene.ambientScale = float(std::atof(a));   // scales the sky hemi light
+            if (envValue("RASA_SHOWLIGHT")) scene.showLightBuffer = true;
+            if (envValue("RASA_SHOWNORMALS")) scene.debugView = 2;                  // like the game's /dl_shownormals
+            if (envValue("RASA_SHOWSPEC")) scene.debugView = 3;                     // like the game's /dl_showspecintensity     // like the game's /dl_showlight
+            if (const char* a = envValue("RASA_AMBIENT")) scene.ambientScale = float(std::atof(a));
+            if (envValue("RASA_NOMAPS")) scene.materialMaps = false;                // normal / gloss maps off   // scales the sky hemi light
             std::printf("map lights: %zu%s%s\n", scene.mapLights().size(), scene.mapLightsError().empty() ? "" : " - ", scene.mapLightsError().c_str());
             for (size_t k = 0; k < scene.skies().size(); ++k) {
                 const SceneView::SkyChoice& c = scene.skies()[k];

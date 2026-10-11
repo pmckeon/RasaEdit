@@ -456,6 +456,11 @@ struct GeoVertex {
     Vec3 normal;
     Vec2 uv;
     Vec2 uv1;                          // TEXCOORD1, if present (e.g. GlowTexCoord 1)
+    Vec2 uv2;                          // TEXCOORD2, if present (e.g. DecalTexCoord 2)
+    // Tangent frame for normal maps (Pal* effects): TANGENT0 = tangent, TANGENT1 = binormal (the Pal vertex shader
+    // vs2x_OffsetVSNoParallax reads dcl_tangent / dcl_tangent1; verified 2026-10-11).
+    Vec3 tangent;
+    Vec3 binormal;
     uint32_t colour = 0xFFFFFFFF;      // D3DCOLOR (ARGB)
     // Skinning (GSKN pieces): BLENDWEIGHT holds weightCount - 1 explicit weights, the last is 1 - their sum;
     // BLENDINDICES is a D3DCOLOR whose bytes 0, 1, 2, 3 (no swizzle; verified 2026-10-10) index the piece's skinBones.

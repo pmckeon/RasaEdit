@@ -15,6 +15,8 @@ struct MeshVertex {
     uint32_t colour = 0xFFFFFFFF;
     float texU = 0, texV = 0;
     float texU1 = 0, texV1 = 0;        // second UV set (glow maps)
+    float tangentX = 0, tangentY = 0, tangentZ = 0;     // normal maps: tangent frame (model space, like the normal)
+    float binormalX = 0, binormalY = 0, binormalZ = 0;
 };
 
 inline uint32_t packColour(uint8_t red, uint8_t green, uint8_t blue, uint8_t alpha) {
@@ -68,6 +70,8 @@ struct SceneLighting {
     float fogStart = 0;
     float fogDensity = 0;                        // exp-squared fog, see shaders/lighting.hlsli
     bool showLight = false;                      // debug view like the game's /dl_showlight: 0.2 x light, no albedo
+    int debugView = 0;                           // 2: G-buffer normals (N x 0.5 + 0.5, /dl_shownormals), 3: specular intensity
+                                                 // (/dl_showspecintensity)
     // Sun shadows: a shadow map from the sun over the area around the camera. The game's shadows let part of the sun
     // through: shadowOpacity 0.64 fitted at Alia Das, 12:00 (shadowed ground 1.02 = ambient 0.60 + 0.36 x sun 1.16).
     bool sunShadows = false;
@@ -114,7 +118,8 @@ public:
     // glow (sampled with the second UV set) is added after lighting, as the game's glow buffer is.
     // twoSided: no back-face culling for this draw (effects whose passes set CULLMODE = NONE, see SceneView).
     void draw(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, bool lit, SDL_GPUTexture* texture = nullptr, bool alphaTest = false,
-              const Vec4f& hue = Vec4f{0, 0, 0, 0}, SDL_GPUTexture* glow = nullptr, bool twoSided = false, float alphaReference = 0.5f);
+              const Vec4f& hue = Vec4f{0, 0, 0, 0}, SDL_GPUTexture* glow = nullptr, bool twoSided = false, float alphaReference = 0.5f,
+              SDL_GPUTexture* normalMap = nullptr, SDL_GPUTexture* glossMap = nullptr);
     // Back faces of opaque lit draws are culled when true, as in the game: PalGlobalEffect.fx sets CULLMODE = CCW and
     // is begun without state saving (D3DXFX_DONOTSAVESTATE), so it is the baseline; material effects leave it alone
     // except the few that set NONE. false draws everything two-sided (comparison / debugging).
@@ -164,6 +169,8 @@ private:
         bool forwardLit = false;                 // lit additive (forward-phase piece)
         bool twoSided = false;
         float alphaReference = 0.5f;             // alpha test: texels below it are discarded
+        SDL_GPUTexture* normalMap = nullptr;     // Pal* materials: normal map (tangent space) and gloss map
+        SDL_GPUTexture* glossMap = nullptr;
     };
     SDL_GPUShader* createShader(const unsigned char* dxil, size_t dxilSize, const unsigned char* spirv, size_t spirvSize,
                                 const char* entryPoint, SDL_GPUShaderStage stage, uint32_t samplers);

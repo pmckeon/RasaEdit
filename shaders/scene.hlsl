@@ -27,7 +27,7 @@ cbuffer FragmentUniforms : register(b0, space3)
     float4 hemiTop;           // rgb: hemispheric light from above
     float4 hemiBottom;        // rgb: hemispheric light from below
     float4 fogColour;         // rgb; w: 1 = fog on
-    float4 fogRange;          // x: start distance, y: density, z: 1 = light-buffer debug view
+    float4 fogRange;          // x: start distance, y: density, z: 1 = light-buffer debug view, w: 2 normals / 3 spec intensity view
     float4 cameraPosition;    // xyz
     float4 localCount;        // x: number of placed lights
     float4 localPosition[MAX_LOCAL_LIGHTS];
@@ -40,6 +40,7 @@ cbuffer FragmentUniforms : register(b0, space3)
     float4 specular;          // aniso additive: MatSpecular
     float4 layers;            // x detail on UV set 1, y decal on UV set 1, z has detail, w has decal (aniso additive and
                               // forward-phase pieces)
+    float4 material;          // x: 1 = normal map (t7, tangent frame), y: 1 = gloss map (t8: r spec power, g spec intensity)
 };
 
 [[vk::combinedImageSampler]] Texture2D diffuseTexture : register(t0, space2);
@@ -56,6 +57,10 @@ cbuffer FragmentUniforms : register(b0, space3)
 [[vk::combinedImageSampler]] TextureCubeArray globeMaps : register(t6, space2);
 [[vk::combinedImageSampler]] SamplerState globeSampler : register(s6, space2);
 [[vk::combinedImageSampler]] SamplerComparisonState shadowSampler : register(s5, space2);
+[[vk::combinedImageSampler]] Texture2D normalMapTexture : register(t7, space2);
+[[vk::combinedImageSampler]] SamplerState normalMapSampler : register(s7, space2);
+[[vk::combinedImageSampler]] Texture2D glossTexture : register(t8, space2);
+[[vk::combinedImageSampler]] SamplerState glossSampler : register(s8, space2);
 
 struct VertexInput
 {
@@ -64,6 +69,8 @@ struct VertexInput
     float4 colour   : TEXCOORD2;
     float2 uv       : TEXCOORD3;
     float2 uv1      : TEXCOORD4;
+    float3 tangent  : TEXCOORD5;
+    float3 binormal : TEXCOORD6;
 };
 
 struct VertexOutput
@@ -74,6 +81,8 @@ struct VertexOutput
     float2 uv       : TEXCOORD2;
     float3 world    : TEXCOORD3;
     float2 uv1      : TEXCOORD4;
+    float3 tangent  : TEXCOORD5;
+    float3 binormal : TEXCOORD6;
 };
 
 VertexOutput vsMain(VertexInput input)
@@ -82,6 +91,8 @@ VertexOutput vsMain(VertexInput input)
     const float4 world = mul(model, float4(input.position, 1.0));
     output.position = mul(viewProjection, world);
     output.normal = mul((float3x3)model, input.normal);
+    output.tangent = mul((float3x3)model, input.tangent);
+    output.binormal = mul((float3x3)model, input.binormal);
     output.colour = input.colour;
     output.uv = input.uv;
     output.world = world.xyz;
@@ -112,8 +123,8 @@ float3 anisoAdditive(VertexOutput input)
 float4 psMain(VertexOutput input) : SV_Target0
 {
     const bool particle = options.y > 0.5 && options.y < 1.5;
-    if (fogRange.z > 0.5 && (options.w > 0.5 || options.z > 0.5 || particle))
-        return float4(0, 0, 0, 1);             // light-buffer view: additive effects are not lit geometry
+    if ((fogRange.z > 0.5 || fogRange.w > 1.5) && (options.w > 0.5 || options.z > 0.5 || particle))
+        return float4(0, 0, 0, options.y > 0.5 ? 0 : 1);   // debug views: additive / forward effects are not in the G-buffer
     if (options.w > 0.5)
     {
         const float3 colour = applyFog(anisoAdditive(input), length(cameraPosition.xyz - input.world), float4(0, 0, 0, fogColour.w), fogRange);
@@ -168,6 +179,13 @@ float4 psMain(VertexOutput input) : SV_Target0
     float3 n = normalize(input.normal);
     if (dot(n, view) < 0.0)
         n = -n;
+    // Normal map (Pal* materials, ps2x_BaseDeferred*: N = TBN x (map x 2 - 1), the vertex shader's TBN from TANGENT0,
+    // TANGENT1 and NORMAL through the world matrix).
+    if (material.x > 0.5)
+    {
+        const float3 m = normalMapTexture.Sample(normalMapSampler, input.uv).rgb * 2.0 - 1.0;
+        n = normalize(normalize(input.tangent) * m.x + normalize(input.binormal) * m.y + n * m.z);
+    }
     SkyLighting s;
     s.towardsLight = normalize(lightDirection.xyz);
     s.sunFront = sunFront.rgb;
@@ -182,7 +200,23 @@ float4 psMain(VertexOutput input) : SV_Target0
                                                          globeMaps, globeSampler);
     if (fogRange.z > 0.5)
         return float4(light * 0.2, 1.0);       // the game's light buffer (x OO_LIGHT_MULTIPLIER), as /dl_showlight shows it
-    const float3 lit = base.rgb * light + glow;
+    if (fogRange.w > 1.5)
+    {
+        if (options.y > 1.5)
+            return float4(0, 0, 0, 0);         // translucent (forward) pieces are not in the G-buffer
+        if (fogRange.w < 2.5)
+            return float4(n * 0.5 + 0.5, 1.0);
+        return float4((material.y > 0.5 ? glossTexture.Sample(glossSampler, input.uv).g : 0.0).xxx, 1.0);
+    }
+    float3 lit = base.rgb * light + glow;
+    // Specular (gloss map r = power, g = intensity), added untinted as trhdrcomposite adds its specular buffer.
+    if (material.y > 0.5)
+    {
+        const float4 gloss = glossTexture.Sample(glossSampler, input.uv);
+        const float3 v = normalize(view);
+        lit += sunFront.rgb * specularFactor(n, v, s.towardsLight, gloss.r, gloss.g) * s.sunVisibility +
+               localSpecular(input.world, n, v, gloss.r, gloss.g, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner);
+    }
     // Alpha: only translucent draws blend with it. Opaque draws keep it 1 - the viewport image is composited with alpha.
     return float4(applyFog(lit, length(view), fogColour, fogRange), options.y > 1.5 ? base.a * texel.a : base.a);
 }

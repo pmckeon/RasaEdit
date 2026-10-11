@@ -901,10 +901,10 @@ void readVert(ByteReader& r, GeoPiece& piece) {
         for (const VertexElement& e : piece.layout) {
             if (e.offset + elementSize(e.type) > stride) continue;
             if (e.usageIndex != 0) {
-                if (e.usage == 5 && e.usageIndex == 1) {                            // TEXCOORD1 (glow / decal maps)
-                    const Value4 value = decodeElement(e.type, p + e.offset);
-                    v.uv1 = {value.x, value.y};
-                }
+                const Value4 value = decodeElement(e.type, p + e.offset);
+                if (e.usage == 5 && e.usageIndex == 1) v.uv1 = {value.x, value.y};               // TEXCOORD1 (glow / decal maps)
+                if (e.usage == 5 && e.usageIndex == 2) v.uv2 = {value.x, value.y};               // TEXCOORD2 (decal maps)
+                if (e.usage == 6 && e.usageIndex == 1) v.binormal = {value.x, value.y, value.z}; // TANGENT1 (binormal)
                 continue;
             }
             const Value4 value = decodeElement(e.type, p + e.offset);
@@ -921,6 +921,7 @@ void readVert(ByteReader& r, GeoPiece& piece) {
                 }
                 case 2: v.blendIndices = loadU32(p + e.offset); break;            // BLENDINDICES (D3DCOLOR / UBYTE4)
                 case 3: v.normal = {value.x, value.y, value.z}; break;             // NORMAL
+                case 6: v.tangent = {value.x, value.y, value.z}; break;            // TANGENT0
                 case 5: v.uv = {value.x, value.y}; break;                          // TEXCOORD0
                 case 10: v.colour = e.type == 4 ? loadU32(p + e.offset) : packColour(value); break;  // COLOR0
                 default: break;
