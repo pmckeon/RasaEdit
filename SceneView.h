@@ -193,6 +193,8 @@ private:
         bool hueUnweighted = false;            // alpha-tested Pal*Hue: Hue added without the diffuse-alpha weight
         // The material's stored Hue parameter (w = 1 when set): what a map entity's pieces keep when the entity is not hued.
         Vec4f materialHue = Vec4f{0, 0, 0, 0};
+        TrMaterial trMaterial;                 // TR* deferred material (stage 3), trMaterial.active
+        bool hairCutout = false;               // TRHair: cut out by the normal map's alpha
         // Phase pieces of non-TRAdditive effects are drawn with their forward technique (verified in game: absent from
         // /dl_showdiffuse): lit per vertex, detail layer, opacity x MatDiffuse alpha.
         bool forwardLit = false;

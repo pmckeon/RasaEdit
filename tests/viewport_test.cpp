@@ -2,10 +2,12 @@
 // target and writes the frame as raw RGBA. Runs on any Vulkan driver, including Mesa's lavapipe.
 //   viewport_test <game root> <game.zip> <map> <out.rgba> <width> <height> <eye x y z> <target x y z>
 #include "Avatar.h"
+#include <algorithm>
 #include "SceneView.h"
 #include "gamedata.h"
 #include "WorldDatabase.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -161,6 +163,36 @@ int main(int argc, char** argv) {
                 }
             }
             for (const auto& n : byName) std::printf("zero-colour summary: %4zu  %s\n", n.second, n.first.c_str());
+        }
+        // RASA_PARAMSCAN=<effect prefix>: value counts of every material parameter of pieces whose effect starts with the
+        // prefix (lower case, e.g. "trdiff"), over every model; texture names are summarised as "<texture>".
+        if (const char* prefix = envValue("RASA_PARAMSCAN")) {
+            std::map<std::string, std::map<std::string, size_t>> counts;     // "effect | key" -> value -> pieces
+            for (const std::string& name : assets.namesWithExtension(".geo")) {
+                tr::GeoModel geo;
+                try {
+                    geo = tr::readGeo(assets.read(name));
+                } catch (const std::exception&) {
+                    continue;
+                }
+                for (const tr::GeoPiece& piece : geo.pieces) {
+                    const std::string effect = tr::toLowerAscii(piece.effectName);
+                    if (effect.rfind(prefix, 0) != 0) continue;
+                    for (const tr::GeoParameter& gp : piece.parameters) {
+                        const bool isTexture = gp.key.size() > 7 && gp.key.compare(gp.key.size() - 7, 7, "Texture") == 0;
+                        ++counts[effect + " | " + gp.key][isTexture ? (gp.value.empty() ? "<none>" : "<texture>") : gp.value];
+                    }
+                }
+            }
+            for (const auto& c : counts) {
+                std::vector<std::pair<size_t, std::string>> values;
+                for (const auto& v : c.second) values.emplace_back(v.second, v.first);
+                std::sort(values.rbegin(), values.rend());
+                std::printf("%s:", c.first.c_str());
+                for (size_t k = 0; k < values.size() && k < 6; ++k) std::printf("  [%zu] %s", values[k].first, values[k].second.c_str());
+                if (values.size() > 6) std::printf("  (+%zu more)", values.size() - 6);
+                std::printf("\n");
+            }
         }
         // RASA_LISTPARTICLES=1: the map entities whose models carry particle systems, with their positions.
         if (envValue("RASA_LISTPARTICLES")) {

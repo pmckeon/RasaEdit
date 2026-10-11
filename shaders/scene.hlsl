@@ -42,7 +42,13 @@ cbuffer FragmentUniforms : register(b0, space3)
     float4 layers;            // x detail on UV set 1, y decal on UV set 1, z has detail, w has decal (aniso additive and
                               // forward-phase pieces)
     float4 material;          // x: 1 = normal map (t7, tangent frame), y: 1 = gloss map (t8: r spec power, g spec intensity,
-                              // b environment reflection), z: 1 = environment cube reflection (t9)
+                              // b environment reflection), z: 1 = environment cube reflection (t9), w: 1 = cut-out by normal-map alpha
+    // TR* deferred materials (TrMaterial in Renderer.h): slot 1 map in t2 on uv1, slot 2 map in t3 on uv2.
+    float4 trFlags;           // x slot 1 kind, y slot 2 kind (1 modifier, 2 detail, 3 decal), z environment mode, w bits (1 active,
+                              // 2 albedo x (2 vcol + emissive), 4 specular, 8 emissive glow)
+    float4 trSpecular;        // MatSpecular
+    float4 trEmissive;        // MatEmissive x 0.5
+    float4 trTransform[6];    // TexCoordTransform0..2: u row, v row
 };
 
 [[vk::combinedImageSampler]] Texture2D diffuseTexture : register(t0, space2);
@@ -75,6 +81,7 @@ struct VertexInput
     float2 uv1      : TEXCOORD4;
     float3 tangent  : TEXCOORD5;
     float3 binormal : TEXCOORD6;
+    float2 uv2      : TEXCOORD7;
 };
 
 struct VertexOutput
@@ -87,6 +94,7 @@ struct VertexOutput
     float2 uv1      : TEXCOORD4;
     float3 tangent  : TEXCOORD5;
     float3 binormal : TEXCOORD6;
+    float2 uv2      : TEXCOORD7;
 };
 
 VertexOutput vsMain(VertexInput input)
@@ -101,6 +109,7 @@ VertexOutput vsMain(VertexInput input)
     output.uv = input.uv;
     output.world = world.xyz;
     output.uv1 = input.uv1;
+    output.uv2 = input.uv2;
     return output;
 }
 
@@ -124,6 +133,24 @@ float3 anisoAdditive(VertexOutput input)
     return max(4.0 * alpha * albedo * (albedo * input.colour.rgb + ramp * specular.rgb), 0.0);
 }
 
+// TexCoordTransform<slot> as the TR vertex shaders apply it (dp3 of (u, v, 1) with the matrix's first two rows; the
+// parameters are MATRIX_ROWS and the engine copies the material's 16 floats raw, FUN_005bd300).
+float2 trTransformUv(float2 uv, uint slot)
+{
+    const float3 h = float3(uv, 1.0);
+    return float2(dot(h, trTransform[slot * 2].xyz), dot(h, trTransform[slot * 2 + 1].xyz));
+}
+
+// One TR map slot applied to the albedo: 1 modifier (second diffuse, lerp by vertex alpha), 2 detail (+ map - 0.5),
+// 3 decal (lerp by the map's alpha).
+float3 trApplySlot(float3 albedo, uint kind, float4 map, float vertexAlpha)
+{
+    if (kind == 1) return lerp(albedo, map.rgb, vertexAlpha);
+    if (kind == 2) return albedo + map.rgb - 0.5;
+    if (kind == 3) return lerp(albedo, map.rgb, map.a);
+    return albedo;
+}
+
 float4 psMain(VertexOutput input) : SV_Target0
 {
     const bool particle = options.y > 0.5 && options.y < 1.5;
@@ -134,9 +161,13 @@ float4 psMain(VertexOutput input) : SV_Target0
         const float3 colour = applyFog(anisoAdditive(input), length(cameraPosition.xyz - input.world), float4(0, 0, 0, fogColour.w), fogRange);
         return float4(colour, 1.0);
     }
-    const float4 texel = diffuseTexture.Sample(diffuseSampler, input.uv);
+    const uint trBits = (uint)trFlags.w;
+    const float2 uv0 = (trBits & 0x1) ? trTransformUv(input.uv, 0) : input.uv;
+    const float4 texel = diffuseTexture.Sample(diffuseSampler, uv0);
     if (options.x > 0.0 && texel.a < options.x)
         discard;
+    if (material.w > 0.5 && normalMapTexture.Sample(normalMapSampler, input.uv).a < 0.5)
+        discard;                                // TRHair (ps2x_BaseDeferredAlphaTestNoParallaxHue: texkill(normal.a - 0.5))
     // Hued textures (avatar skin, hair, clothing) are grey with the hue mask in alpha; the game's fallback
     // shader computes diffuse.rgb + Hue.rgb * diffuse.a (decal maps not applied here).
     // The engine stores a HueColor-annotated parameter as colour - 0.5 (effect parameter setter FUN_005bd040), so grey 0.5
@@ -202,6 +233,28 @@ float4 psMain(VertexOutput input) : SV_Target0
         const float3 env = environmentTexture.SampleBias(environmentSampler, r, 3.0 - 4.0 * sqrt(gloss.r)).rgb;
         base.rgb = lerp(base.rgb, env, gloss.b);
     }
+    // TR* deferred materials (effects.glm G-buffer pixel shaders): diffuse, then a modifier (slot 1), detail and decal maps in
+    // slot order, the environment cube (EnvMapSampler = gGlobalEnvTexture, reflect(-V, N) per vertex, no bias) by
+    // detail.a or diffuse.a x MatSpecular.z, then x vertex colour x 2 (+ MatEmissive x 0.5 for DetMapDecMap).
+    float trGloss = 1.0;
+    if (trBits & 0x1)
+    {
+        const float4 map1 = detailTexture.Sample(detailSampler, trTransformUv(input.uv1, 1));
+        const float4 map2 = decalTexture.Sample(decalSampler, trTransformUv(input.uv2, 2));
+        const uint kind1 = (uint)trFlags.x, kind2 = (uint)trFlags.y, envMode = (uint)trFlags.z;
+        const float4 detail = kind1 == 2 ? map1 : map2;
+        float3 a = trApplySlot(albedo, kind1 == 3 ? 0 : kind1, map1, input.colour.a);
+        a = trApplySlot(a, kind2 == 3 ? 0 : kind2, map2, input.colour.a);
+        const float3 env = envMode != 0 ? environmentTexture.Sample(environmentSampler, reflect(-normalize(view), n)).rgb : float3(0, 0, 0);
+        if (envMode == 1) a = lerp(a, env, detail.a * trSpecular.z);
+        if (kind1 == 3) a = trApplySlot(a, 3, map1, input.colour.a);
+        if (kind2 == 3) a = trApplySlot(a, 3, map2, input.colour.a);
+        if (envMode == 2) a = lerp(a, env, detail.a * trSpecular.z);
+        if (envMode == 3) a = lerp(a, env, texel.a * trSpecular.z);
+        trGloss = envMode == 1 || envMode == 2 ? detail.a : envMode == 3 ? texel.a : 1.0;
+        const float3 scale = (trBits & 0x2) ? input.colour.rgb * tint.rgb + trEmissive.rgb * tint.rgb * 0.5 : input.colour.rgb * tint.rgb;
+        base.rgb = a * scale;
+    }
     SkyLighting s;
     s.towardsLight = normalize(lightDirection.xyz);
     s.sunFront = sunFront.rgb;
@@ -209,7 +262,7 @@ float4 psMain(VertexOutput input) : SV_Target0
     s.hemiTop = hemiTop.rgb;
     s.hemiBottom = hemiBottom.rgb;
     // Glow maps add after lighting (the game's glow buffer, added in trhdrcomposite before fog).
-    const float3 glow = glowTexture.Sample(glowSampler, input.uv1).rgb;
+    const float3 glow = glowTexture.Sample(glowSampler, input.uv1).rgb + ((trBits & 0x8) ? trEmissive.rgb : float3(0, 0, 0));
     // Translucent draws are forward pieces: the game's forward vertex shader has no shadow term.
     s.sunVisibility = options.y > 1.5 ? 1.0 : sunShadow(shadowMap, shadowSampler, shadowMatrix, shadowParams, input.world, n);
     const float3 light = skyLight(n, s) + localLights(input.world, n, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner, localRotation,
@@ -224,19 +277,23 @@ float4 psMain(VertexOutput input) : SV_Target0
             return float4(n * 0.5 + 0.5, 1.0);
         if (fogRange.w > 3.5)
             return float4(saturate(base.rgb), 1.0);   // G-buffer albedo (8-bit target: clamped - UNVERIFIED format)
-        return float4((material.y > 0.5 ? glossTexture.Sample(glossSampler, input.uv).g : 0.0).xxx, 1.0);
+        const float specIntensity = material.y > 0.5 ? glossTexture.Sample(glossSampler, input.uv).g : (trBits & 0x4) ? trSpecular.y * trGloss : 0.0;
+        return float4(specIntensity.xxx, 1.0);
     }
     float3 lit = base.rgb * light + glow;
     // Specular (gloss map r = power, g = intensity), added untinted as trhdrcomposite adds its specular buffer.
-    if (material.y > 0.5)
+    // TR materials: spec power = saturate(MatSpecular.x), intensity = MatSpecular.y (x detail.a / diffuse.a for the gloss
+    // variants), from their vertex shaders (oT5 / oT7 = MatSpecular.x x 255, MatSpecular.y; the pixel shader clamps and / 255).
+    if (material.y > 0.5 || (trBits & 0x4))
     {
-        const float4 gloss = glossTexture.Sample(glossSampler, input.uv);
+        const float4 gloss = material.y > 0.5 ? glossTexture.Sample(glossSampler, input.uv)
+                                              : float4(saturate(trSpecular.x), trSpecular.y * trGloss, 0, 0);
         const float3 v = normalize(view);
         lit += sunFront.rgb * specularFactor(n, v, s.towardsLight, gloss.r, gloss.g) * s.sunVisibility +
                localSpecular(input.world, n, v, gloss.r, gloss.g, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner);
     }
     // Alpha: only translucent draws blend with it. Opaque draws keep it 1 - the viewport image is composited with alpha.
-    return float4(applyFog(lit, length(view), fogColour, fogRange), options.y > 1.5 ? base.a * texel.a : base.a);
+    return float4(applyFog(lit, length(view), fogColour, fogRange), options.y > 1.5 ? base.a * texel.a : 1.0);
 }
 
 // Shadow pass: depth only; alpha-tested pieces (foliage) discard like the colour pass.

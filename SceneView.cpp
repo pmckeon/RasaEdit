@@ -4,6 +4,8 @@
 #include "MarkerColours.h"
 
 #include <algorithm>
+#include <cstring>
+#include <sstream>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -191,6 +193,55 @@ std::vector<Mat4> skinMatrices(const tr::GeoModel& geo, const tr::Animation& ani
 Vec4f hueFromAbgr(uint32_t colour) {
     if (colour == 0) return Vec4f{0, 0, 0, 0};
     return Vec4f{float(colour & 0xFF) / 255.0f, float((colour >> 8) & 0xFF) / 255.0f, float((colour >> 16) & 0xFF) / 255.0f, 1.0f};
+}
+
+// TR* deferred effects (G-buffer pixel / vertex shaders in effects.glm, disassembled 2026-10-11): which material
+// parameters fill map slots 1 and 2, what each slot does, the environment mode and flag bits (see TrMaterial).
+struct TrDescription {
+    bool known = false;
+    const char* slot1 = nullptr;      // texture parameter of slot 1
+    const char* slot1Uv = nullptr;    // its UV-set parameter
+    int kind1 = 0;                    // 1 modifier, 2 detail, 3 decal
+    const char* slot2 = nullptr;
+    const char* slot2Uv = nullptr;
+    int kind2 = 0;
+    int envMode = 0;                  // 1 by detail.a before the decal, 2 after it, 3 by diffuse.a
+    int bits = 0;                     // 2 albedo x (2 vcol + emissive), 4 specular, 8 emissive glow
+};
+
+TrDescription trDescription(const std::string& effect) {
+    auto is = [&](const char* name) { return effect.rfind(name, 0) == 0 && effect.size() > std::strlen(name) && effect[std::strlen(name)] == '.'; };
+    TrDescription d;
+    d.known = true;
+    if (is("trdiffmapdetglossmapenvmapdecmapvertcolor") || is("trdiffmapdetglossmapdecmapenvmapvertcolor")) {
+        d.slot1 = "DetailTexture"; d.slot1Uv = "DetailTexCoord"; d.kind1 = 2;
+        d.slot2 = "DecalTexture"; d.slot2Uv = "DecalTexCoord"; d.kind2 = 3;
+        d.envMode = is("trdiffmapdetglossmapenvmapdecmapvertcolor") ? 1 : 2;
+        d.bits = 0x4;
+    } else if (is("trdiffmapdiffmapdecmapvertcolor") || is("trdiffmapdiffmapdetmapvertcolor")) {
+        const bool decal = is("trdiffmapdiffmapdecmapvertcolor");
+        d.slot1 = "ModifierTexture"; d.slot1Uv = "ModifierTexCoord"; d.kind1 = 1;
+        d.slot2 = decal ? "DecalTexture" : "DetailTexture"; d.slot2Uv = decal ? "DecalTexCoord" : "DetailTexCoord"; d.kind2 = decal ? 3 : 2;
+        d.bits = 0x4 | 0x8;
+    } else if (is("trdiffmapdetmapdecmapvertcolor")) {
+        d.slot1 = "DetailTexture"; d.slot1Uv = "DetailTexCoord"; d.kind1 = 2;
+        d.slot2 = "DecalTexture"; d.slot2Uv = "DecalTexCoord"; d.kind2 = 3;
+        d.bits = 0x2;                                        // no specular (oC1 = 0, 0, 0, 1)
+    } else if (is("trdiffmapdecmapvertcolor")) {
+        d.slot1 = "DecalTexture"; d.slot1Uv = "DecalTexCoord"; d.kind1 = 3;
+        d.bits = 0x4;
+    } else if (is("trdiffmapdetmapvertcolor")) {
+        d.slot1 = "DetailTexture"; d.slot1Uv = "DetailTexCoord"; d.kind1 = 2;
+        d.bits = 0x4;
+    } else if (is("trdiffglossmapenvmapvertcolor")) {
+        d.envMode = 3;
+        d.bits = 0x4;
+    } else if (is("trdiffmapvertcolor") || is("trdiffmapglowmapvertcolor") || is("trdiffmapglowmaphuevertcolor")) {
+        d.bits = 0x4;                                        // diffuse (and glow map) only; specular from MatSpecular
+    } else {
+        d.known = false;
+    }
+    return d;
 }
 
 // A map entity's hue1 as SetHue takes it (bytes / 255); (0, 0, 0, 255) is the client's "not set" value (w = 0).
@@ -987,8 +1038,22 @@ void SceneView::loadModel(const std::string& name, Model& model) {
             // 2 x (diffuse + (Hue - 0.5) x diffuse.a) x vertex colour, like the VertColor effects; their vertex colours are
             // 128 on avatars (x 1). Checked against in-game /dl_showdiffuse at McAllister. Their forward (translucent /
             // additive phase) shaders are not decoded and keep x 1 without vertex colour.
-            const bool palDeferred = pal && effect.rfind("paldiffmap", 0) != 0 && !additive && !translucent;
-            if (pal) glowUvSet = 0;
+            // TRHair (ps2x_BaseDeferredAlphaTestNoParallaxHue, disassembled 2026-10-11) is the Pal hued normal/gloss/env shader
+            // with a cut-out on the normal map's alpha.
+            const bool hair = effect.rfind("trhair", 0) == 0 && !additive && !translucent;
+            const bool palDeferred = (pal && effect.rfind("paldiffmap", 0) != 0 && !additive && !translucent) || hair;
+            if (pal || hair) glowUvSet = 0;
+            // TR* deferred materials (stage 3): which maps fill slots 1 and 2, and their UV sets (vertex shader array element =
+            // the *TexCoord parameters, e.g. vsDiffDetDecEnvDeferredArray[DetailTexCoord x 3 + DecalTexCoord]).
+            const TrDescription trDesc = (!additive && !translucent && !water) ? trDescription(effect) : TrDescription{};
+            auto parameterInt = [&](const char* key, int fallback) {
+                for (const tr::GeoParameter& gp : piece.parameters)
+                    if (gp.key == key) return std::atoi(gp.value.c_str());
+                return fallback;
+            };
+            const int uvSet1 = trDesc.slot1Uv ? parameterInt(trDesc.slot1Uv, 0) : 0;
+            const int uvSet2 = trDesc.slot2Uv ? parameterInt(trDesc.slot2Uv, 0) : 0;
+            auto uvOfSet = [](const tr::GeoVertex& gv, int set) { return set == 2 ? gv.uv2 : set == 1 ? gv.uv1 : gv.uv; };
             // Static pieces attached to a bone are moved by it (as in the OBJ exporter).
             const tr::GeoBone* bone = nullptr;
             if (!piece.skinned && !piece.boneName.empty())
@@ -1047,12 +1112,18 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 v.tangentX = tangent.x; v.tangentY = tangent.y; v.tangentZ = tangent.z;
                 v.binormalX = binormal.x; v.binormalY = binormal.y; v.binormalZ = binormal.z;
                 v.colour = vertexColour || palDeferred ? packColour(uint8_t(gv.colour >> 16), uint8_t(gv.colour >> 8), uint8_t(gv.colour),     // ARGB
-                                                     additive || translucent ? uint8_t(gv.colour >> 24) : 255)
+                                                     additive || translucent || trDesc.kind1 == 1 ? uint8_t(gv.colour >> 24) : 255)
                                         : packColour(255, 255, 255, 255);
                 v.texU = gv.uv.x;
                 v.texV = gv.uv.y;
                 v.texU1 = glowUvSet == 0 ? gv.uv.x : gv.uv1.x;
                 v.texV1 = glowUvSet == 0 ? gv.uv.y : gv.uv1.y;
+                if (trDesc.slot1) {
+                    v.texU1 = uvOfSet(gv, uvSet1).x;
+                    v.texV1 = uvOfSet(gv, uvSet1).y;
+                }
+                v.texU2 = uvOfSet(gv, uvSet2).x;
+                v.texV2 = uvOfSet(gv, uvSet2).y;
                 vertices.push_back(v);
             }
             if (!vertices.empty() && piece.indices.size() >= 3) {
@@ -1076,6 +1147,50 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 part.colourScale = vertexColour || palDeferred ? 2.0f : 1.0f;
                 part.environment = palDeferred && effect.find("env") != std::string::npos;
                 part.hueUnweighted = effect.rfind("paldiffalpha", 0) == 0 && part.hued;
+                part.hairCutout = hair;
+                if (trDesc.known) {
+                    TrMaterial& m = part.trMaterial;
+                    m.active = true;
+                    auto textureOf = [&](const char* key) -> SDL_GPUTexture* {
+                        for (const tr::GeoParameter& gp : piece.parameters)
+                            if (gp.key == key) return texture(gp.value);
+                        return nullptr;
+                    };
+                    if (trDesc.slot1) m.slot1 = textureOf(trDesc.slot1);
+                    if (trDesc.slot2) m.slot2 = textureOf(trDesc.slot2);
+                    // A slot whose map is missing is left out (no texture to apply).
+                    m.flags = Vec4f{m.slot1 ? float(trDesc.kind1) : 0.0f, m.slot2 ? float(trDesc.kind2) : 0.0f, float(trDesc.envMode),
+                                    float(trDesc.bits)};
+                    if (trDesc.envMode == 1 || trDesc.envMode == 2) {
+                        if (!(trDesc.kind1 == 2 ? m.slot1 : m.slot2)) m.flags.z = 0;     // gloss comes from the detail map
+                    }
+                    for (const tr::GeoParameter& gp : piece.parameters) {
+                        if (gp.key == "MatSpecular") m.specular = parseColour(gp.value);
+                        if (gp.key == "MatEmissive") {
+                            const Vec4f e = parseColour(gp.value);
+                            m.emissive = Vec4f{e.x * 0.5f, e.y * 0.5f, e.z * 0.5f, e.w};       // x gModulateScale (FUN_005bd040)
+                        }
+                    }
+                    // TRDiffGlossMapEnvMapVertColor's vertex shader array: element 0 (TextureTransformFlags0 = 0) passes the UVs
+                    // untransformed.
+                    const bool transforms = effect.rfind("trdiffglossmapenvmapvertcolor", 0) != 0 || parameterInt("TextureTransformFlags0", 0) != 0;
+                    if (transforms)
+                        for (const tr::GeoParameter& gp : piece.parameters) {
+                            for (int slot = 0; slot < 3; ++slot) {
+                                if (gp.key != "TexCoordTransform" + std::to_string(slot)) continue;
+                                float e[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+                                std::istringstream values(gp.value);
+                                for (float& x : e) values >> x;
+                                const Vec4f u{e[0], e[1], e[2], 0}, v{e[4], e[5], e[6], 0};
+                                if (slot == 0) { m.transform0u = u; m.transform0v = v; }
+                                if (slot == 1) { m.transform1u = u; m.transform1v = v; }
+                                if (slot == 2) { m.transform2u = u; m.transform2v = v; }
+                            }
+                        }
+                }
+                // Alpha cut-out thresholds of the TR pixel shader arrays' AlphaTestEnable elements (2a - 0.9 < 0 kills below 0.45).
+                if (part.alphaTest && (effect.rfind("trdiffmapvertcolor.", 0) == 0 || effect.rfind("trdiffmapdetmapdecmapvertcolor", 0) == 0))
+                    part.alphaReference = 0.45f;
                 for (const tr::GeoParameter& gp : piece.parameters)
                     if (gp.key == "Hue") {
                         float h[4] = {0, 0, 0, 0};
@@ -1087,7 +1202,7 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 part.swapId = piece.swapId;
                 part.additive = additive;
                 part.translucent = translucent;
-                if (pal && !water)
+                if ((pal || hair) && !water)
                     for (const tr::GeoParameter& gp : piece.parameters) {
                         if (gp.key == "NormalMapTexture") part.normalMap = texture(gp.value);
                         if (gp.key == "GlossMapTexture") part.glossMap = texture(gp.value);
@@ -1331,7 +1446,9 @@ void SceneView::queueDraws(const Selection& selection) {
                         renderer_.draw(piece.mesh, p.world, scaledTint(tint, piece.colourScale), true, showTextures ? piece.texture : nullptr, showTextures && piece.alphaTest,
                                         hue, showTextures ? piece.glow : nullptr, piece.twoSided, piece.alphaReference,
                                         showTextures && materialMaps ? piece.normalMap : nullptr, showTextures && materialMaps ? piece.glossMap : nullptr,
-                                        showTextures && materialMaps && piece.environment);
+                                        showTextures && materialMaps && piece.environment,
+                                        showTextures && materialMaps && piece.trMaterial.active ? &piece.trMaterial : nullptr,
+                                        showTextures && piece.hairCutout);
                     }
                 }
             } else if (p.model && p.model->loaded && p.model->effectOnly) {
@@ -1413,7 +1530,9 @@ void SceneView::queueDraws(const Selection& selection) {
                 renderer_.draw(piece.mesh, s.world, scaledTint(tint, piece.colourScale), true, showTextures ? piece.texture : nullptr, showTextures && piece.alphaTest, hue,
                                showTextures ? piece.glow : nullptr, piece.twoSided, piece.alphaReference,
                                showTextures && materialMaps ? piece.normalMap : nullptr, showTextures && materialMaps ? piece.glossMap : nullptr,
-                               showTextures && materialMaps && piece.environment);
+                               showTextures && materialMaps && piece.environment,
+                               showTextures && materialMaps && piece.trMaterial.active ? &piece.trMaterial : nullptr,
+                               showTextures && piece.hairCutout);
             };
             // Avatars: the base suit minus the swap sets replaced by loaded parts, then each part's swap set
             // from its suit (a part still loading, or failed, leaves the base pieces in place).

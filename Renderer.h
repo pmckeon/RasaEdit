@@ -14,7 +14,8 @@ struct MeshVertex {
     float normalX = 0, normalY = 0, normalZ = 0;
     uint32_t colour = 0xFFFFFFFF;
     float texU = 0, texV = 0;
-    float texU1 = 0, texV1 = 0;        // second UV set (glow maps)
+    float texU1 = 0, texV1 = 0;        // second UV set (glow maps; TR materials: the UV set of their second map)
+    float texU2 = 0, texV2 = 0;        // TR materials: the UV set of their third map
     float tangentX = 0, tangentY = 0, tangentZ = 0;     // normal maps: tangent frame (model space, like the normal)
     float binormalX = 0, binormalY = 0, binormalZ = 0;
 };
@@ -22,6 +23,25 @@ struct MeshVertex {
 inline uint32_t packColour(uint8_t red, uint8_t green, uint8_t blue, uint8_t alpha) {
     return uint32_t(red) | (uint32_t(green) << 8) | (uint32_t(blue) << 16) | (uint32_t(alpha) << 24);
 }
+
+// TR* deferred materials (effects.glm G-buffer shaders, disassembled 2026-10-11; see CLAUDE.md "Material maps, stage 3").
+// Map slots: 0 = DiffuseTexture on UV set 0, 1 = the second map (UV set from its *TexCoord parameter, baked into MeshVertex
+// texU1/V1), 2 = the third map (texU2/V2); each slot's UV goes through TexCoordTransform<slot>:
+// u' = dot((u, v, 1), transform<slot>u.xyz), v' = dot((u, v, 1), transform<slot>v.xyz).
+struct TrMaterial {
+    bool active = false;
+    SDL_GPUTexture* slot1 = nullptr;
+    SDL_GPUTexture* slot2 = nullptr;
+    // x: slot 1 kind, y: slot 2 kind (1 modifier: lerp by vertex alpha, 2 detail: + map - 0.5, 3 decal: lerp by map alpha);
+    // z: environment (1 = by detail.a before the decal, 2 = by detail.a after the decal, 3 = by diffuse.a);
+    // w: bits - 2 = albedo x (2 x vertex colour + emissive) (DetMapDecMap), 4 = specular, 8 = emissive is glow (DiffMapDiffMap*)
+    Vec4f flags = Vec4f{0, 0, 0, 0};
+    Vec4f specular = Vec4f{0, 0, 0, 0};   // MatSpecular: x spec power, y intensity, z environment amount
+    Vec4f emissive = Vec4f{0, 0, 0, 0};   // MatEmissive x gModulateScale (0.5)
+    Vec4f transform0u = Vec4f{1, 0, 0, 0}, transform0v = Vec4f{0, 1, 0, 0};
+    Vec4f transform1u = Vec4f{1, 0, 0, 0}, transform1v = Vec4f{0, 1, 0, 0};
+    Vec4f transform2u = Vec4f{1, 0, 0, 0}, transform2v = Vec4f{0, 1, 0, 0};
+};
 
 // Material of the game's TRAdditiveAnisoSpecMapDiffMap[DetMapDecMap]VertColor effects (shader in effects.glm, verified by disassembly):
 //   albedo = lerp(diffuse + detail - 0.5, decal, decal.a);  alpha = diffuse.a * vertex.a * MatDiffuse.a
@@ -119,7 +139,8 @@ public:
     // twoSided: no back-face culling for this draw (effects whose passes set CULLMODE = NONE, see SceneView).
     void draw(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, bool lit, SDL_GPUTexture* texture = nullptr, bool alphaTest = false,
               const Vec4f& hue = Vec4f{0, 0, 0, 0}, SDL_GPUTexture* glow = nullptr, bool twoSided = false, float alphaReference = 0.5f,
-              SDL_GPUTexture* normalMap = nullptr, SDL_GPUTexture* glossMap = nullptr, bool environment = false);
+              SDL_GPUTexture* normalMap = nullptr, SDL_GPUTexture* glossMap = nullptr, bool environment = false,
+              const TrMaterial* trMaterial = nullptr, bool hairCutout = false);
     // Back faces of opaque lit draws are culled when true, as in the game: PalGlobalEffect.fx sets CULLMODE = CCW and
     // is begun without state saving (D3DXFX_DONOTSAVESTATE), so it is the baseline; material effects leave it alone
     // except the few that set NONE. false draws everything two-sided (comparison / debugging).
@@ -175,6 +196,8 @@ private:
         SDL_GPUTexture* normalMap = nullptr;     // Pal* materials: normal map (tangent space) and gloss map
         SDL_GPUTexture* glossMap = nullptr;
         bool environment = false;                // Pal*Env* material: reflects the environment cube by gloss.b
+        TrMaterial tr;                           // TR* deferred material (tr.active)
+        bool trHairCutout = false;               // TRHair: kill where the normal map's alpha < 0.5
     };
     SDL_GPUShader* createShader(const unsigned char* dxil, size_t dxilSize, const unsigned char* spirv, size_t spirvSize,
                                 const char* entryPoint, SDL_GPUShaderStage stage, uint32_t samplers);
