@@ -123,6 +123,7 @@ Renderer::Renderer(SDL_GPUDevice* device) : device_(device) {
     culledTrianglePipeline_ = createPipeline(sceneVertex_, sceneFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST, 0, true);
     linePipeline_ = createPipeline(sceneVertex_, sceneFragment_, SDL_GPU_PRIMITIVETYPE_LINELIST);
     terrainPipeline_ = createPipeline(terrainVertex_, terrainFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST);
+    culledTerrainPipeline_ = createPipeline(terrainVertex_, terrainFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST, 0, true);
     translucentPipeline_ = createPipeline(sceneVertex_, sceneFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST, 1);
     additivePipeline_ = createPipeline(sceneVertex_, sceneFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST, 2);
     subtractivePipeline_ = createPipeline(sceneVertex_, sceneFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST, 3);
@@ -215,7 +216,7 @@ Renderer::~Renderer() {
     if (shadowFragment_) SDL_ReleaseGPUShader(device_, shadowFragment_);
     if (particleBuffer_) SDL_ReleaseGPUBuffer(device_, particleBuffer_);
     if (particleTransfer_) SDL_ReleaseGPUTransferBuffer(device_, particleTransfer_);
-    for (SDL_GPUGraphicsPipeline* p : {trianglePipeline_, culledTrianglePipeline_, linePipeline_, terrainPipeline_, translucentPipeline_, additivePipeline_, subtractivePipeline_})
+    for (SDL_GPUGraphicsPipeline* p : {trianglePipeline_, culledTrianglePipeline_, linePipeline_, terrainPipeline_, culledTerrainPipeline_, translucentPipeline_, additivePipeline_, subtractivePipeline_})
         if (p) SDL_ReleaseGPUGraphicsPipeline(device_, p);
     for (SDL_GPUShader* s : {sceneVertex_, sceneFragment_, terrainVertex_, terrainFragment_})
         if (s) SDL_ReleaseGPUShader(device_, s);
@@ -628,7 +629,9 @@ void Renderer::recordShadows(SDL_GPUCommandBuffer* commands) {
 }
 
 void Renderer::recordItem(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const DrawItem& item, SDL_GPUGraphicsPipeline*& bound) {
-    SDL_GPUGraphicsPipeline* pipeline = item.terrain ? terrainPipeline_ : item.additive ? additivePipeline_ : item.translucent ? translucentPipeline_
+    // Terrain: TRTerrainClient's deferred passes set no CULLMODE, so PalGlobalEffect's CCW baseline culls its back faces
+    // (seen from below, e.g. from Manhattan's subway, the game shows no terrain).
+    SDL_GPUGraphicsPipeline* pipeline = item.terrain ? (cullBackFaces ? culledTerrainPipeline_ : terrainPipeline_) : item.additive ? additivePipeline_ : item.translucent ? translucentPipeline_
                                         : item.mesh->lines ? linePipeline_ : cullBackFaces && item.lit && !item.twoSided ? culledTrianglePipeline_ : trianglePipeline_;
     if (pipeline != bound) {
         SDL_BindGPUGraphicsPipeline(pass, pipeline);

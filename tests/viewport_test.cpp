@@ -2,7 +2,6 @@
 // target and writes the frame as raw RGBA. Runs on any Vulkan driver, including Mesa's lavapipe.
 //   viewport_test <game root> <game.zip> <map> <out.rgba> <width> <height> <eye x y z> <target x y z>
 #include "Avatar.h"
-#include <algorithm>
 #include "SceneView.h"
 #include "gamedata.h"
 #include "WorldDatabase.h"
@@ -13,6 +12,7 @@
 #include <cstdlib>
 #include <map>
 #include <memory>
+#include <sstream>
 #include <string>
 
 // An environment variable's value, or nullptr when it is unset or empty (PowerShell leaves cleared variables empty).
@@ -164,6 +164,68 @@ int main(int argc, char** argv) {
             }
             for (const auto& n : byName) std::printf("zero-colour summary: %4zu  %s\n", n.second, n.first.c_str());
         }
+        // RASA_NEAR=x,z,radius: map entities within the radius (horizontal), with model, position and scale.
+        if (const char* near = envValue("RASA_NEAR")) {
+            float x = 0, z = 0, radius = 20;
+            std::sscanf(near, "%f,%f,%f", &x, &z, &radius);
+            for (size_t k = 0; k < map.map.entities.size(); ++k) {
+                const tr::MapEntity& e = map.map.entities[k];
+                const float dx = e.location.x - x, dz = e.location.z - z;
+                if (dx * dx + dz * dz > radius * radius) continue;
+                std::printf("near %zu %s at %.1f %.1f %.1f scale %.2f\n", k, data.classMeshName(e.classId).c_str(), e.location.x, e.location.y, e.location.z,
+                            e.scale);
+            }
+        }
+        // RASA_FINDFEATURES=1: map entities whose models use material features worth checking in game - TR texture transforms
+        // with an offset in the third row, TR environment reflection (MatSpecular.z > 0), modifier blending, decals on UV
+        // set 2, TRHair. One line per (feature, model) with the nearest-to-first entity position and the entity count.
+        if (envValue("RASA_FINDFEATURES")) {
+            std::map<std::string, tr::GeoModel> geos;
+            std::map<std::string, std::pair<size_t, tr::Vec3>> found;      // "feature | model | detail" -> count, first position
+            for (const tr::MapEntity& e : map.map.entities) {
+                const std::string mesh = tr::toLowerAscii(data.classMeshName(e.classId));
+                if (mesh.empty() || mesh == "default.geo") continue;
+                auto it = geos.find(mesh);
+                if (it == geos.end()) {
+                    tr::GeoModel geo;
+                    try { geo = tr::readGeo(assets.read(mesh)); } catch (const std::exception&) {}
+                    it = geos.emplace(mesh, std::move(geo)).first;
+                }
+                for (const tr::GeoPiece& piece : it->second.pieces) {
+                    const std::string effect = tr::toLowerAscii(piece.effectName);
+                    if (effect.rfind("tr", 0) != 0 || effect.find("additive") != std::string::npos) continue;
+                    std::string phase;
+                    for (const tr::GeoParameter& gp : piece.parameters)
+                        if (gp.key == "Phase") phase = tr::toLowerAscii(gp.value);
+                    if (phase == "additive" || phase == "translucent") continue;
+                    std::vector<std::string> features;
+                    for (const tr::GeoParameter& gp : piece.parameters) {
+                        if (gp.key.rfind("TexCoordTransform", 0) == 0) {
+                            float m[16] = {};
+                            std::istringstream values(gp.value);
+                            for (float& x : m) values >> x;
+                            if (m[8] != 0 || m[9] != 0) features.push_back("offset transform " + gp.key + " = " + gp.value);
+                        }
+                        if (gp.key == "MatSpecular" && effect.find("env") != std::string::npos) {
+                            float s[4] = {};
+                            std::istringstream values(gp.value);
+                            for (float& x : s) values >> x;
+                            if (s[2] > 0.2f) features.push_back("environment reflection, MatSpecular " + gp.value);
+                        }
+                        if (gp.key == "DecalTexCoord" && gp.value == "2") features.push_back("decal on UV set 2");
+                    }
+                    if (effect.find("diffmapdiffmap") != std::string::npos) features.push_back("modifier blend (second diffuse by vertex alpha)");
+                    if (effect.rfind("trhair", 0) == 0) features.push_back("hair cut-out");
+                    for (const std::string& f : features) {
+                        auto& slot = found[f.substr(0, f.find(',') == std::string::npos ? f.size() : f.size()) + " | " + mesh + " | " + piece.effectName];
+                        if (slot.first++ == 0) slot.second = e.location;
+                    }
+                }
+            }
+            for (const auto& f : found)
+                std::printf("feature %s | %zu entities, e.g. at %.1f %.1f %.1f\n", f.first.c_str(), f.second.first, f.second.second.x, f.second.second.y,
+                            f.second.second.z);
+        }
         // RASA_PARAMSCAN=<effect prefix>: value counts of every material parameter of pieces whose effect starts with the
         // prefix (lower case, e.g. "trdiff"), over every model; texture names are summarised as "<texture>".
         if (const char* prefix = envValue("RASA_PARAMSCAN")) {
@@ -252,6 +314,7 @@ int main(int argc, char** argv) {
         const tr::Vec3 to = subtract(tr::Vec3{float(std::atof(argv[10])), float(std::atof(argv[11])), float(std::atof(argv[12]))}, cam.position);
         cam.yaw = std::atan2(to.x, to.z);
         cam.pitch = std::atan2(to.y, std::sqrt(to.x * to.x + to.z * to.z));
+        if (const char* fov = envValue("RASA_FOV")) cam.fovY = float(std::atof(fov)) * 3.14159265f / 180.0f;   // vertical, degrees
         if (argc > 13) scene.showPlaceholders = false;
         if (!scene.skies().empty()) {
             const SceneLighting active = scene.lighting();
@@ -272,7 +335,11 @@ int main(int argc, char** argv) {
         for (float t = 0; t < particleSeconds; t += 1.0f / 30.0f) scene.advanceParticles(1.0f / 30.0f);
         std::printf("particle systems running: %zu, %zu particles\n", scene.liveParticleSystems(), scene.liveParticles());
         for (const auto& e : scene.textureErrors()) std::printf("texture error: %s: %s\n", e.first.c_str(), e.second.c_str());
-        scene.queueDraws(Selection{});
+        // RASA_SELECT=<map entity index>: draw that entity highlighted, as the editor shows a selection.
+        Selection highlighted{};
+        if (const char* only = envValue("RASA_ONLY")) scene.onlyEntity = std::atoi(only);   // draw one map entity alone
+        if (const char* sel = envValue("RASA_SELECT")) highlighted = Selection{SelectionKind::MapEntity, size_t(std::atoi(sel))};
+        scene.queueDraws(highlighted);
         std::printf("draws queued: %zu (entities drawn %zu), particle vertices %zu\n", renderer.queuedDraws(), scene.drawnEntities(), renderer.queuedParticleVertices());
         std::printf("terrain chunks: %zu, %zu at full detail\n", scene.terrainChunkCount(), scene.terrainChunksAtFullDetail());
         {

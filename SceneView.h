@@ -156,7 +156,8 @@ public:
     int debugView = 0;                      // 2: normals, 3: specular intensity, 4: albedo (the game's /dl_shownormals,
                                             // /dl_showspecintensity, /dl_showdiffuse)
     bool materialMaps = true;               // normal and gloss maps (Pal* materials); off for comparison
-    bool environmentMaps = true;            // environment cube reflections (Pal*Env*); off for comparison
+    bool environmentMaps = true;
+    int onlyEntity = -1;                    // debug: draw only this map entity (-1 = all)            // environment cube reflections (Pal*Env*); off for comparison
     std::unordered_map<std::string, int> globeIndex_;    // lower-case GlobeMapFile -> cube index (1-based; 0 = none)
     std::string globeErrors_;
     void loadGlobeMaps();

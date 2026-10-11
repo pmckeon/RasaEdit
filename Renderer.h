@@ -27,7 +27,7 @@ inline uint32_t packColour(uint8_t red, uint8_t green, uint8_t blue, uint8_t alp
 // TR* deferred materials (effects.glm G-buffer shaders, disassembled 2026-10-11; see CLAUDE.md "Material maps, stage 3").
 // Map slots: 0 = DiffuseTexture on UV set 0, 1 = the second map (UV set from its *TexCoord parameter, baked into MeshVertex
 // texU1/V1), 2 = the third map (texU2/V2); each slot's UV goes through TexCoordTransform<slot>:
-// u' = dot((u, v, 1), transform<slot>u.xyz), v' = dot((u, v, 1), transform<slot>v.xyz).
+// u' = dot((u, v, 1), transform<slot>u.xyz), v' = dot((u, v, 1), transform<slot>v.xyz), u = (e0, e4, e8), v = (e1, e5, e9).
 struct TrMaterial {
     bool active = false;
     SDL_GPUTexture* slot1 = nullptr;
@@ -214,6 +214,7 @@ private:
     SDL_GPUGraphicsPipeline* culledTrianglePipeline_ = nullptr;   // back faces culled
     SDL_GPUGraphicsPipeline* linePipeline_ = nullptr;
     SDL_GPUGraphicsPipeline* terrainPipeline_ = nullptr;
+    SDL_GPUGraphicsPipeline* culledTerrainPipeline_ = nullptr;   // back faces culled
     SDL_GPUGraphicsPipeline* translucentPipeline_ = nullptr;
     SDL_GPUGraphicsPipeline* additivePipeline_ = nullptr;
     SDL_GPUGraphicsPipeline* subtractivePipeline_ = nullptr;   // particles: destination - source

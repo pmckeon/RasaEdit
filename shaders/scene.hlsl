@@ -133,8 +133,8 @@ float3 anisoAdditive(VertexOutput input)
     return max(4.0 * alpha * albedo * (albedo * input.colour.rgb + ramp * specular.rgb), 0.0);
 }
 
-// TexCoordTransform<slot> as the TR vertex shaders apply it (dp3 of (u, v, 1) with the matrix's first two rows; the
-// parameters are MATRIX_ROWS and the engine copies the material's 16 floats raw, FUN_005bd300).
+// TexCoordTransform<slot> as the TR vertex shaders apply it: dp3 of (u, v, 1) with the matrix's first two columns (the
+// shader constant is MATRIX_COLUMNS; SceneView passes (e0, e4, e8) and (e1, e5, e9) of the stored 16 floats).
 float2 trTransformUv(float2 uv, uint slot)
 {
     const float3 h = float3(uv, 1.0);

@@ -1181,7 +1181,10 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                                 float e[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
                                 std::istringstream values(gp.value);
                                 for (float& x : e) values >> x;
-                                const Vec4f u{e[0], e[1], e[2], 0}, v{e[4], e[5], e[6], 0};
+                                // The vertex shaders' constant table declares TexCoordTransform<n> MATRIX_COLUMNS (class 3), so D3DX
+                                // uploads the row-major parameter transposed: c = column 0 (e0, e4, e8), column 1 (e1, e5, e9) -
+                                // u' = e0 u + e4 v + e8, v' = e1 u + e5 v + e9 (the D3D texture-matrix convention, offsets in e8 / e9).
+                                const Vec4f u{e[0], e[4], e[8], 0}, v{e[1], e[5], e[9], 0};
                                 if (slot == 0) { m.transform0u = u; m.transform0v = v; }
                                 if (slot == 1) { m.transform1u = u; m.transform1v = v; }
                                 if (slot == 2) { m.transform2u = u; m.transform2v = v; }
@@ -1423,6 +1426,7 @@ void SceneView::queueDraws(const Selection& selection) {
         const float maxDistance2 = drawDistance * drawDistance;
         for (size_t k = 0; k < placements_.size(); ++k) {
             const Placement& p = placements_[k];
+            if (onlyEntity >= 0 && int(k) != onlyEntity) continue;
             const tr::Vec3 d = subtract(p.centre, camera_.position);
             if (dot(d, d) > maxDistance2 + p.radius * p.radius * 4 && int(k) != selectedEntity) continue;
             if (!visible(p.centre, p.radius)) continue;
