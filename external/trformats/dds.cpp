@@ -103,8 +103,26 @@ DdsHeader readDdsHeader(const Bytes& file) {
     header.greenMask = read32(h + 92);
     header.blueMask = read32(h + 96);
     header.alphaMask = read32(h + 100);
+    if ((read32(h + 108) & 0x200000) != 0 && read32(h + 20) > 1) header.depth = read32(h + 20);   // caps2 DDSCAPS2_VOLUME, dwDepth
     if (header.width == 0 || header.height == 0 || header.width > 16384 || header.height > 16384) throw FormatError("DDS: bad size");
     return header;
+}
+
+std::vector<Rgba8> decodeDdsVolume(const Bytes& file, DdsHeader& header) {
+    header = readDdsHeader(file);
+    const uint32_t depth = header.depth;
+    if (depth > 1 && (ddsIsDxt1(header) || ddsIsDxt3(header) || ddsIsDxt5(header)) && header.height % 4 != 0)
+        throw FormatError("DDS volume: slice height not a multiple of 4");
+    if (size_t(header.height) * depth > 16384) throw FormatError("DDS volume: too many slices");
+    Bytes stacked = file;                                    // the same bytes read as one image depth x as tall
+    const uint32_t height = header.height * depth;
+    stacked[4 + 8] = uint8_t(height);
+    stacked[4 + 9] = uint8_t(height >> 8);
+    stacked[4 + 10] = uint8_t(height >> 16);
+    stacked[4 + 11] = uint8_t(height >> 24);
+    DdsHeader flat;
+    std::vector<Rgba8> pixels = decodeDds(stacked, flat);
+    return pixels;
 }
 
 std::vector<Rgba8> decodeDds(const Bytes& file, DdsHeader& header) {

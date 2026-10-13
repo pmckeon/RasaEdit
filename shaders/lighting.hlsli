@@ -38,7 +38,7 @@ float3 skyLight(float3 n, SkyLighting s)
     return hemi + saturate(ndl) * (s.sunFront * s.sunVisibility - s.sunBack);
 }
 
-// Placed lights (the map's lights.xml), up to 16 per frame, nearest the camera first. Formulas from the game's
+// Placed lights (the map's lights.xml), up to 32 per frame, nearest the camera first. Formulas from the game's
 // deferred passes (effects.glm trpointlight / trspotlight, verified 2026-10-10):
 //   point: colour * intensity * saturate(N.L) * (1 - clamp((d - start) / (end - start), 0, 1)),
 //          start = min(LightFalloff, 0.970225 range), end = 0.985 range
@@ -46,24 +46,35 @@ float3 skyLight(float3 n, SkyLighting s)
 //          1 inside cos(cone), linear to 0 at cos(penumbra)
 // position: xyz, w range; colour: rgb * intensity, w fade start distance; spot: xyz axis, w cos(penumbra) or -2 for a
 // point light; spotInner: x cos(cone).
-#define MAX_LOCAL_LIGHTS 16
+#define MAX_LOCAL_LIGHTS 32
 
 // Sun shadow: 3x3 filtered comparisons in the sun's depth map, offset along the normal against acne; outside the map
 // (beyond the area around the camera) everything is lit. params: x on, y opacity (the game lets part of the sun through),
 // z 1 / map size.
-float sunShadow(Texture2D<float> map, SamplerComparisonState cmp, float4x4 m, float4 params, float3 world, float3 n)
+// The game's TRDirLight shadow test (ps3dir[1], effects.glm, disassembled 2026-10-14), orthographic sun map:
+//   reference = shadow-view z - clamp(0.02 x camera view depth, 0.065, 3) (metres, no normal offset); an empty texel counts
+//   as far; five manual 2 x 2 bilinear PCF taps - the centre and (+-s, +-s), s = 1/2 texel x g_ShadowSoftness - weighted 0.2;
+//   within 15 % of the map's edge the result fades to lit (x 6.66666); outside the map or its depth range: lit;
+//   visibility = 1 - g_ShadowOpacity x (1 - lit). The comparison sampler is LINEAR, so each SampleCmp is that 2 x 2 tap.
+float sunShadow(Texture2D<float> map, SamplerComparisonState cmp, float4x4 m, float4 params, float4 extra, float3 eye, float3 world, float3 n)
 {
     if (params.x < 0.5)
         return 1.0;
-    const float4 p = mul(m, float4(world + n * 0.08, 1.0));
+    const float4 p = mul(m, float4(world, 1.0));
     const float2 uv = float2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
-    if (any(uv < 0.0) || any(uv > 1.0) || p.z > 1.0)
+    if (any(uv < 0.0) || any(uv > 1.0) || p.z < 0.0 || p.z > 1.0)
         return 1.0;
-    float lit = 0.0;
-    [unroll] for (int y = -1; y <= 1; ++y)
-        [unroll] for (int x = -1; x <= 1; ++x)
-            lit += map.SampleCmpLevelZero(cmp, uv + float2(x, y) * params.z, p.z - 0.0005);
-    return lerp(1.0, lit / 9.0, params.y);
+    const float viewDepth = dot(world - eye, extra.xyz);
+    const float reference = max(p.z - clamp(0.02 * viewDepth, 0.065, 3.0) * extra.w, 0.0);
+    const float s = 0.5 * params.z * params.w;
+    float lit = map.SampleCmpLevelZero(cmp, uv + float2(-s, s), reference) + map.SampleCmpLevelZero(cmp, uv + float2(s, s), reference) +
+                map.SampleCmpLevelZero(cmp, uv + float2(s, -s), reference) + map.SampleCmpLevelZero(cmp, uv + float2(-s, -s), reference) +
+                map.SampleCmpLevelZero(cmp, uv, reference);
+    lit *= 0.2;
+    const float edge = min(min(uv.x, uv.y), 1.0 - max(uv.x, uv.y));
+    if (edge < 0.15)
+        lit = saturate(lerp(1.0, lit, edge * 6.66665983));
+    return 1.0 - params.y * (1.0 - lit);
 }
 
 // q^-1 v for a unit quaternion q (x y z w).
@@ -155,6 +166,22 @@ float specularFactor(float3 n, float3 v, float3 l, float sp, float i)
     const float exponent = 8.0 + 245.0 * sp2 * (1.0 - edge);
     const float ndh = dot(n, normalize(v + l));
     return ndh > 0.0 ? scale * pow(ndh, exponent) : 0.0;
+}
+
+// The hemi light's specular (TRHemiLight pass, disassembled from an apitrace capture 2026-10-14; Use_Specular was 1): a sky
+// reflection lobe of TopColor, written to the specular buffer:
+//   scale = min(i (0.865019 sp^2 + 0.35) + i sat(1 - N.V)^2, 1.25);  e = 8 + 245 sp^2 (1 - sat(1 - N.V));
+//   spec = TopColor scale ((R.y / |R| + 1) / 2)^(0.2 e + 5), R = reflect(-V, N); nothing where sp = 0.
+float3 hemiSpecular(float3 n, float3 v, float sp, float i, float3 top)
+{
+    const float sp2 = sp * sp;
+    if (sp2 <= 0.0)
+        return float3(0, 0, 0);
+    const float edge = saturate(1.0 - dot(n, v));
+    const float scale = min(i * (0.865018964 * sp2 + 0.35) + i * edge * edge, 1.25);
+    const float exponent = 8.0 + 245.0 * sp2 * (1.0 - edge);
+    const float3 r = reflect(-v, n);
+    return top * scale * pow((r.y / max(length(r), 1e-6) + 1.0) * 0.5, exponent * 0.2 + 5.0);
 }
 
 // Placed lights' specular: the same fade and cone as localLights (globe maps not applied to the specular - UNVERIFIED).

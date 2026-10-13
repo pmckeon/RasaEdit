@@ -13,6 +13,7 @@ struct Region {
     uint32_t width = 0;
     uint32_t height = 0;
     size_t offset = 0;                 // into the staging blob
+    uint32_t depth = 1;                // 3D textures: slices
 };
 
 [[noreturn]] void fail(const char* what) { throw std::runtime_error(std::string(what) + ": " + SDL_GetError()); }
@@ -56,7 +57,7 @@ void uploadRegions(SDL_GPUDevice* device, SDL_GPUTexture* texture, const std::ve
         destination.layer = r.layer;
         destination.w = r.width;
         destination.h = r.height;
-        destination.d = 1;
+        destination.d = r.depth;
         SDL_UploadToGPUTexture(copy, &source, &destination, false);
     }
     SDL_EndGPUCopyPass(copy);
@@ -188,6 +189,19 @@ SDL_GPUTexture* uploadDdsTexture(SDL_GPUDevice* device, const tr::Bytes& dds) {
     tr::DdsHeader decoded;
     const std::vector<tr::Rgba8> pixels = tr::decodeDds(dds, decoded);
     return uploadRgbaTextureMipmapped(device, pixels, decoded.width, decoded.height);
+}
+
+SDL_GPUTexture* uploadDdsVolumeTexture(SDL_GPUDevice* device, const tr::Bytes& dds) {
+    tr::DdsHeader header;
+    const std::vector<tr::Rgba8> pixels = tr::decodeDdsVolume(dds, header);
+    SDL_GPUTexture* texture = createTexture(device, SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, SDL_GPU_TEXTURETYPE_3D, header.width, header.height,
+                                            header.depth, 1);
+    std::vector<uint8_t> blob;
+    appendBytes(blob, pixels.data(), pixels.size() * 4);
+    Region region{0, 0, header.width, header.height, 0};
+    region.depth = header.depth;
+    uploadRegions(device, texture, blob, {region});
+    return texture;
 }
 
 SDL_GPUTexture* uploadDdsCubeTexture(SDL_GPUDevice* device, const tr::Bytes& dds) {

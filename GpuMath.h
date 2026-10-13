@@ -60,6 +60,25 @@ inline tr::Vec3 transformPoint(const Mat4& m, const tr::Vec3& p) {
     return tr::Vec3{rowDot(m.row0, p.x, p.y, p.z, 1), rowDot(m.row1, p.x, p.y, p.z, 1), rowDot(m.row2, p.x, p.y, p.z, 1)};
 }
 
+// The normal matrix of m: the inverse transpose of its upper 3 x 3 (cofactors / determinant), in the upper 3 x 3 of the
+// result (translation 0). For a rotation x uniform scale it is the rotation / scale.
+inline Mat4 inverseTranspose3(const Mat4& m) {
+    const float a = m.row0.x, b = m.row0.y, c = m.row0.z;
+    const float d = m.row1.x, e = m.row1.y, f = m.row1.z;
+    const float g = m.row2.x, h = m.row2.y, i = m.row2.z;
+    const float c00 = e * i - f * h, c01 = f * g - d * i, c02 = d * h - e * g;
+    const float c10 = c * h - b * i, c11 = a * i - c * g, c12 = b * g - a * h;
+    const float c20 = b * f - c * e, c21 = c * d - a * f, c22 = a * e - b * d;
+    const float det = a * c00 + b * c01 + c * c02;
+    const float s = det != 0.0f ? 1.0f / det : 0.0f;
+    Mat4 r;
+    r.row0 = {c00 * s, c01 * s, c02 * s, 0};
+    r.row1 = {c10 * s, c11 * s, c12 * s, 0};
+    r.row2 = {c20 * s, c21 * s, c22 * s, 0};
+    r.row3 = {0, 0, 0, 1};
+    return r;
+}
+
 // Left-handed perspective, Direct3D-style depth 0..1.
 inline Mat4 perspectiveLH(float fovYRadians, float aspect, float nearZ, float farZ) {
     const float f = 1.0f / std::tan(fovYRadians * 0.5f);

@@ -36,7 +36,8 @@ cbuffer FragmentUniforms : register(b0, space3)
     float4 localSpotInner[MAX_LOCAL_LIGHTS];
     float4 localRotation[MAX_LOCAL_LIGHTS];
     row_major float4x4 shadowMatrix;   // world -> sun shadow map clip space
-    float4 shadowParams;              // x: 1 = sun shadows on, y: opacity, z: 1 / map size
+    float4 shadowParams;              // x: 1 = sun shadows on, y: opacity, z: 1 / map size, w: g_ShadowSoftness
+    float4 shadowExtra;               // xyz: camera forward (view depth for the bias), w: shadow-map depth units per metre
     float4 extraTowards[MAX_EXTRA_DIRECTIONAL];   // further directional sky lights: towards the light, w = 1 in use
     float4 extraFront[MAX_EXTRA_DIRECTIONAL];
     float4 extraBack[MAX_EXTRA_DIRECTIONAL];
@@ -126,7 +127,7 @@ float4 psMain(VertexOutput input) : SV_Target0
     s.sunBack = sunBack.rgb;
     s.hemiTop = hemiTop.rgb;
     s.hemiBottom = hemiBottom.rgb;
-    s.sunVisibility = sunShadow(shadowMap, shadowSampler, shadowMatrix, shadowParams, input.world, n);
+    s.sunVisibility = sunShadow(shadowMap, shadowSampler, shadowMatrix, shadowParams, shadowExtra, cameraPosition.xyz, input.world, n);
     const float3 light = skyLight(n, s) + extraSkyLight(n, extraTowards, extraFront, extraBack, false) + localLights(input.world, n, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner, localRotation,
                                                          globeMaps, globeSampler);
     if (fogRange.w > 1.5)

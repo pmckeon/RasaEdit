@@ -27,6 +27,8 @@ SDL_GPUTexture* uploadRgbaArray(SDL_GPUDevice* device, const std::vector<std::ve
 // levels when the device supports it, otherwise decoded face by face to RGBA8 with generated mips. Throws if the file is
 // not a cube map.
 SDL_GPUTexture* uploadDdsCubeTexture(SDL_GPUDevice* device, const tr::Bytes& dds);
+// A volume DDS (top level only, decoded to RGBA8; tr::decodeDdsVolume) as a 3D texture.
+SDL_GPUTexture* uploadDdsVolumeTexture(SDL_GPUDevice* device, const tr::Bytes& dds);
 // Cube map array: 6 faces per cube (+X, -X, +Y, -Y, +Z, -Z, as DDS stores them), each size x size RGBA8.
 SDL_GPUTexture* uploadRgbaCubeArray(SDL_GPUDevice* device, const std::vector<std::vector<tr::Rgba8>>& faces, uint32_t size);
 // One cube map (exactly 6 faces, as above).

@@ -349,15 +349,9 @@ SceneView::SceneView(Renderer& renderer, const tr::AssetLibrary& assets, const t
         p.cullingLayer = e.cullLayer != 0 ? e.cullLayer : cullingLayerForClass ? cullingLayerForClass(e.classId) : 3;
         p.neverDrawn = p.cullingLayer == 6;
         const std::string mesh = p.neverDrawn ? std::string() : meshForClass(e.classId);
-        // Animated objects ship an animation named like their model (npc_eloh_hologram_large.geo/.anm,
-        // arch_eloh_hologram_platform_v01.geo/.anm, ...): pose them in its first frame. Without it the hologram's
-        // skinned pieces collapse into a column.
-        std::string objectAnimation;
-        if (mesh.size() > 4 && tr::toLowerAscii(mesh.substr(mesh.size() - 4)) == ".geo") {
-            const std::string anm = mesh.substr(0, mesh.size() - 4) + ".anm";
-            if (assets_.exists(anm)) objectAnimation = anm;
-        }
-        p.model = modelFor(mesh, objectAnimation);      // unordered_map nodes are stable
+        // With the model's own animation, played on the light clock (without it the hologram's skinned pieces collapse into a
+        // column).
+        p.model = objectModelFor(mesh);      // unordered_map nodes are stable
         p.hue = entityHue(e.hue1);
         placements_.push_back(p);
         minX = std::min(minX, e.location.x); maxX = std::max(maxX, e.location.x);
@@ -545,17 +539,37 @@ SceneLighting SceneView::lighting() const {
     SceneLighting l = skyLightingAt();
     l.showLight = showLightBuffer;
     l.debugView = debugView;
+    l.cameraForward = camera_.forward();
     if (!showMapLights) return l;
     // Placed lights: the enabled ones nearest the camera (distance to their range sphere), up to the shader's limit.
     // Candidates: the map's lights.xml, and lights on map entities' models (contact point "lsys" templates) placed
     // with the entity (not on culling layer 6: the engine never adds those bodies to the scene).
     std::vector<std::pair<float, tr::PlacedLight>> nearest;
+    // Only lights whose volume is in view: the game draws a light pass only for lights whose volume is visible (apitrace of
+    // Luna Cavern, 2026-10-14: the 27 light passes of a frame at the fountain are exactly the lights in front of the camera;
+    // ranking by distance alone spent the slots on lights behind the camera).
+    const float aspect = float(renderer_.width()) / float(std::max<uint32_t>(1, renderer_.height()));
+    const Mat4 viewProjection = multiply(camera_.projectionMatrix(aspect), camera_.viewMatrix());
+    const Vec4f& r0 = viewProjection.row0; const Vec4f& r1 = viewProjection.row1;
+    const Vec4f& r2 = viewProjection.row2; const Vec4f& r3 = viewProjection.row3;
+    const Vec4f planes[5] = {
+        {r3.x + r0.x, r3.y + r0.y, r3.z + r0.z, r3.w + r0.w}, {r3.x - r0.x, r3.y - r0.y, r3.z - r0.z, r3.w - r0.w},
+        {r3.x + r1.x, r3.y + r1.y, r3.z + r1.z, r3.w + r1.w}, {r3.x - r1.x, r3.y - r1.y, r3.z - r1.z, r3.w - r1.w},
+        {r2.x, r2.y, r2.z, r2.w}};
+    auto inView = [&](const tr::Vec3& c, float radius) {
+        for (const Vec4f& p : planes) {
+            const float n = std::sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
+            if ((p.x * c.x + p.y * c.y + p.z * c.z + p.w) / n < -radius) return false;
+        }
+        return true;
+    };
     auto consider = [&](const tr::PlacedLight& light) {
         if (!light.enabled || light.range <= 0 || light.intensity <= 0) return;
         // Plane lights reach a box of half-extents (Width/2, Length/2, Range) around their position.
         const float reach = light.kind == tr::PlacedLight::Kind::Plane
                                 ? std::sqrt(light.width * light.width * 0.25f + light.length * light.length * 0.25f + light.range * light.range)
                                 : light.range;
+        if (!inView(light.position, reach)) return;
         const float gap = std::max(0.0f, length(subtract(light.position, camera_.position)) - reach);
         if (gap <= drawDistance) nearest.emplace_back(gap, light);
     };
@@ -711,6 +725,14 @@ tr::PlacedLight SceneView::modifiedLight(const tr::PlacedLight& light) const {
                     out.colour = add(track.colour1, scaled(subtract(track.colour2, track.colour1), w));
                     break;
                 case tr::LightModifierTrack::Kind::Rotation: {
+                    // Point lights: the modifier replaces the orientation, but the game's angle stays 0. apitrace of Luna Cavern
+                    // (2026-10-14): Light_08 (LocalOrientation 22.4 degrees about y in lights.xml, rotation track one turn per
+                    // 100 s) has an identity Light2World / Proj2LightView in all 3,308 frames while its colour track runs through
+                    // ~23 s of modifier time. Why the angle does not advance is NOT understood. Other kinds: UNVERIFIED, as decompiled.
+                    if (light.kind == tr::PlacedLight::Kind::Point) {
+                        out.worldOrientation = tr::Quat{0, 0, 0, 1};
+                        break;
+                    }
                     const float angle = std::clamp(w * 6.2831853f, 0.0f, 6.2831853f);
                     const tr::Vec3 a = normalized(track.axis);
                     const float s = std::sin(angle * 0.5f);
@@ -832,6 +854,25 @@ size_t SceneView::texturesLoaded() const {
     for (const auto& t : textures_)
         if (t.second) ++count;
     return count;
+}
+
+// A volume DDS (the water's VolumeMapTexture) as a 3D texture; cached with the 2D textures under "volume:<name>".
+SDL_GPUTexture* SceneView::volumeTexture(const std::string& name) {
+    if (name.empty()) return nullptr;
+    const std::string key = "volume:" + tr::toLowerAscii(name);
+    const auto it = textures_.find(key);
+    if (it != textures_.end()) return it->second;
+    SDL_GPUTexture* result = nullptr;
+    tr::Bytes data;
+    try {
+        if (assets_.tryRead(tr::toLowerAscii(name), data)) result = uploadDdsVolumeTexture(renderer_.device(), data);
+        else textureErrors_[key] = "not found in the archives";
+    } catch (const std::exception& e) {
+        result = nullptr;
+        textureErrors_[key] = e.what();
+    }
+    textures_.emplace(key, result);
+    return result;
 }
 
 SDL_GPUTexture* SceneView::texture(const std::string& name) {
@@ -1115,21 +1156,19 @@ void SceneView::loadModel(const std::string& name, Model& model) {
         std::vector<Mat4> skin;                    // per skeleton bone; empty = draw as authored
         std::vector<Mat4> posedBones;              // per skeleton bone: posed world (contact points of posed models)
         bool objectAnimation = false;
-        if (bar != std::string::npos && !geo.bones.empty()) {
+        // Bone-less models load their object animation too: its material (EFCT) tracks still apply.
+        if (bar != std::string::npos && (!geo.bones.empty() || name.compare(bar + 1, 1, "@") == 0)) {
             try {
-                const std::string animationName = name.substr(bar + 1, bar2 == std::string::npos ? std::string::npos : bar2 - bar - 1);
+                std::string animationName = name.substr(bar + 1, bar2 == std::string::npos ? std::string::npos : bar2 - bar - 1);
+                const bool marked = !animationName.empty() && animationName[0] == '@';     // a map object's own animation
+                if (marked) animationName = animationName.substr(1);
                 tr::GeoModel skeletonGeo;
                 if (bar2 != std::string::npos) skeletonGeo = tr::readGeo(assets_.read(name.substr(bar2 + 1)));
                 const tr::Animation animation = tr::readAnimation(assets_.read(animationName));
                 skin = skinMatrices(geo, animation, 0.0f, bar2 != std::string::npos ? &skeletonGeo : nullptr, &posedBones);
                 if (bar2 == std::string::npos && animation.duration > 0.0f) {
-                    // X.geo with X.anm (map objects): blended skinned pieces are played too; creatures' idles stay posed.
-                    auto stem = [](std::string s) {
-                        s = tr::toLowerAscii(s);
-                        const size_t dot = s.rfind('.');
-                        return dot == std::string::npos ? s : s.substr(0, dot);
-                    };
-                    objectAnimation = stem(name.substr(0, bar)) == stem(animationName);
+                    // Map objects' own animations: blended skinned pieces are played too; creatures' idles stay posed.
+                    objectAnimation = marked;
                     model.animation = animation;
                     model.skeleton.bones = geo.bones;
                     model.boneTracks = boneTrackIndices(model.skeleton, model.animation);
@@ -1169,6 +1208,9 @@ void SceneView::loadModel(const std::string& name, Model& model) {
             for (const tr::GeoParameter& gp : piece.parameters)
                 if (gp.key == "Phase") phase = tr::toLowerAscii(gp.value);
             const bool aniso = effect.rfind("tradditiveanisospec", 0) == 0;
+            // The other TRAdditive* effects (TRAdditiveDiffMapVertColor, TRAdditiveDiffMapDetMapDecMapVertColor[Hue]) share the
+            // aniso vertex shader layout and fog; drawn with AnisoMaterial::plain.
+            const bool plainAdditive = !aniso && effect.rfind("tradditive", 0) == 0;
             const bool additive = namedAdditive || phase == "additive";
             const bool translucent = !additive && phase == "translucent";
             if (additive) ++effectPieces;
@@ -1216,8 +1258,9 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 return fallback;
             };
             // TRAdditiveAnisoSpec*: vs2x_AnisoDetDec[DetailTexCoord x 3 + DecalTexCoord] (element layout, 2026-10-13).
-            const int uvSet1 = aniso ? parameterInt("DetailTexCoord", 0) : trDesc.slot1Uv ? parameterInt(trDesc.slot1Uv, 0) : 0;
-            const int uvSet2 = aniso ? parameterInt("DecalTexCoord", 0) : trDesc.slot2Uv ? parameterInt(trDesc.slot2Uv, 0) : 0;
+            // vsAdditive_Array (plain TRAdditive*): the same element layout (disassembled 2026-10-14).
+            const int uvSet1 = aniso || plainAdditive ? parameterInt("DetailTexCoord", 0) : trDesc.slot1Uv ? parameterInt(trDesc.slot1Uv, 0) : 0;
+            const int uvSet2 = aniso || plainAdditive ? parameterInt("DecalTexCoord", 0) : trDesc.slot2Uv ? parameterInt(trDesc.slot2Uv, 0) : 0;
             auto uvOfSet = [](const tr::GeoVertex& gv, int set) { return set == 2 ? gv.uv2 : set == 1 ? gv.uv1 : gv.uv; };
             // Static pieces attached to a bone are moved by it (as in the OBJ exporter).
             const tr::GeoBone* bone = nullptr;
@@ -1300,12 +1343,22 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 v.texV = gv.uv.y;
                 v.texU1 = glowUvSet == 0 ? gv.uv.x : gv.uv1.x;
                 v.texV1 = glowUvSet == 0 ? gv.uv.y : gv.uv1.y;
-                if (trDesc.slot1 || aniso) {
+                if (trDesc.slot1 || aniso || plainAdditive) {
                     v.texU1 = uvOfSet(gv, uvSet1).x;
                     v.texV1 = uvOfSet(gv, uvSet1).y;
                 }
                 v.texU2 = uvOfSet(gv, uvSet2).x;
                 v.texV2 = uvOfSet(gv, uvSet2).y;
+                if (water) {
+                    // TRWaterReflectRefract: normal maps on NormalMap0TexCoord / NormalMap1TexCoord, the volume on VolMapTexCoord
+                    // (1, 2, 3 on the traced piece, whose shader read TEXCOORD1..3; other values UNVERIFIED).
+                    auto setOf = [&](int set) { return set == 3 ? gv.uv3 : uvOfSet(gv, set); };
+                    const tr::Vec2 n0 = setOf(parameterInt("NormalMap0TexCoord", 1)), n1 = setOf(parameterInt("NormalMap1TexCoord", 2));
+                    const tr::Vec2 vol = setOf(parameterInt("VolMapTexCoord", 3));
+                    v.texU1 = n0.x; v.texV1 = n0.y;
+                    v.texU2 = n1.x; v.texV2 = n1.y;
+                    v.texU3 = vol.x; v.texV3 = vol.y;
+                }
                 vertices.push_back(v);
             }
             if (!vertices.empty() && piece.indices.size() >= 3) {
@@ -1346,6 +1399,31 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 }
                 part.water = water;
                 model.hasWater = model.hasWater || water;
+                if (water && effect.rfind("trwaterreflectrefract", 0) == 0) {
+                    WaterMaterial& w = part.waterMaterial;
+                    part.waterShader = true;
+                    for (const tr::GeoParameter& gp : piece.parameters) {
+                        if (gp.key == "DiffuseTexture") w.diffuse = texture(gp.value);
+                        if (gp.key == "NormalMapTexture") w.normalMap = texture(gp.value);
+                        if (gp.key == "NormalMap1Texture") w.normalMap1 = texture(gp.value);
+                        if (gp.key == "ModifierTexture") w.modifier = texture(gp.value);
+                        if (gp.key == "VolumeMapTexture") w.volume = volumeTexture(gp.value);
+                        if (gp.key == "MatPower") w.matPower = float(std::atof(gp.value.c_str()));
+                        if (gp.key == "ClampDepth") w.clampDepth = float(std::atof(gp.value.c_str()));
+                        if (gp.key == "RefractionDisplacement") w.refractionDisplacement = float(std::atof(gp.value.c_str()));
+                        if (gp.key == "VolumeDisplacement") w.volumeDisplacement = float(std::atof(gp.value.c_str()));
+                        if (gp.key == "MatSpecular") w.matSpecular = parseColour(gp.value);
+                        if (gp.key == "MatRefractColor") w.matRefractColour = parseColour(gp.value);
+                        for (int slot = 0; slot < 4; ++slot) {      // MATRIX_COLUMNS, as the TR vertex shaders (c10.. in the trace)
+                            if (gp.key != "TexCoordTransform" + std::to_string(slot)) continue;
+                            float e[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+                            std::istringstream values(gp.value);
+                            for (float& x : e) values >> x;
+                            w.transform[slot * 2] = Vec4f{e[0], e[4], e[8], 0};
+                            w.transform[slot * 2 + 1] = Vec4f{e[1], e[5], e[9], 0};
+                        }
+                    }
+                }
                 part.texture = water ? nullptr : texture(piece.diffuseTexture);    // water's diffuse map is a stand-in
                 for (const tr::GeoParameter& p : piece.parameters)
                     if (p.key == "AlphaTestEnable") part.alphaTest = p.value == "true";
@@ -1473,9 +1551,11 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 // state tables, 2026-10-10): every other model effect keeps PalGlobalEffect's CCW (back faces culled).
                 part.twoSided = effect.rfind("paldiffmap.", 0) == 0 || effect.rfind("trdiffmapnolight.", 0) == 0 ||
                                 effect.rfind("trlava.", 0) == 0 || effect.rfind("trbeam.", 0) == 0;
-                if (aniso) {
+                if (aniso || plainAdditive) {
                     part.aniso = true;
                     AnisoMaterial& m = part.anisoMaterial;
+                    m.plain = plainAdditive;
+                    if (plainAdditive && effect.find("hue") != std::string::npos) m.hue = part.materialHue.w > 0.5f ? part.materialHue : Vec4f{0.5f, 0.5f, 0.5f, 1};
                     m.diffuse = part.texture;
                     for (const tr::GeoParameter& p : piece.parameters) {
                         if (p.key == "DetailTexture") m.detail = texture(p.value);
@@ -1505,8 +1585,10 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                     if (track.parameter == "TexCoordTransform0") part.uvTrack0 = int(t);
                     if (track.parameter == "TexCoordTransform1") part.uvTrack1 = int(t);
                     if (track.parameter == "TexCoordTransform2") part.uvTrack2 = int(t);
+                    if (track.parameter == "TexCoordTransform3") part.uvTrack3 = int(t);
                 }
-                if ((part.uvTrack0 >= 0 || part.uvTrack1 >= 0 || part.uvTrack2 >= 0) && (part.aniso || part.refract || part.trMaterial.active))
+                if ((part.uvTrack0 >= 0 || part.uvTrack1 >= 0 || part.uvTrack2 >= 0 || part.uvTrack3 >= 0) &&
+                    (part.aniso || part.refract || part.trMaterial.active || part.waterShader))
                     model.materialAnimated = true;
                 model.pieces.push_back(part);
                 if (additive) continue;
@@ -1704,7 +1786,7 @@ std::vector<Mat4> SceneView::animatedPieceMatrices(const Model& model, float tim
 
 bool SceneView::animatedUvTransforms(const Model& model, const ModelPiece& piece, float time, UvTransforms& out) const {
     if (!model.materialAnimated || model.animation.duration <= 0.0f) return false;
-    if (piece.uvTrack0 < 0 && piece.uvTrack1 < 0 && piece.uvTrack2 < 0) return false;
+    if (piece.uvTrack0 < 0 && piece.uvTrack1 < 0 && piece.uvTrack2 < 0 && piece.uvTrack3 < 0) return false;
     // Same clock and loop as the bone animation (the controller wraps by the animation's length).
     const float t = std::fmod(std::max(time, 0.0f), model.animation.duration);
     auto apply = [&](int track, Vec4f& u, Vec4f& v) {
@@ -1717,6 +1799,7 @@ bool SceneView::animatedUvTransforms(const Model& model, const ModelPiece& piece
     apply(piece.uvTrack0, out.u0, out.v0);
     apply(piece.uvTrack1, out.u1, out.v1);
     apply(piece.uvTrack2, out.u2, out.v2);
+    apply(piece.uvTrack3, out.u3, out.v3);
     return true;
 }
 
@@ -1786,7 +1869,7 @@ void SceneView::addPackageEffects(const std::string& package, Model* body, int d
         for (const tr::SfxLight& l : p.lights) effects.lights.push_back(StateLight{body, l});
         // Accessories are drawn at the placement (their own attachment fields are not decoded).
         for (const tr::SfxAccessory& a : p.accessories) {
-            Model* accessory = a.mesh.empty() ? nullptr : modelFor(a.mesh, a.animation);
+            Model* accessory = a.mesh.empty() ? nullptr : objectModelFor(a.mesh, a.animation);
             if (accessory) effects.accessories.push_back(accessory);
             if (!a.package.empty()) addPackageEffects(a.package, accessory ? accessory : body, depth + 1, effects);
         }
@@ -1881,6 +1964,7 @@ void SceneView::queueDraws(const Selection& selection) {
     const Mat4 viewProjection = multiply(camera_.projectionMatrix(aspect), camera_.viewMatrix());
     renderer_.beginFrame(viewProjection, camera_.position, lighting());
     renderer_.setCameraAxes(camera_.right(), camera_.up(), camera_.forward());
+    renderer_.setProjection(camera_.projectionMatrix(aspect));
     {
         const auto cube = environmentCubes_.find(activeEnvironmentMap());
         renderer_.setEnvironmentMap(cube == environmentCubes_.end() || !environmentMaps ? nullptr : cube->second);
@@ -1966,7 +2050,15 @@ void SceneView::queueDraws(const Selection& selection) {
                 }
                 continue;
             }
-            if (piece.water) renderer_.drawTranslucent(piece.mesh, world, waterTint(selected));
+            if (piece.water && piece.waterShader && showTextures && !selected) {
+                WaterMaterial m = piece.waterMaterial;
+                UvTransforms uv{m.transform[0], m.transform[1], m.transform[2], m.transform[3], m.transform[4], m.transform[5], m.transform[6], m.transform[7]};
+                if (animatedUvTransforms(model, piece, lightTime, uv)) {
+                    m.transform[0] = uv.u0; m.transform[1] = uv.v0; m.transform[2] = uv.u1; m.transform[3] = uv.v1;
+                    m.transform[4] = uv.u2; m.transform[5] = uv.v2; m.transform[6] = uv.u3; m.transform[7] = uv.v3;
+                }
+                renderer_.drawWater(piece.mesh, world, m);
+            } else if (piece.water) renderer_.drawTranslucent(piece.mesh, world, waterTint(selected));
             else if (piece.translucent)
                 renderer_.drawTranslucent(piece.mesh, world, scaledTint(Vec4f{tint.x, tint.y, tint.z, tint.w * piece.matDiffuseAlpha}, piece.colourScale),
                                           showTextures ? piece.texture : nullptr, showTextures ? piece.detail : nullptr, piece.detailUv1, !piece.twoSided);
@@ -1995,6 +2087,7 @@ void SceneView::queueDraws(const Selection& selection) {
         for (size_t k = 0; k < placements_.size(); ++k) {
             const Placement& p = placements_[k];
             if (onlyEntity >= 0 && int(k) != onlyEntity) continue;
+            if (entityFirst >= 0 && (int(k) < entityFirst || int(k) >= entityLast)) continue;
             const tr::Vec3 d = subtract(p.centre, camera_.position);
             if (dot(d, d) > maxDistance2 + p.radius * p.radius * 4 && int(k) != selectedEntity) continue;
             if (!visible(p.centre, p.radius)) continue;
@@ -2123,17 +2216,21 @@ void SceneView::queueDraws(const Selection& selection) {
             // their non-flesh pieces grey 0.5 (tabula_rasa.exe FUN_004fcc60: an unset hue becomes (0.5, 0.5, 0.5, 1))
             // and flesh pieces the skin colour (FUN_00800340). Other pieces keep no hue here.
             const bool skinned = s.skinHue.w > 0.5f;
-            for (const ModelPiece& piece : s.model->pieces)
-                if (piece.swapId >= 32 || ((replaced >> piece.swapId) & 0x1) == 0)
-                    drawPiece(piece, skinned && piece.swapId >= 1 && piece.swapId <= 8 ? Vec4f{0.5f, 0.5f, 0.5f, 1} : Vec4f{0, 0, 0, 0});
+            const bool avatar = !s.avatarParts.empty() || skinned;
+            if (avatar) {
+                for (const ModelPiece& piece : s.model->pieces)
+                    if (piece.swapId >= 32 || ((replaced >> piece.swapId) & 0x1) == 0)
+                        drawPiece(piece, skinned && piece.swapId >= 1 && piece.swapId <= 8 ? Vec4f{0.5f, 0.5f, 0.5f, 1} : Vec4f{0, 0, 0, 0});
+            } else {
+                drawModelPieces(*s.model, s.world, Vec4f{0, 0, 0, 0}, selected);   // objects: the same path as map entities
+            }
             for (const AvatarDraw& part : s.avatarParts) {
                 if (!part.model || !part.model->loaded) continue;
                 for (const ModelPiece& piece : part.model->pieces)
                     if (piece.swapId == part.swapsetId) drawPiece(piece, part.hue);
             }
             for (const Model* accessory : s.accessories)
-                if (accessory && accessory->loaded)
-                    for (const ModelPiece& piece : accessory->pieces) drawPiece(piece, Vec4f{0, 0, 0, 0});
+                if (accessory && accessory->loaded) drawModelPieces(*accessory, s.world, Vec4f{0, 0, 0, 0}, selected);
             // Avatar accessories: the accessory's plug (HPP_<name>, usage 2) is put on the body's socket (HPS_<name>, usage 1)
             // of the same connection point (TRasa::EntityBody::FinalizeAddAccessory FUN_00502060 links the two through a
             // gfxConnection (FUN_00625300; evaluated by FUN_005e2b80, phyCPConnection). Traced 2026-10-13: the evaluator copies the
@@ -2172,7 +2269,7 @@ void SceneView::queueDraws(const Selection& selection) {
                 // - MatDiffuse / MatAmbient, which the Pal deferred G-buffer shaders do not read. So the pieces keep their
                 // material's stored Hue (McAllister's pistol colour 0x00000001 made it black before; in game it is grey metal).
                 // MatDiffuse.a of TR-effect accessories (alpha in some TR shaders) is not reproduced.
-                for (const ModelPiece& piece : a.model->pieces) drawPiece(piece, piece.materialHue);
+                drawModelPieces(*a.model, drawWorld, Vec4f{0, 0, 0, 0}, selected);       // pieces keep their material Hue
             }
             drawWorld = s.world;
         } else {
@@ -2519,6 +2616,35 @@ void SceneView::focusOn(const Selection& selection) {
     if (focusTarget(selection, target, distance)) frameTarget(target, distance);
 }
 
+// An object's animation, from the model itself: the .geo's "anim" property (GBOD property table; 1,097 of 7,240 models name
+// one, only 173 of them X.anm for X.geo - e.g. arch_forean_eloh_temple_basin_v02_water_v01.geo -> water_foreas_pond.anm,
+// which the game plays: in the fountain trace (2026-10-14) the water's TexCoordTransform1 / 2 equal that animation's EFCT
+// keys at one time, t = 21.88 of 23.33 s, and no animationdata table names it). No name matching: the 270 X.geo / X.anm
+// pairs without the property (projectiles, ability effects, ...) are not played. Cached per mesh.
+std::string SceneView::objectAnimationFor(const std::string& mesh) {
+    if (mesh.size() <= 4 || tr::toLowerAscii(mesh.substr(mesh.size() - 4)) != ".geo") return {};
+    const auto cached = objectAnimations_.find(mesh);
+    if (cached != objectAnimations_.end()) return cached->second;
+    std::string animation;
+    try {
+        const tr::GeoModel geo = tr::readGeo(assets_.read(mesh));
+        for (const tr::GeoProperty& property : geo.properties)
+            if (tr::toLowerAscii(property.key) == "anim" && assets_.exists(property.value)) animation = property.value;
+    } catch (const std::exception&) {
+    }
+    objectAnimations_[mesh] = animation;
+    return animation;
+}
+
+// Any object's model (map entities, server objects, special-FX accessories, avatar accessories) with its animation played:
+// the animation a special-FX package names for it, else the model's own (objectAnimationFor). "@" marks an object animation in
+// the model key (creatures' idles are only posed).
+SceneView::Model* SceneView::objectModelFor(const std::string& mesh, const std::string& packageAnimation) {
+    if (mesh.empty()) return nullptr;
+    const std::string animation = packageAnimation.empty() ? objectAnimationFor(mesh) : packageAnimation;
+    return modelFor(mesh, animation.empty() ? std::string() : "@" + animation);
+}
+
 SceneView::Model* SceneView::modelFor(const std::string& mesh, const std::string& poseAnimation, const std::string& skeletonMesh) {
     // default.geo is the engine's stand-in mesh (system classes: ABV boxes, no-walk shapes, proxies, appearance items);
     // the game never shows it, so such entities are placeholders here.
@@ -2619,7 +2745,7 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
             for (const AvatarPart& part : look.parts)
                 s.avatarParts.push_back(AvatarDraw{modelFor(part.mesh, look.poseAnimation, look.baseMesh), part.swapsetId, hueFromAbgr(part.colour)});
             for (const AvatarAccessory& a : look.accessories)
-                s.bodyAccessories.push_back(ServerPlacement::BodyAccessory{modelFor(a.mesh), uint32_t(a.connectionPoint), hueFromAbgr(a.colour)});
+                s.bodyAccessories.push_back(ServerPlacement::BodyAccessory{objectModelFor(a.mesh), uint32_t(a.connectionPoint), hueFromAbgr(a.colour)});
         }
         s.colour = vendor ? markerColour::vendor : npc ? markerColour::npc : markerColour::hostileCreature;
         s.ringRadius = std::max(pool.radius, 1.5f);
@@ -2632,7 +2758,7 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
         s.selection = Selection{SelectionKind::Teleporter, k};
         s.position = t.position;
         s.world = yawPlacement(t.position, t.rotation);
-        s.model = modelFor(meshForClass(t.classId));
+        s.model = objectModelFor(meshForClass(t.classId));
         StateEffects fx = stateEffects(t.classId, 56);
         s.accessories = fx.accessories;
         s.stateParticles = fx.particles;
@@ -2648,7 +2774,7 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
         s.selection = Selection{SelectionKind::Object, k};
         s.position = o.position;
         s.world = yawPlacement(o.position, o.rotation);
-        s.model = modelFor(meshForClass(o.classId));
+        s.model = objectModelFor(meshForClass(o.classId));
         s.colour = markerColour::ofObject(o.kind);
         s.ringRadius = 1.5f;
         s.facing = o.kind != ObjectKind::Logos;

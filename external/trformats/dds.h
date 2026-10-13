@@ -26,6 +26,7 @@ struct DdsHeader {
     uint32_t greenMask = 0;
     uint32_t blueMask = 0;
     uint32_t alphaMask = 0;
+    uint32_t depth = 1;                 // volume textures (caps2 0x200000): slices; 1 otherwise
 };
 
 struct Rgba8 {
@@ -60,5 +61,9 @@ inline uint32_t ddsBlockBytes(const DdsHeader& h) { return ddsIsDxt1(h) ? 8 : 16
 std::vector<DdsLevel> ddsCompressedLevels(const Bytes& file, const DdsHeader& header);
 // Top mip level as RGBA8, row 0 = top of the image. Throws FormatError for unsupported formats.
 std::vector<Rgba8> decodeDds(const Bytes& file, DdsHeader& header);
+// Top mip level of a volume texture as RGBA8: header.depth slices of width x height, slice 0 first. The slices of a
+// level follow each other, so a DXT volume's top level is a 2D image depth times as tall (blocks are 4 x 4 x 1); slices
+// must then be whole block rows (height a multiple of 4). E.g. water_foreas_pond_color_clean_vm.dds: DXT5 8 x 8 x 64.
+std::vector<Rgba8> decodeDdsVolume(const Bytes& file, DdsHeader& header);
 
 }  // namespace tr

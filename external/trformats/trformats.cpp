@@ -1222,6 +1222,7 @@ void readVert(ByteReader& r, GeoPiece& piece) {
                 const Value4 value = decodeElement(e.type, p + e.offset);
                 if (e.usage == 5 && e.usageIndex == 1) v.uv1 = {value.x, value.y};               // TEXCOORD1 (glow / decal maps)
                 if (e.usage == 5 && e.usageIndex == 2) v.uv2 = {value.x, value.y};               // TEXCOORD2 (decal maps)
+                if (e.usage == 5 && e.usageIndex == 3) v.uv3 = {value.x, value.y};               // TEXCOORD3 (water volume map)
                 if (e.usage == 6 && e.usageIndex == 1) v.binormal = {value.x, value.y, value.z}; // TANGENT1 (binormal)
                 continue;
             }

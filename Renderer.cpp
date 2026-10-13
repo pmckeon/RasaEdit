@@ -41,7 +41,8 @@ struct LightingUniforms {
     Vec4f localSpotInner[SceneLighting::maxLocalLights];
     Vec4f localRotation[SceneLighting::maxLocalLights];
     Mat4 shadowMatrix;             // world -> sun shadow map clip space
-    Vec4f shadowParams;            // x: 1 = sun shadows on, y: opacity, z: 1 / map size
+    Vec4f shadowParams;            // x: 1 = sun shadows on, y: opacity, z: 1 / map size, w: softness
+    Vec4f shadowExtra;             // xyz: camera forward, w: shadow depth units per metre
     Vec4f extraTowards[SceneLighting::maxExtraDirectional];   // xyz towards the light; w: 1 = in use
     Vec4f extraFront[SceneLighting::maxExtraDirectional];
     Vec4f extraBack[SceneLighting::maxExtraDirectional];
@@ -74,7 +75,8 @@ struct TerrainFragmentUniforms {
 LightingUniforms lightingUniforms(const SceneLighting& l, const Vec4f& cameraPosition, const Mat4& shadowMatrix, bool shadows, float mapSize) {
     LightingUniforms u;
     u.shadowMatrix = shadowMatrix;
-    u.shadowParams = Vec4f{shadows ? 1.0f : 0.0f, l.shadowOpacity, 1.0f / mapSize, 0};
+    u.shadowParams = Vec4f{shadows ? 1.0f : 0.0f, l.shadowOpacity, 1.0f / mapSize, l.shadowSoftness};
+    u.shadowExtra = Vec4f{l.cameraForward.x, l.cameraForward.y, l.cameraForward.z, 1.0f / Renderer::shadowDepth};
     u.sunFront = l.sunFront;
     u.sunBack = l.sunBack;
     for (int k = 0; k < SceneLighting::maxExtraDirectional; ++k) {
@@ -220,11 +222,91 @@ Renderer::Renderer(SDL_GPUDevice* device) : device_(device) {
         shadowPipeline_ = SDL_CreateGPUGraphicsPipeline(device_, &info);
         if (!shadowPipeline_) fail("SDL_CreateGPUGraphicsPipeline (shadow)");
     }
+    {
+        // Water (shaders/water.hlsl): its own vertex shader with UV set 3; opaque, no culling (TRWaterReflectRefract sets
+        // CULLMODE NONE), no depth target - the fragment shader tests against the sampled scene depth.
+        waterVertex_ = createShader(waterVertexDxil, sizeof waterVertexDxil, waterVertexSpirv, sizeof waterVertexSpirv, "vsWater",
+                                    SDL_GPU_SHADERSTAGE_VERTEX, 0);
+        waterFragment_ = createShader(waterFragmentDxil, sizeof waterFragmentDxil, waterFragmentSpirv, sizeof waterFragmentSpirv, "psWater",
+                                      SDL_GPU_SHADERSTAGE_FRAGMENT, 7);
+        SDL_GPUVertexBufferDescription buffer = {};
+        buffer.slot = 0;
+        buffer.pitch = sizeof(MeshVertex);
+        buffer.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+        SDL_GPUVertexAttribute attributes[9] = {};
+        const uint32_t offsets[9] = {uint32_t(offsetof(MeshVertex, positionX)), uint32_t(offsetof(MeshVertex, normalX)), uint32_t(offsetof(MeshVertex, colour)),
+                                     uint32_t(offsetof(MeshVertex, texU)), uint32_t(offsetof(MeshVertex, texU1)), uint32_t(offsetof(MeshVertex, tangentX)),
+                                     uint32_t(offsetof(MeshVertex, binormalX)), uint32_t(offsetof(MeshVertex, texU2)), uint32_t(offsetof(MeshVertex, texU3))};
+        const SDL_GPUVertexElementFormat formats[9] = {SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM,
+                                                       SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3,
+                                                       SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2};
+        for (uint32_t k = 0; k < 9; ++k) {
+            attributes[k].location = k;
+            attributes[k].format = formats[k];
+            attributes[k].offset = offsets[k];
+        }
+        SDL_GPUColorTargetDescription target = {};
+        target.format = colourFormat_;
+        SDL_GPUGraphicsPipelineCreateInfo info = {};
+        info.vertex_shader = waterVertex_;
+        info.fragment_shader = waterFragment_;
+        info.vertex_input_state.vertex_buffer_descriptions = &buffer;
+        info.vertex_input_state.num_vertex_buffers = 1;
+        info.vertex_input_state.vertex_attributes = attributes;
+        info.vertex_input_state.num_vertex_attributes = 9;
+        info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+        info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+        info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+        info.rasterizer_state.front_face = SDL_GPU_FRONTFACE_CLOCKWISE;
+        info.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
+        info.target_info.color_target_descriptions = &target;
+        info.target_info.num_color_targets = 1;
+        info.target_info.has_depth_stencil_target = false;
+        waterPipeline_ = SDL_CreateGPUGraphicsPipeline(device_, &info);
+        if (!waterPipeline_) fail("SDL_CreateGPUGraphicsPipeline (water)");
+        SDL_GPUSamplerCreateInfo s = {};
+        s.min_filter = s.mag_filter = SDL_GPU_FILTER_LINEAR;
+        s.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_LINEAR;
+        s.address_mode_u = s.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
+        s.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
+        s.max_lod = 1000.0f;
+        volumeSampler_ = SDL_CreateGPUSampler(device_, &s);
+        if (!volumeSampler_) fail("SDL_CreateGPUSampler (volume)");
+    }
     setGlobeMaps({}, 4);
     const uint32_t white = 0xFFFFFFFF;
     white_ = uploadRgbaTexture(device_, &white, 1, 1);
     const uint32_t black = 0xFF000000;
     black_ = uploadRgbaTexture(device_, &black, 1, 1);
+    {
+        SDL_GPUTextureCreateInfo t = {};
+        t.type = SDL_GPU_TEXTURETYPE_3D;
+        t.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+        t.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER;
+        t.width = t.height = 1;
+        t.layer_count_or_depth = 1;
+        t.num_levels = 1;
+        whiteVolume_ = SDL_CreateGPUTexture(device_, &t);
+        if (!whiteVolume_) fail("SDL_CreateGPUTexture (white volume)");
+        SDL_GPUTransferBufferCreateInfo ti = {};
+        ti.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+        ti.size = 4;
+        SDL_GPUTransferBuffer* transfer = SDL_CreateGPUTransferBuffer(device_, &ti);
+        void* mapped = SDL_MapGPUTransferBuffer(device_, transfer, false);
+        std::memcpy(mapped, &white, 4);
+        SDL_UnmapGPUTransferBuffer(device_, transfer);
+        SDL_GPUCommandBuffer* commands = SDL_AcquireGPUCommandBuffer(device_);
+        SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(commands);
+        SDL_GPUTextureTransferInfo source = {};
+        source.transfer_buffer = transfer;
+        SDL_GPUTextureRegion destination = {};
+        destination.texture = whiteVolume_;
+        destination.w = destination.h = destination.d = 1;
+        SDL_UploadToGPUTexture(copy, &source, &destination, false);
+        SDL_EndGPUCopyPass(copy);
+        SDL_SubmitGPUCommandBuffer(commands);
+        SDL_ReleaseGPUTransferBuffer(device_, transfer);
+    }
     blackCube_ = uploadRgbaCube(device_, std::vector<std::vector<tr::Rgba8>>(6, std::vector<tr::Rgba8>(1, tr::Rgba8{0, 0, 0, 255})), 1);
     viewProjection_ = identityMatrix();
 }
@@ -235,10 +317,15 @@ Renderer::~Renderer() {
     if (white_) SDL_ReleaseGPUTexture(device_, white_);
     if (black_) SDL_ReleaseGPUTexture(device_, black_);
     if (blackCube_) SDL_ReleaseGPUTexture(device_, blackCube_);
+    if (whiteVolume_) SDL_ReleaseGPUTexture(device_, whiteVolume_);
     if (linearSampler_) SDL_ReleaseGPUSampler(device_, linearSampler_);
     if (pointSampler_) SDL_ReleaseGPUSampler(device_, pointSampler_);
     if (clampSampler_) SDL_ReleaseGPUSampler(device_, clampSampler_);
     if (shadowSampler_) SDL_ReleaseGPUSampler(device_, shadowSampler_);
+    if (volumeSampler_) SDL_ReleaseGPUSampler(device_, volumeSampler_);
+    if (waterPipeline_) SDL_ReleaseGPUGraphicsPipeline(device_, waterPipeline_);
+    if (waterVertex_) SDL_ReleaseGPUShader(device_, waterVertex_);
+    if (waterFragment_) SDL_ReleaseGPUShader(device_, waterFragment_);
     if (shadowMap_) SDL_ReleaseGPUTexture(device_, shadowMap_);
     if (globes_) SDL_ReleaseGPUTexture(device_, globes_);
     if (shadowPipeline_) SDL_ReleaseGPUGraphicsPipeline(device_, shadowPipeline_);
@@ -372,7 +459,7 @@ void Renderer::resize(uint32_t width, uint32_t height) {
     frameCopy_ = SDL_CreateGPUTexture(device_, &info);
     if (!frameCopy_) fail("SDL_CreateGPUTexture (frame copy)");
     info.format = depthFormat_;
-    info.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET;
+    info.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;     // sampled by the water pass
     depth_ = SDL_CreateGPUTexture(device_, &info);
     if (!depth_) fail("SDL_CreateGPUTexture (depth target)");
     width_ = width;
@@ -468,6 +555,7 @@ void Renderer::beginFrame(const Mat4& viewProjection, const tr::Vec3& cameraPosi
     translucentDraws_.clear();
     additiveDraws_.clear();
     refractDraws_.clear();
+    waterDraws_.clear();
     bones_.clear();
     currentSkin_ = nullptr;
     particleVertices_.clear();
@@ -540,6 +628,8 @@ void Renderer::drawAnisoAdditive(const GpuMesh& mesh, const Mat4& model, const A
     item.light = material.light;
     item.specular = material.specular;
     item.aniso = true;
+    item.anisoPlain = material.plain;
+    item.hue = material.hue;
     item.cullBlended = cullBack;
     item.layers = Vec4f{0, 0, material.detail ? 1.0f : 0.0f, material.decal ? 1.0f : 0.0f};
     item.anisoNormal = material.normalMatrix;
@@ -550,6 +640,11 @@ void Renderer::drawAnisoAdditive(const GpuMesh& mesh, const Mat4& model, const A
     item.boneBase = currentBoneBase_;
     item.skinNormals = currentSkinNormals_;
     additiveDraws_.push_back(item);
+}
+
+void Renderer::drawWater(const GpuMesh& mesh, const Mat4& model, const WaterMaterial& material) {
+    if (!mesh.vertices || mesh.indexCount == 0) return;
+    waterDraws_.push_back(WaterItem{&mesh, model, material});
 }
 
 void Renderer::drawParticles(const std::vector<MeshVertex>& vertices, SDL_GPUTexture* texture, uint32_t blendType) {
@@ -748,7 +843,8 @@ void Renderer::record(SDL_GPUCommandBuffer* commands) {
     depth.clear_depth = 1.0f;
     depth.load_op = SDL_GPU_LOADOP_CLEAR;
     const bool refraction = !refractDraws_.empty() && frameCopy_;
-    depth.store_op = refraction ? SDL_GPU_STOREOP_STORE : SDL_GPU_STOREOP_DONT_CARE;
+    const bool water = !waterDraws_.empty() && frameCopy_ && waterPipeline_;
+    depth.store_op = refraction || water ? SDL_GPU_STOREOP_STORE : SDL_GPU_STOREOP_DONT_CARE;
     depth.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
     depth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
     depth.cycle = true;
@@ -756,6 +852,18 @@ void Renderer::record(SDL_GPUCommandBuffer* commands) {
 
     SDL_GPUGraphicsPipeline* bound = nullptr;
     for (const DrawItem& item : draws_) recordItem(commands, pass, item, bound);
+    if (water) {
+        // Water after the opaque geometry, before translucent / additive pieces and particles (the game's order in the
+        // fountain trace: StretchRect of the frame after the sky phase, the water draws, then the glowstick's fins etc.).
+        SDL_EndGPURenderPass(pass);
+        recordWater(commands);
+        colour.load_op = SDL_GPU_LOADOP_LOAD;
+        depth.load_op = SDL_GPU_LOADOP_LOAD;
+        depth.store_op = refraction ? SDL_GPU_STOREOP_STORE : SDL_GPU_STOREOP_DONT_CARE;
+        depth.cycle = false;
+        pass = SDL_BeginGPURenderPass(commands, &colour, 1, &depth);
+        bound = nullptr;
+    }
     for (const DrawItem& item : translucentDraws_) recordItem(commands, pass, item, bound);     // after all opaque geometry
     for (const DrawItem& item : additiveDraws_) recordItem(commands, pass, item, bound);        // glows, holograms, light cones
     recordParticles(commands, pass);
@@ -802,6 +910,72 @@ void Renderer::record(SDL_GPUCommandBuffer* commands) {
             SDL_DrawGPUIndexedPrimitives(pass, item.mesh->indexCount, 1, 0, 0, 0);
         }
         bound = nullptr;
+    }
+    SDL_EndGPURenderPass(pass);
+}
+
+// Water: over a copy of the frame so far, sampling the scene depth (depth_ is not attached; the shader tests against it).
+void Renderer::recordWater(SDL_GPUCommandBuffer* commands) {
+    SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(commands);
+    SDL_GPUTextureLocation from = {}, to = {};
+    from.texture = colour_;
+    to.texture = frameCopy_;
+    SDL_CopyGPUTextureToTexture(copy, &from, &to, width_, height_, 1, false);
+    SDL_EndGPUCopyPass(copy);
+    SDL_GPUColorTargetInfo colour = {};
+    colour.texture = colour_;
+    colour.load_op = SDL_GPU_LOADOP_LOAD;
+    colour.store_op = SDL_GPU_STOREOP_STORE;
+    SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, &colour, 1, nullptr);
+    SDL_BindGPUGraphicsPipeline(pass, waterPipeline_);
+    struct WaterVertexUniforms {
+        Mat4 viewProjection;
+        Mat4 model;
+        Mat4 normalMatrix;
+        Vec4f eyePosition;
+        Vec4f fog;
+        Vec4f transform[8];
+    };
+    struct WaterFragmentUniforms {
+        Vec4f hemiTop, hemiBottom, dirColour, dirDirection, fogColour, matSpecular, matRefractColour, params, screen, eye;
+    };
+    const tr::Vec3 towards = normalized(lighting_.towardsLight);
+    for (const WaterItem& item : waterDraws_) {
+        SDL_GPUBufferBinding vertexBinding = {item.mesh->vertices, 0};
+        SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
+        SDL_GPUBufferBinding indexBinding = {item.mesh->indices, 0};
+        SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_32BIT);
+        const WaterMaterial& m = item.material;
+        WaterVertexUniforms v{};
+        v.viewProjection = viewProjection_;
+        v.model = item.model;
+        v.normalMatrix = inverseTranspose3(item.model);
+        v.eyePosition = cameraPosition_;
+        v.fog = Vec4f{lighting_.fogStart, lighting_.fogDensity, lighting_.fog ? 1.0f : 0.0f, 0};
+        for (int k = 0; k < 8; ++k) v.transform[k] = m.transform[k];
+        SDL_PushGPUVertexUniformData(commands, 0, &v, sizeof v);
+        WaterFragmentUniforms u{};
+        // The forward lights (gHemiLight, gDirLight[0]): the sky's hemi light and its main directional light (Color only).
+        u.hemiTop = lighting_.hemiTop;
+        u.hemiBottom = lighting_.hemiBottom;
+        u.dirColour = lighting_.sunFront;
+        u.dirDirection = Vec4f{-towards.x, -towards.y, -towards.z, 0};
+        u.fogColour = Vec4f{lighting_.fogColour.x, lighting_.fogColour.y, lighting_.fogColour.z, 1};
+        u.matSpecular = m.matSpecular;
+        u.matRefractColour = m.matRefractColour;
+        u.params = Vec4f{m.matPower, m.clampDepth != 0 ? 1.0f / m.clampDepth : 0.0f, m.refractionDisplacement, m.volumeDisplacement};
+        u.screen = Vec4f{1.0f / float(width_), 1.0f / float(height_), projection_.row2.z, projection_.row2.w};
+        u.eye = cameraPosition_;
+        SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof u);
+        const SDL_GPUTextureSamplerBinding samplers[7] = {{m.diffuse ? m.diffuse : white_, linearSampler_},
+                                                          {m.normalMap ? m.normalMap : white_, linearSampler_},
+                                                          {m.modifier ? m.modifier : white_, clampSampler_},
+                                                          {m.normalMap1 ? m.normalMap1 : white_, linearSampler_},
+                                                          {m.volume ? m.volume : whiteVolume_, volumeSampler_},
+                                                          {depth_, pointSampler_},
+                                                          {frameCopy_, clampSampler_}};
+        SDL_BindGPUFragmentSamplers(pass, 0, samplers, 7);
+        SDL_DrawGPUIndexedPrimitives(pass, item.mesh->indexCount, 1, 0, 0, 0);
     }
     SDL_EndGPURenderPass(pass);
 }
@@ -891,7 +1065,7 @@ void Renderer::recordItem(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pas
                                                           {item.glossMap ? item.glossMap : black_, linearSampler_},
                                                           {environment_ ? environment_ : blackCube_, clampSampler_}};
         SDL_BindGPUFragmentSamplers(pass, 0, samplers, 10);
-        SceneFragmentUniforms u{item.tint, towardsLight_, Vec4f{item.alphaTest ? item.alphaReference : 0.0f, item.translucent ? 2.0f : 0.0f, item.additive ? (item.forwardLit ? 2.0f : 1.0f) : 0.0f, item.aniso ? 1.0f : 0.0f},
+        SceneFragmentUniforms u{item.tint, towardsLight_, Vec4f{item.alphaTest ? item.alphaReference : 0.0f, item.translucent ? 2.0f : 0.0f, item.additive ? (item.forwardLit ? 2.0f : 1.0f) : 0.0f, item.aniso ? (item.anisoPlain ? 2.0f : 1.0f) : 0.0f},
                                 item.hue, lightingUniforms(lighting_, cameraPosition_, shadowMatrix_, shadowsActive_, float(shadowSize)), item.specular, item.layers,
                                 Vec4f{item.normalMap ? 1.0f : 0.0f, item.glossMap ? 1.0f : 0.0f, item.environment && environment_ ? 1.0f : 0.0f,
                                       item.trHairCutout ? 1.0f : 0.0f},

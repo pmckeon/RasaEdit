@@ -58,7 +58,8 @@ cbuffer FragmentUniforms : register(b0, space3)
     float4 localSpotInner[MAX_LOCAL_LIGHTS];
     float4 localRotation[MAX_LOCAL_LIGHTS];
     row_major float4x4 shadowMatrix;   // world -> sun shadow map clip space
-    float4 shadowParams;              // x: 1 = sun shadows on, y: opacity, z: 1 / map size
+    float4 shadowParams;              // x: 1 = sun shadows on, y: opacity, z: 1 / map size, w: g_ShadowSoftness
+    float4 shadowExtra;               // xyz: camera forward (view depth for the bias), w: shadow-map depth units per metre
     float4 extraTowards[MAX_EXTRA_DIRECTIONAL];   // further directional sky lights: towards the light, w = 1 in use
     float4 extraFront[MAX_EXTRA_DIRECTIONAL];
     float4 extraBack[MAX_EXTRA_DIRECTIONAL];
@@ -194,14 +195,25 @@ float3 anisoAdditive(VertexOutput input)
     float3 albedo = diffuse.rgb;
     if (layers.z > 0.5)
         albedo += detailTexture.Sample(detailSampler, trTransformUv(input.uv1, 1)).rgb - 0.5;
+    if (options.w > 1.5 && hue.w > 0.5)
+        albedo += hue.rgb - 0.5;                // PSAdditiveDetDetHueCompiled: + Hue (stored as colour - 0.5), not weighted
     if (layers.w > 0.5)
     {
         const float4 decal = decalTexture.Sample(decalSampler, trTransformUv(input.uv2, 2));
         albedo = lerp(albedo, decal.rgb, decal.a);
     }
     // Facing from the vertex shader (per vertex, unnormalised normal - see VertexUniforms); LightTexture is sampled clamped.
-    const float ramp = lightTexture.Sample(lightSampler, float2(0.5, input.aniso.x)).a;
     const float alpha = diffuse.a * input.colour.a * tint.a;
+    // options.w = 2: the plain TRAdditiveDiffMap[DetMapDecMap]VertColor[Hue] effects (PSAdditiveCompiled /
+    // PSAdditiveDetDet[Hue]Compiled, disassembled 2026-10-14 and checked against an apitrace capture of a glowstick):
+    // albedo x (2 x vertex colour)^2 x alpha, written with that alpha and blended SRCALPHA / ONE (alpha squared overall),
+    // fogged to black per vertex like the aniso shader (vsAdditiveDiff / vsAdditive_Array).
+    if (options.w > 1.5)
+    {
+        const float3 v2 = 2.0 * input.colour.rgb;
+        return max(albedo * v2 * v2, 0.0) * alpha * alpha * input.aniso.y;
+    }
+    const float ramp = lightTexture.Sample(lightSampler, float2(0.5, input.aniso.x)).a;
     // The shader writes this alpha to oC0.w and its pass blends SRCALPHA / ONE, so the frame gets the colour x alpha
     // again (alpha squared overall); the editor's additive pipeline is ONE / ONE, so it is applied here.
     // Fog: FOGCOLOR 0, so the colour is scaled by the per-vertex visibility before the SRCALPHA / ONE blend.
@@ -332,7 +344,7 @@ float4 psMain(VertexOutput input) : SV_Target0
     // Glow maps add after lighting (the game's glow buffer, added in trhdrcomposite before fog).
     const float3 glow = glowTexture.Sample(glowSampler, input.uv1).rgb + ((trBits & 0x8) ? trEmissive.rgb : float3(0, 0, 0));
     // Translucent draws are forward pieces: the game's forward vertex shader has no shadow term.
-    s.sunVisibility = options.y > 1.5 ? 1.0 : sunShadow(shadowMap, shadowSampler, shadowMatrix, shadowParams, input.world, n);
+    s.sunVisibility = options.y > 1.5 ? 1.0 : sunShadow(shadowMap, shadowSampler, shadowMatrix, shadowParams, shadowExtra, cameraPosition.xyz, input.world, n);
     const float3 light = skyLight(n, s) + extraSkyLight(n, extraTowards, extraFront, extraBack, options.y > 1.5) + localLights(input.world, n, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner, localRotation,
                                                          globeMaps, globeSampler);
     if (fogRange.z > 0.5)
@@ -360,6 +372,7 @@ float4 psMain(VertexOutput input) : SV_Target0
         [unroll] for (int k = 0; k < MAX_EXTRA_DIRECTIONAL; ++k)
             if (extraTowards[k].w > 0.5)
                 lit += extraFront[k].rgb * specularFactor(n, v, extraTowards[k].xyz, gloss.r, gloss.g);
+        lit += hemiSpecular(n, v, gloss.r, gloss.g, hemiTop.rgb);
         lit += sunFront.rgb * specularFactor(n, v, s.towardsLight, gloss.r, gloss.g) * s.sunVisibility +
                localSpecular(input.world, n, v, gloss.r, gloss.g, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner);
     }

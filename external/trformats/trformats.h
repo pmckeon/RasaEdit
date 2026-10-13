@@ -509,6 +509,7 @@ struct GeoVertex {
     Vec2 uv;
     Vec2 uv1;                          // TEXCOORD1, if present (e.g. GlowTexCoord 1)
     Vec2 uv2;                          // TEXCOORD2, if present (e.g. DecalTexCoord 2)
+    Vec2 uv3;                          // TEXCOORD3, if present (water: VolMapTexCoord 3)
     // Tangent frame for normal maps (Pal* effects): TANGENT0 = tangent, TANGENT1 = binormal (the Pal vertex shader
     // vs2x_OffsetVSNoParallax reads dcl_tangent / dcl_tangent1; verified 2026-10-11).
     Vec3 tangent;

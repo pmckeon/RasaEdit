@@ -181,6 +181,7 @@ public:
     bool animateSkins = true;               // play blended skinned pieces of animated map objects (GPU skinning)
     std::string hiddenGroup;                // debug: skip model pieces of this GPCE group; "!<group>" draws only it
     int onlyEntity = -1;                    // debug: draw only this map entity (-1 = all)            // environment cube reflections (Pal*Env*); off for comparison
+    int entityFirst = -1, entityLast = -1;  // debug: draw only map entities in [first, last) (-1 = all)
     std::unordered_map<std::string, int> globeIndex_;    // lower-case GlobeMapFile -> cube index (1-based; 0 = none)
     std::string globeErrors_;
     void loadGlobeMaps();
@@ -251,11 +252,14 @@ private:
         bool skinNormals = true;               // false for TRAdditiveAnisoSpec*: the game skins only the position
         const Model* skinOwner = nullptr;         // the model whose skeleton and animation pose it
         // Model animation's material tracks (index into animation.materialTracks, -1: none) for TexCoordTransform0..2.
-        int uvTrack0 = -1, uvTrack1 = -1, uvTrack2 = -1;
+        int uvTrack0 = -1, uvTrack1 = -1, uvTrack2 = -1, uvTrack3 = -1;
+        bool waterShader = false;                           // TRWaterReflectRefract: drawn by Renderer::drawWater
+        WaterMaterial waterMaterial;
         std::string group;                     // GPCE group (GeoPiece::swapGroup)
     };
     struct UvTransforms {                      // TexCoordTransform0..2 as u / v rows (see TrMaterial)
         Vec4f u0, v0, u1, v1, u2, v2;
+        Vec4f u3 = Vec4f{1, 0, 0, 0}, v3 = Vec4f{0, 1, 0, 0};
     };
     struct Model {
         std::vector<ModelPiece> pieces;
@@ -366,6 +370,9 @@ private:
     };
     // poseAnimation: skin the model into the first frame of this .anm ("" = as authored, bind pose).
     Model* modelFor(const std::string& mesh, const std::string& poseAnimation = "", const std::string& skeletonMesh = "");
+    std::string objectAnimationFor(const std::string& mesh);
+    Model* objectModelFor(const std::string& mesh, const std::string& packageAnimation = "");
+    std::unordered_map<std::string, std::string> objectAnimations_;   // mesh -> its object animation ("" = none)
     SceneLighting skyLightingAt() const;       // the sky part of lighting()
     // Puts the camera distance metres from target, looking at it (see focusOn).
     void frameTarget(const tr::Vec3& target, float distance);
@@ -389,6 +396,7 @@ private:
     void buildTerrainMaterial();
     void loadModel(const std::string& name, Model& model);
     SDL_GPUTexture* texture(const std::string& name);       // cached; nullptr if missing or unreadable
+    SDL_GPUTexture* volumeTexture(const std::string& name); // 3D (volume DDS); cached; nullptr if missing or unreadable
 
     Renderer& renderer_;
     const tr::AssetLibrary& assets_;

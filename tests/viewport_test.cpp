@@ -648,6 +648,15 @@ int main(int argc, char** argv) {
             std::printf("sky at the camera: %s%s; hemi top %.2f %.2f %.2f, sun %.2f %.2f %.2f\n", scene.skies()[std::min(scene.activeSkyIndex(), scene.skies().size() - 1)].name.c_str(),
                         scene.skyFromRegion() ? " (by region)" : "", active.hemiTop.x, active.hemiTop.y, active.hemiTop.z, active.sunFront.x, active.sunFront.y, active.sunFront.z);
         }
+        // RASA_LISTLIGHTS=1: the placed lights chosen for the frame (position, range, colour x intensity, kind from localSpot.w).
+        if (envValue("RASA_LISTLIGHTS")) {
+            const SceneLighting active = scene.lighting();
+            for (int i = 0; i < active.localCount; ++i)
+                std::printf("light %d at %.1f %.1f %.1f range %.1f colour %.3f %.3f %.3f fade from %.1f kind %s globe %.0f spot %.3f %.3f %.3f %.4f inner %.4f\n", i, active.localPosition[i].x,
+                            active.localPosition[i].y, active.localPosition[i].z, active.localPosition[i].w, active.localColour[i].x, active.localColour[i].y,
+                            active.localColour[i].z, active.localColour[i].w, active.localSpot[i].w == -2.0f ? "point" : active.localSpot[i].w == -3.0f ? "plane" : "spot",
+                            active.localSpotInner[i].y, active.localSpot[i].x, active.localSpot[i].y, active.localSpot[i].z, active.localSpot[i].w, active.localSpotInner[i].x);
+        }
         std::printf("environment cube at the camera: %s\n", scene.activeEnvironmentMap().c_str());
         for (const auto& e : scene.environmentMapErrors()) std::printf("environment cube %s failed: %s\n", e.first.c_str(), e.second.c_str());
         // Particle systems: started (with their warm-up) and run for RASA_PARTICLES seconds more (default 0.5);
@@ -661,6 +670,8 @@ int main(int argc, char** argv) {
         const float particleSeconds = envValue("RASA_PARTICLES") ? float(std::atof(envValue("RASA_PARTICLES"))) : 0.5f;
         // Terrain clutter: every cell around the camera at once, models loaded before the frame (RASA_NOCLUTTER=1: none).
         if (envValue("RASA_NOCLUTTER")) scene.showClutter = false;
+        // RASA_NOSERVER=1: hide the server layer (markers, creatures) while RASA_DB still supplies the regions (sky, environment map).
+        if (envValue("RASA_NOSERVER")) { scene.showServer = false; scene.showMissionAreas = false; }
         if (const char* flora = envValue("RASA_FLORA")) scene.clutterDensity = float(std::atof(flora));   // density factor
         else {
             scene.clutterCellsPerFrame = 1000;
@@ -695,6 +706,7 @@ int main(int argc, char** argv) {
         if (const char* group = envValue("RASA_HIDEGROUP")) scene.hiddenGroup = group;   // skip model pieces of one GPCE group
         if (envValue("RASA_NOSKINANIM")) scene.animateSkins = false;   // keep blended skinned pieces in frame 0
         if (const char* only = envValue("RASA_ONLY")) scene.onlyEntity = std::atoi(only);   // draw one map entity alone
+        if (const char* range = envValue("RASA_ENTITYRANGE")) std::sscanf(range, "%d,%d", &scene.entityFirst, &scene.entityLast);   // bisecting
         if (const char* sel = envValue("RASA_SELECT")) highlighted = Selection{SelectionKind::MapEntity, size_t(std::atoi(sel))};
         // RASA_SKINTIMING=1: time 20 frames of queueDraws with the light clock advancing (object animations re-skinned each
         // frame) against the same with skin playback off.

@@ -16,6 +16,7 @@ struct MeshVertex {
     float texU = 0, texV = 0;
     float texU1 = 0, texV1 = 0;        // second UV set (glow maps; TR materials: the UV set of their second map)
     float texU2 = 0, texV2 = 0;        // TR materials: the UV set of their third map
+    float texU3 = 0, texV3 = 0;        // UV set 3 (water: VolMapTexCoord; read only by the water pipeline)
     float tangentX = 0, tangentY = 0, tangentZ = 0;     // normal maps: tangent frame (model space, like the normal)
     float binormalX = 0, binormalY = 0, binormalZ = 0;
 };
@@ -54,6 +55,25 @@ struct RefractMaterial {
     Vec4f transform1u = Vec4f{1, 0, 0, 0}, transform1v = Vec4f{0, 1, 0, 0};
 };
 
+// TRWaterReflectRefract (shaders/water.hlsl; the shaders bound at a water draw in an apitrace capture, 2026-10-14): textures
+// and parameters as the .geo material names them. UV sets: diffuse 0, normal map 1, normal map 1 2, volume 3 (the
+// NormalMap0TexCoord / NormalMap1TexCoord / VolMapTexCoord of the traced piece; other assignments are not decoded).
+struct WaterMaterial {
+    SDL_GPUTexture* diffuse = nullptr;
+    SDL_GPUTexture* normalMap = nullptr;
+    SDL_GPUTexture* normalMap1 = nullptr;
+    SDL_GPUTexture* modifier = nullptr;    // ModifierTexture: alpha by thickness
+    SDL_GPUTexture* volume = nullptr;      // VolumeMapTexture (3D): colour by (UV, thickness)
+    float matPower = 0;
+    float clampDepth = 1;
+    float refractionDisplacement = 0;
+    float volumeDisplacement = 0;
+    Vec4f matSpecular = Vec4f{0, 0, 0, 0};
+    Vec4f matRefractColour = Vec4f{1, 1, 1, 1};
+    Vec4f transform[8] = {Vec4f{1, 0, 0, 0}, Vec4f{0, 1, 0, 0}, Vec4f{1, 0, 0, 0}, Vec4f{0, 1, 0, 0},
+                          Vec4f{1, 0, 0, 0}, Vec4f{0, 1, 0, 0}, Vec4f{1, 0, 0, 0}, Vec4f{0, 1, 0, 0}};   // TexCoordTransform0..3 u, v rows
+};
+
 // Material of the game's TRAdditiveAnisoSpecMapDiffMap[DetMapDecMap]VertColor effects (shader in effects.glm, verified by disassembly):
 //   albedo = lerp(diffuse + detail - 0.5, decal, decal.a);  alpha = diffuse.a * vertex.a * MatDiffuse.a
 //   colour = 4 * alpha * albedo * (albedo * vertex.rgb + LightTexture(0.5, max(N.V, 0)).a * MatSpecular)
@@ -73,6 +93,12 @@ struct AnisoMaterial {
     Vec4f transform2u = Vec4f{1, 0, 0, 0}, transform2v = Vec4f{0, 1, 0, 0};
     // The facing term's normal matrix (scene.hlsl VertexUniforms::anisoNormal): 3 x 3 applied to the vertex normal, not normalised.
     Mat4 normalMatrix = identityMatrix();
+    // plain: the TRAdditiveDiffMap[DetMapDecMap]VertColor[Hue] effects (forward pixel shaders PSAdditiveCompiled /
+    // PSAdditiveDetDet[Hue]Compiled, disassembled 2026-10-14; the same vertex shader layout and per-vertex fog):
+    //   albedo = lerp(diffuse + detail - 0.5 [+ Hue - 0.5], decal, decal.a);  alpha = diffuse.a * vertex.a * MatDiffuse.a
+    //   colour = albedo * (2 * vertex.rgb)^2 * alpha, written with that alpha and blended SRCALPHA / ONE (no specular / facing term).
+    bool plain = false;
+    Vec4f hue = Vec4f{0, 0, 0, 0};           // plain + Hue effect: w = 1, rgb = the material's Hue colour (added unweighted, - 0.5)
 };
 
 // GPU skinning: per vertex, up to 4 bones of the model's skeleton (index into the bone palette given by setSkin) and their
@@ -122,6 +148,9 @@ struct SceneLighting {
     // (tr::skyLightShadowOpacity; e.g. 0.75 at 12:00 in sky_foreas_wilderness_default_tranz.sky).
     bool sunShadows = false;
     float shadowOpacity = 1.0f;
+    // g_ShadowSoftness: the PCF taps' offset in half texels (TRDirLight ps3dir[1]); its runtime value is NOT traced (1 assumed).
+    float shadowSoftness = 1.0f;
+    tr::Vec3 cameraForward{0, 0, 1};    // the shadow bias grows with the camera view depth
     // Further directional sky lights (every enabled layer light applies, not only the sun: e.g. the second "Light" of
     // sky_foreas_wilderness_default_tranz.sky, orange at dawn / dusk, ShadowOpacity 0). Drawn without the shadow map
     // (exact for ShadowOpacity 0; UNVERIFIED for others).
@@ -133,7 +162,7 @@ struct SceneLighting {
     SDL_FColor clearColour{0.55f, 0.66f, 0.78f, 1.0f};   // background (the sky colour with sky lighting)
     // Placed lights, laid out as the shaders' arrays (shaders/lighting.hlsli): position xyz + range; colour rgb *
     // intensity + fade share; spot direction + cos(outer half angle) (-2 = point); x = cos(inner half angle).
-    static constexpr int maxLocalLights = 16;
+    static constexpr int maxLocalLights = 32;
     int localCount = 0;
     Vec4f localPosition[maxLocalLights] = {};
     Vec4f localColour[maxLocalLights] = {};
@@ -179,6 +208,10 @@ public:
     void setCameraAxes(const tr::Vec3& right, const tr::Vec3& up, const tr::Vec3& forward) { cameraRight_ = right; cameraUp_ = up; cameraForward_ = forward; }
     // A refraction shell, drawn after the opaque geometry over a copy of the frame (alpha blended, depth written, two-sided).
     void drawRefract(const GpuMesh& mesh, const Mat4& model, const RefractMaterial& material);
+    // A water surface (TRWaterReflectRefract), drawn after the opaque geometry over a copy of the frame, sampling the scene depth.
+    void drawWater(const GpuMesh& mesh, const Mat4& model, const WaterMaterial& material);
+    // The view's projection (for view depths from the depth buffer); call after beginFrame.
+    void setProjection(const Mat4& projection) { projection_ = projection; }
     // texture nullptr draws untextured (white); alphaTest discards texels with alpha below alphaReference.
     // hue (w = 1) adds hue.rgb weighted by the texture alpha, as the game's "Hue" effects do (avatar skin, hair, clothing).
     // glow (sampled with the second UV set) is added after lighting, as the game's glow buffer is.
@@ -218,6 +251,10 @@ public:
     // The global environment cube (the game's gGlobalEnvTexture) that Pal*Env* pieces reflect; null = a black cube.
     // Not owned (SceneView keeps its region cubes); set each frame before record().
     void setEnvironmentMap(SDL_GPUTexture* cube) { environment_ = cube; }
+    // Sun shadow map (depth from the sun, orthographic, centred on the camera, texel-snapped).
+    static constexpr uint32_t shadowSize = 2048;
+    static constexpr float shadowExtent = 120.0f;   // half width in metres
+    static constexpr float shadowDepth = 1200.0f;
     void record(SDL_GPUCommandBuffer* commands);
     size_t queuedDraws() const { return draws_.size() + translucentDraws_.size() + additiveDraws_.size() + particleBatches_.size(); }
     size_t queuedParticleVertices() const { return particleVertices_.size(); }
@@ -241,6 +278,7 @@ private:
         Vec4f specular = Vec4f{0, 0, 0, 0};
         Vec4f layers = Vec4f{0, 0, 0, 0};
         bool aniso = false;
+        bool anisoPlain = false;                 // aniso: AnisoMaterial::plain
         bool forwardLit = false;                 // lit additive (forward-phase piece)
         bool twoSided = false;
         SDL_GPUBuffer* skinVertices = nullptr;   // GPU skinning (setSkin); null = as stored
@@ -295,6 +333,19 @@ private:
     uint32_t currentBoneBase_ = 0;
     bool currentSkinNormals_ = true;
     std::vector<RefractItem> refractDraws_;
+    struct WaterItem {
+        const GpuMesh* mesh;
+        Mat4 model;
+        WaterMaterial material;
+    };
+    std::vector<WaterItem> waterDraws_;
+    SDL_GPUGraphicsPipeline* waterPipeline_ = nullptr;
+    SDL_GPUShader* waterVertex_ = nullptr;
+    SDL_GPUShader* waterFragment_ = nullptr;
+    SDL_GPUSampler* volumeSampler_ = nullptr;
+    SDL_GPUTexture* whiteVolume_ = nullptr;  // linear, wrap u / v, clamp w (the water's volume map)
+    Mat4 projection_ = identityMatrix();
+    void recordWater(SDL_GPUCommandBuffer* commands);
     tr::Vec3 cameraRight_{1, 0, 0}, cameraUp_{0, 1, 0}, cameraForward_{0, 0, 1};
     SDL_GPUGraphicsPipeline* additivePipeline_ = nullptr;
     SDL_GPUGraphicsPipeline* culledAdditivePipeline_ = nullptr;
@@ -314,10 +365,6 @@ private:
     uint32_t particleCapacity_ = 0;            // vertices
     void uploadParticles(SDL_GPUCommandBuffer* commands);
     void recordParticles(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass);
-    // Sun shadow map (depth from the sun, orthographic, centred on the camera, texel-snapped).
-    static constexpr uint32_t shadowSize = 2048;
-    static constexpr float shadowExtent = 120.0f;   // half width in metres
-    static constexpr float shadowDepth = 1200.0f;
     SDL_GPUShader* shadowFragment_ = nullptr;
     SDL_GPUGraphicsPipeline* shadowPipeline_ = nullptr;
     SDL_GPUTexture* shadowMap_ = nullptr;
