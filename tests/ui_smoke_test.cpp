@@ -12,7 +12,9 @@
 #include "imgui.h"
 #include "imgui_internal.h"   // DockBuilderGetNode
 
+#include <algorithm>
 #include <cstdio>
+#include <vector>
 #include <cstdlib>
 #include <string>
 
@@ -55,8 +57,8 @@ static void frames(Editor& editor, SDL_GPUDevice* device, int count) {
     }
 }
 
-static void saveViewport(EditorContext& ctx, SDL_GPUDevice* device, const char* path) {
-    const uint32_t w = ctx.renderer->width(), h = ctx.renderer->height();
+// Writes "<w> <h>\n" then RGBA rows; returns how many distinct colours the image has (0 on failure).
+static size_t saveTexture(SDL_GPUDevice* device, SDL_GPUTexture* texture, uint32_t w, uint32_t h, const char* path) {
     SDL_GPUTransferBufferCreateInfo info = {};
     info.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
     info.size = w * h * 4;
@@ -64,7 +66,7 @@ static void saveViewport(EditorContext& ctx, SDL_GPUDevice* device, const char* 
     SDL_GPUCommandBuffer* commands = SDL_AcquireGPUCommandBuffer(device);
     SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(commands);
     SDL_GPUTextureRegion source = {};
-    source.texture = ctx.renderer->colourTarget();
+    source.texture = texture;
     source.w = w;
     source.h = h;
     source.d = 1;
@@ -75,13 +77,22 @@ static void saveViewport(EditorContext& ctx, SDL_GPUDevice* device, const char* 
     SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(commands);
     SDL_WaitForGPUFences(device, true, &fence, 1);
     SDL_ReleaseGPUFence(device, fence);
-    FILE* f = std::fopen(path, "wb");
-    if (!f) { std::printf("cannot write %s\n", path); return; }
-    std::fprintf(f, "%u %u\n", w, h);
-    std::fwrite(SDL_MapGPUTransferBuffer(device, download, false), 1, w * h * 4, f);
-    std::fclose(f);
+    const uint32_t* pixels = static_cast<const uint32_t*>(SDL_MapGPUTransferBuffer(device, download, false));
+    std::vector<uint32_t> colours(pixels, pixels + size_t(w) * h);
+    if (FILE* f = std::fopen(path, "wb")) {
+        std::fprintf(f, "%u %u\n", w, h);
+        std::fwrite(pixels, 1, w * h * 4, f);
+        std::fclose(f);
+    } else {
+        std::printf("cannot write %s\n", path);
+    }
     SDL_UnmapGPUTransferBuffer(device, download);
     SDL_ReleaseGPUTransferBuffer(device, download);
+    std::sort(colours.begin(), colours.end());
+    return size_t(std::unique(colours.begin(), colours.end()) - colours.begin());
+}
+static void saveViewport(EditorContext& ctx, SDL_GPUDevice* device, const char* path) {
+    saveTexture(device, ctx.renderer->colourTarget(), ctx.renderer->width(), ctx.renderer->height(), path);
 }
 
 int main() {
@@ -195,6 +206,52 @@ int main() {
         check(!ctx.scene->showServer, "client viewport hides the server overlay");
         check(editor.client_->visibleEntities_.size() == ctx.map->map.entities.size(), "client entity table filled");
         saveViewport(ctx, device, outputPath("smoke_client.rgba").c_str());
+
+        // Assets panel previews: a model (rendered by its own scene and renderer), a texture and a sound.
+        {
+            ImGuiWindow* w = ImGui::FindWindowByName("Assets###Client.Assets");
+            auto showAssets = [&]() {           // as a click on its tab (the tab bar keeps its own selection)
+                if (!w || !w->DockNode) return;
+                w->DockNode->SelectedTabId = w->TabId;
+                if (w->DockNode->TabBar) w->DockNode->TabBar->NextSelectedTabId = w->TabId;
+            };
+            showAssets();
+            AssetPreview& preview = editor.client_->assets_.preview_;
+            preview.select(ctx, "npc_eloh_hologram_large.geo");
+            frames(editor, device, 30);
+            check(preview.kind_ == AssetPreview::Kind::Model && preview.scene_ && preview.scene_->modelsLoaded() == 1 && preview.modelFitted_,
+                  "model preview loads and frames the model");
+            const size_t colours = preview.renderer_ ? saveTexture(device, preview.renderer_->colourTarget(), preview.renderer_->width(),
+                                                                   preview.renderer_->height(), outputPath("smoke_preview_model.rgba").c_str())
+                                                     : 0;
+            std::printf("      model preview %ux%u, %zu colours, radius %.1f m\n", preview.renderer_ ? preview.renderer_->width() : 0,
+                        preview.renderer_ ? preview.renderer_->height() : 0, colours, preview.distance_);
+            check(colours > 100, "model preview draws something");
+            showAssets();
+            preview.select(ctx, "arch_eloh_obelisk_v02.geo");
+            frames(editor, device, 30);
+            check(preview.scene_ && preview.scene_->modelsLoaded() == 1 && preview.modelFitted_, "second model preview loads");
+            if (preview.renderer_)
+                saveTexture(device, preview.renderer_->colourTarget(), preview.renderer_->width(), preview.renderer_->height(),
+                            outputPath("smoke_preview_model2.rgba").c_str());
+            preview.select(ctx, "hum_m_nude_v00_df.dds");
+            frames(editor, device, 2);
+            check(preview.kind_ == AssetPreview::Kind::Texture && preview.texture_ && preview.textureWidth_ == 512, "texture preview decodes the DDS");
+            preview.select(ctx, "MissionAccomplished.wav");
+            frames(editor, device, 2);
+            check(preview.kind_ == AssetPreview::Kind::Sound && preview.soundFrames_ > 0 && preview.soundSpec_.channels == 2, "WAV preview loads the sound");
+            // Ogg Vorbis and MP3 through SDL_mixer's libvorbis / mpg123 decoders (no audio device is opened: nothing plays).
+            for (const char* sound : {"Mis_BootCamp_deployment.ogg", "AFSOutpost.mp3"}) {
+                preview.select(ctx, sound);
+                frames(editor, device, 2);
+                std::printf("      %s: %d Hz, %d channels, %lld frames\n", sound, preview.soundSpec_.freq, preview.soundSpec_.channels,
+                            (long long)preview.soundFrames_);
+                check(preview.kind_ == AssetPreview::Kind::Sound && preview.soundSpec_.freq > 0, sound);
+            }
+            preview.select(ctx, "sky_foreas_bootcamp_d11.sky");
+            frames(editor, device, 2);
+            check(preview.kind_ == AssetPreview::Kind::Text && preview.text_.find("SkyData") != std::string::npos, "text preview shows the .sky");
+        }
 
         // Back to server: its selection and options survive the switch.
         editor.setActive(editor.server_.get());

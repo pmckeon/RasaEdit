@@ -105,7 +105,10 @@ void Editor::drawMenuBar() {
 
 void Editor::renderViewport(SDL_GPUCommandBuffer* commands) { active_->renderViewport(commands); }
 
-void Editor::releaseGpuResources() { context_->releaseGpuResources(); }
+void Editor::releaseGpuResources() {
+    client_->releaseGpuResources();
+    context_->releaseGpuResources();
+}
 
 // ------------------------------------------------------------------------------------------
 // Unsaved changes

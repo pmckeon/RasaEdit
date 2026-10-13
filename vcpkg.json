@@ -14,6 +14,13 @@
         "vulkan"
       ]
     },
+    {
+      "name": "sdl3-mixer",
+      "features": [
+        "libvorbis",
+        "mpg123"
+      ]
+    },
     "zlib",
     "sqlite3"
   ]

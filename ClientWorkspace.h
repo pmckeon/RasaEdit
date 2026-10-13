@@ -14,7 +14,11 @@ public:
     const char* dockspaceName() const override { return "ClientDockSpace"; }
     void buildDefaultLayout(ImGuiID dockspace) override;
     void drawPanels() override;
-    void renderViewport(SDL_GPUCommandBuffer* commands) override { viewport_.render(ctx_, commands, selection_); }
+    void renderViewport(SDL_GPUCommandBuffer* commands) override {
+        viewport_.render(ctx_, commands, selection_);
+        assets_.render(ctx_, commands);             // the Assets panel's model preview, when shown
+    }
+    void releaseGpuResources() { assets_.releaseGpuResources(); }
     void onGameOpened() override;
     void onMapLoaded() override;
 

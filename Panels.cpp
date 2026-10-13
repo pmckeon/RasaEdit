@@ -120,68 +120,59 @@ void drawMapInfoPanel(EditorContext& ctx, const char* title) {
     ImGui::End();
 }
 
-void AssetsPanel::rebuild() {
+void AssetsPanel::rebuild(EditorContext& ctx) {
     visible_.clear();
     const std::string needle = tr::toLowerAscii(filter_);
     for (size_t k = 0; k < names_.size(); ++k)
         if (containsIgnoreCase(names_[k], needle)) visible_.push_back(k);
     selected_ = -1;
-    details_.clear();
+    preview_.select(ctx, "");
 }
 void AssetsPanel::draw(EditorContext& ctx, const char* title) {
     if (!ImGui::Begin(title)) { ImGui::End(); return; }
     if (!ctx.assets) { ImGui::TextDisabled("No game folder open."); ImGui::End(); return; }
     ImGui::SetNextItemWidth(260);
-    if (ImGui::InputTextWithHint("##assetfilter", "search asset names", filter_, sizeof filter_)) rebuild();
+    if (ImGui::InputTextWithHint("##assetfilter", "search asset names", filter_, sizeof filter_)) rebuild(ctx);
     ImGui::SameLine();
     ImGui::TextDisabled("%zu of %zu", visible_.size(), names_.size());
-    const float detailsWidth = ImGui::GetContentRegionAvail().x * 0.45f;
+    const float detailsWidth = ImGui::GetContentRegionAvail().x * 0.55f;
     if (ImGui::BeginChild("assetlist", ImVec2(ImGui::GetContentRegionAvail().x - detailsWidth, 0), ImGuiChildFlags_Borders)) {
         ImGuiListClipper clipper;
         clipper.Begin(int(visible_.size()));
         while (clipper.Step()) {
             for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
                 const size_t index = visible_[size_t(row)];
-                if (ImGui::Selectable(names_[index].c_str(), selected_ == int(index))) {
+                if (ImGui::Selectable(names_[index].c_str(), selected_ == int(index)) && selected_ != int(index)) {
                     selected_ = int(index);
-                    const std::string& name = names_[index];
-                    const auto location = ctx.assets->locate(name);
-                    details_.clear();
-                    if (location && location->inArchive) {
-                        char line[512];
-                        std::snprintf(line, sizeof line, "%s\n%u bytes (%u stored%s)\n", fs::path(ctx.assets->archives()[location->archiveIndex].archive->path()).filename().string().c_str(),
-                                      location->entry->rawSize, location->entry->storedSize, location->entry->flags ? ", zlib" : "");
-                        details_ = line;
-                    } else if (location) {
-                        details_ = location->filePath + "\n";
-                    }
-                    const std::string lower = tr::toLowerAscii(name);
-                    if (lower.size() > 4 && lower.compare(lower.size() - 4, 4, ".geo") == 0) {
-                        try {
-                            const tr::GeoModel model = tr::readGeo(ctx.assets->read(name));
-                            size_t vertices = 0, triangles = 0;
-                            for (const auto& p : model.pieces) { vertices += p.vertices.size(); triangles += p.indices.size() / 3; }
-                            details_ += "\n" + std::to_string(model.pieces.size()) + " pieces, " + std::to_string(model.bones.size()) + " bones, " +
-                                             std::to_string(vertices) + " vertices, " + std::to_string(triangles) + " triangles\n";
-                            for (const auto& p : model.pieces)
-                                details_ += "  " + std::string(p.skinned ? "skinned " : "") + p.effectName + "  " + p.diffuseTexture + "\n";
-                        } catch (const std::exception& e) {
-                            details_ += std::string("\n.geo parse error: ") + e.what() + "\n";
-                        }
-                    }
+                    preview_.select(ctx, names_[index]);
                 }
+            }
+        }
+        // Up / down keys step through the list while it has focus.
+        if (ImGui::IsWindowFocused() && !visible_.empty()) {
+            int step = 0;
+            if (ImGui::IsKeyPressed(ImGuiKey_DownArrow)) step = 1;
+            if (ImGui::IsKeyPressed(ImGuiKey_UpArrow)) step = -1;
+            if (step != 0) {
+                const auto at = std::find(visible_.begin(), visible_.end(), size_t(selected_));
+                const int row = at == visible_.end() ? (step > 0 ? 0 : int(visible_.size()) - 1)
+                                                     : std::clamp(int(at - visible_.begin()) + step, 0, int(visible_.size()) - 1);
+                selected_ = int(visible_[size_t(row)]);
+                preview_.select(ctx, names_[size_t(selected_)]);
+                ImGui::SetScrollY(std::max(0.0f, row * ImGui::GetTextLineHeightWithSpacing() - ImGui::GetWindowHeight() * 0.5f));
             }
         }
     }
     ImGui::EndChild();
     ImGui::SameLine();
-    if (ImGui::BeginChild("assetdetails", ImVec2(0, 0), ImGuiChildFlags_Borders)) ImGui::TextWrapped("%s", details_.c_str());
+    if (ImGui::BeginChild("assetdetails", ImVec2(0, 0), ImGuiChildFlags_Borders)) preview_.draw(ctx);
     ImGui::EndChild();
     ImGui::End();
 }
 void AssetsPanel::reset(EditorContext& ctx) {
     names_ = ctx.assets ? ctx.assets->namesWithExtension("") : std::vector<std::string>();
-    rebuild();
+    preview_.release();                             // its scene refers to the previous asset library
+    rebuild(ctx);
 }
 
 // ------------------------------------------------------------------------------------------

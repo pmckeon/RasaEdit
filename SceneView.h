@@ -105,6 +105,11 @@ public:
     // pickEntities / pickServer choose which kinds of object can be hit.
     Selection pick(float ndcX, float ndcY, bool pickEntities = true, bool pickServer = true) const;
     void focusOn(const Selection& selection);
+    // Map entity bounds from its loaded model (placements start from the .map's stored bounds or a 1 m box; the asset preview's
+    // one-entity map has none). false while the model is not loaded.
+    bool fitEntityToModel(size_t entityIndex);
+    // World-space bounding sphere of a map entity's placement.
+    bool entityBounds(size_t entityIndex, tr::Vec3& centre, float& radius) const;
     // What focusOn looks at and from how far; false if the selection is not in the scene.
     bool focusTarget(const Selection& selection, tr::Vec3& target, float& distance) const;
 

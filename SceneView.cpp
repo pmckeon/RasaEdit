@@ -2416,6 +2416,26 @@ bool SceneView::focusTarget(const Selection& selection, tr::Vec3& target, float&
     return false;
 }
 
+bool SceneView::fitEntityToModel(size_t entityIndex) {
+    if (entityIndex >= placements_.size()) return false;
+    Placement& p = placements_[entityIndex];
+    if (!p.model || !p.model->loaded) return false;
+    const tr::Bounds& b = p.model->bounds;
+    p.hasBounds = true;
+    p.boxWorld = multiply(p.world, boxMatrix(b));
+    p.centre = transformPoint(p.world, scaled(add(b.min, b.max), 0.5f));
+    const float scale = length(subtract(transformPoint(p.world, tr::Vec3{1, 0, 0}), transformPoint(p.world, tr::Vec3{0, 0, 0})));
+    p.radius = std::max(0.05f, length(subtract(b.max, b.min)) * 0.5f * scale);
+    return true;
+}
+
+bool SceneView::entityBounds(size_t entityIndex, tr::Vec3& centre, float& radius) const {
+    if (entityIndex >= placements_.size()) return false;
+    centre = placements_[entityIndex].centre;
+    radius = placements_[entityIndex].radius;
+    return true;
+}
+
 void SceneView::focusOn(const Selection& selection) {
     tr::Vec3 target;
     float distance = 0;

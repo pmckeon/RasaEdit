@@ -10,6 +10,7 @@ project ("RasaEdit")
 
 # Find the dependencies from vcpkg
 find_package(SDL3 CONFIG REQUIRED)
+find_package(SDL3_mixer CONFIG REQUIRED)       # asset preview sounds: WAV, Ogg Vorbis (libvorbis), MP3 (mpg123)
 find_package(imgui CONFIG REQUIRED)
 # SQLite for the server (World) database: vcpkg's port, or a system package elsewhere.
 find_package(unofficial-sqlite3 CONFIG QUIET)
@@ -32,6 +33,7 @@ add_executable (RasaEdit
     "MissionEditor.cpp" "MissionEditor.h"
     "ServerWorkspace.cpp" "ServerWorkspace.h"
     "Panels.cpp" "Panels.h"
+    "AssetPreview.cpp" "AssetPreview.h"
     "TerrainOverview.cpp" "TerrainOverview.h"
     "RadarMap.cpp" "RadarMap.h"
     "GpuTexture.cpp" "GpuTexture.h"
@@ -46,6 +48,7 @@ add_executable (RasaEdit
 # Link everything together
 target_link_libraries(RasaEdit PRIVATE
     SDL3::SDL3
+    SDL3_mixer::SDL3_mixer
     imgui::imgui
     trformats
     ${RASAEDIT_SQLITE}
@@ -61,10 +64,10 @@ if (RASAEDIT_BUILD_TESTS)
     target_link_libraries(viewport_test PRIVATE SDL3::SDL3 trformats ${RASAEDIT_SQLITE})
 
     # Whole-editor smoke test: real ImGui frames and both workspaces, headless.
-    add_executable(ui_smoke_test tests/ui_smoke_test.cpp Editor.cpp EditorContext.cpp ClientWorkspace.cpp ServerWorkspace.cpp MissionEditor.cpp Panels.cpp
+    add_executable(ui_smoke_test tests/ui_smoke_test.cpp Editor.cpp EditorContext.cpp ClientWorkspace.cpp ServerWorkspace.cpp MissionEditor.cpp Panels.cpp AssetPreview.cpp
                    Renderer.cpp SceneView.cpp ParticleSim.cpp GpuTexture.cpp WorldDatabase.cpp Avatar.cpp TerrainOverview.cpp RadarMap.cpp)
     target_include_directories(ui_smoke_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    target_link_libraries(ui_smoke_test PRIVATE SDL3::SDL3 imgui::imgui trformats ${RASAEDIT_SQLITE})
+    target_link_libraries(ui_smoke_test PRIVATE SDL3::SDL3 SDL3_mixer::SDL3_mixer imgui::imgui trformats ${RASAEDIT_SQLITE})
     set_property(TARGET ui_smoke_test PROPERTY CXX_STANDARD 20)
     set_property(TARGET viewport_test PROPERTY CXX_STANDARD 20)
 endif()
