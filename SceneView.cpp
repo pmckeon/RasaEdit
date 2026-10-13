@@ -2088,6 +2088,7 @@ void SceneView::queueDraws(const Selection& selection) {
             const Placement& p = placements_[k];
             if (onlyEntity >= 0 && int(k) != onlyEntity) continue;
             if (entityFirst >= 0 && (int(k) < entityFirst || int(k) >= entityLast)) continue;
+            if (gameDistances && int(k) != selectedEntity && entityDistanceAlpha(p) <= 0.01f) continue;     // culled by the game
             const tr::Vec3 d = subtract(p.centre, camera_.position);
             if (dot(d, d) > maxDistance2 + p.radius * p.radius * 4 && int(k) != selectedEntity) continue;
             if (!visible(p.centre, p.radius)) continue;
@@ -2385,6 +2386,7 @@ Selection SceneView::pick(float ndcX, float ndcY, bool pickEntities, bool pickSe
         const bool hasGeometry = p.model && p.model->loaded && !p.model->triangles.empty();
         const bool isEffect = p.model && p.model->loaded && p.model->effectOnly;
         if (!e.hasBounds || (!hasGeometry && (isEffect ? !showEffects : !showPlaceholders))) continue;
+        if (gameDistances && entityDistanceAlpha(p) <= 0.01f) continue;     // not drawn: culled by the game's distance rule
         const Mat4 r = rotationMatrix(e.orientation);
         auto toLocal = [&](const tr::Vec3& v) {            // R^T v
             return tr::Vec3{r.row0.x * v.x + r.row1.x * v.y + r.row2.x * v.z, r.row0.y * v.x + r.row1.y * v.y + r.row2.y * v.z,
@@ -2634,6 +2636,30 @@ std::string SceneView::objectAnimationFor(const std::string& mesh) {
     }
     objectAnimations_[mesh] = animation;
     return animation;
+}
+
+// The game's distance fade of a body (tabula_rasa.exe FUN_00856c00, called per body by TRasa::GraphicsUtil::DistanceCullObjs
+// FUN_007ff400 and FUN_00856f10; decompiled 2026-10-14, constants read from the exe): the culling layer gives a distance - 2: 100
+// + 200 f, 3: 100, 4: 10, 5: 25, 6: never drawn, 7: 50, 8: 100 + 50 f, 9: 100 + 100 f, 10: 100 + 150 f, 11: 75, others: no
+// limit (f = RQS "Far CullLayer Scalar") - max = min(distance x max(view scalar, 1), 250); with d = the distance from the eye
+// to the bounding sphere's centre and R its radius (x the node scale): opaque while d <= 0.9 max, else alpha = clamp(1 - (d - R
+// - 0.9 max) / (0.1 max), 0, 1); at or below 0.01 the body is culled. A fading body (alpha < 0.999) gets MatDiffuse.a = alpha on
+// its pieces and moves to the Translucent phase (FUN_008165f0 -> FUN_007ffd80 -> FUN_007ffb90). Checked against the fountain
+// trace (2026-10-14) with view scalar 1 and f = 1: no entity predicted culled is drawn, and the four predicted fading in view
+// (770, 772, 1105, 1106) are exactly the map objects drawn in the forward pass after the sky. Not reproduced: the fade band's
+// look (the forward shaders differ per material; the two checked ignore MatDiffuse.a) - fading entities are drawn opaque.
+float SceneView::entityDistanceAlpha(const Placement& p) const {
+    const int32_t layer = p.cullingLayer;
+    if (layer == 6) return 0.0f;
+    const float f = farCullLayerScalar;
+    const float layerDistance = layer == 2 ? 100 + 200 * f : layer == 3 ? 100 : layer == 4 ? 10 : layer == 5 ? 25 : layer == 7 ? 50
+                              : layer == 8 ? 100 + 50 * f : layer == 9 ? 100 + 100 * f : layer == 10 ? 100 + 150 * f : layer == 11 ? 75 : 0;
+    if (layerDistance <= 0) return 1.0f;
+    const float maxDistance = std::min(layerDistance * std::max(viewDistanceMultiplier, 1.0f), 250.0f);
+    const float start = 0.9f * maxDistance;
+    const float d = length(subtract(p.centre, camera_.position));
+    if (d <= start) return 1.0f;
+    return std::clamp(1.0f - (d - p.radius - start) / (maxDistance - start), 0.0f, 1.0f);
 }
 
 // Any object's model (map entities, server objects, special-FX accessories, avatar accessories) with its animation played:

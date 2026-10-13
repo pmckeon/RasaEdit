@@ -217,6 +217,34 @@ int main(int argc, char** argv) {
                             e.scale);
             }
         }
+        // RASA_FADEDUMP=<multiplier>: per map entity the game's distance fade (tabula_rasa.exe FUN_00856c00, see CLAUDE.md
+        // "Distance fade") from the eye in argv 7-9 with the given view multiplier and Far CullLayer Scalar 1: index, culling layer,
+        // bounding-sphere centre distance, scaled radius, alpha (1 opaque, 0 culled), world position.
+        if (const char* fade = envValue("RASA_FADEDUMP")) {
+            const float multiplier = std::max(float(std::atof(fade)), 1.0f);
+            const tr::Vec3 eye{float(std::atof(argv[7])), float(std::atof(argv[8])), float(std::atof(argv[9]))};
+            for (size_t k = 0; k < map.map.entities.size(); ++k) {
+                const tr::MapEntity& e = map.map.entities[k];
+                const int layer = e.cullLayer != 0 ? e.cullLayer : data.classCullingLayer(e.classId);
+                const float f = 1.0f;
+                const float layerDistance = layer == 2 ? 100 + 200 * f : layer == 3 ? 100 : layer == 4 ? 10 : layer == 5 ? 25 : layer == 7 ? 50
+                                          : layer == 8 ? 100 + 50 * f : layer == 9 ? 100 + 100 * f : layer == 10 ? 100 + 150 * f : layer == 11 ? 75 : 0;
+                const tr::Vec3 c{(e.bounds.min.x + e.bounds.max.x) * 0.5f, (e.bounds.min.y + e.bounds.max.y) * 0.5f, (e.bounds.min.z + e.bounds.max.z) * 0.5f};
+                const Mat4 world = placementMatrix(e.location, e.orientation, e.scale);
+                const tr::Vec3 centre = transformPoint(world, c);
+                const float radius = length(subtract(e.bounds.max, e.bounds.min)) * 0.5f * e.scale;
+                const float d = length(subtract(centre, eye));
+                float alpha = 1.0f;
+                if (layer == 6) alpha = 0.0f;
+                else if (layerDistance > 0) {
+                    const float maxDistance = std::min(layerDistance * multiplier, 250.0f);
+                    const float start = 0.9f * maxDistance;
+                    if (d > start) alpha = std::clamp(1.0f - (d - radius - start) / (maxDistance - start), 0.0f, 1.0f);
+                }
+                std::printf("fade %zu layer %d d %.1f r %.1f alpha %.3f at %.2f %.2f %.2f\n", k, layer, d, radius, alpha, e.location.x, e.location.y,
+                            e.location.z);
+            }
+        }
         // RASA_FINDFEATURES=1: map entities whose models use material features worth checking in game - TR texture transforms
         // with an offset in the third row, TR environment reflection (MatSpecular.z > 0), modifier blending, decals on UV
         // set 2, TRHair. One line per (feature, model) with the nearest-to-first entity position and the entity count.
@@ -670,6 +698,7 @@ int main(int argc, char** argv) {
         const float particleSeconds = envValue("RASA_PARTICLES") ? float(std::atof(envValue("RASA_PARTICLES"))) : 0.5f;
         // Terrain clutter: every cell around the camera at once, models loaded before the frame (RASA_NOCLUTTER=1: none).
         if (envValue("RASA_NOCLUTTER")) scene.showClutter = false;
+        if (envValue("RASA_NOGAMEDISTANCES")) scene.gameDistances = false;   // draw every entity within the editor's draw distance
         // RASA_NOSERVER=1: hide the server layer (markers, creatures) while RASA_DB still supplies the regions (sky, environment map).
         if (envValue("RASA_NOSERVER")) { scene.showServer = false; scene.showMissionAreas = false; }
         if (const char* flora = envValue("RASA_FLORA")) scene.clutterDensity = float(std::atof(flora));   // density factor

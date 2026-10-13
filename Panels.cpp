@@ -416,6 +416,7 @@ void ViewportPanel::applyOptions(const ViewSettings& view, SceneView& scene) con
     scene.showEffects = view.showEffects;
     scene.showParticles = view.showParticles;
     scene.showClutter = view.showClutter;
+    scene.gameDistances = view.gameDistances;
     scene.showPlaceholders = view.showPlaceholders;
     scene.showServer = options.showServer;
     scene.showMissionAreas = options.showMissionAreas;
@@ -463,6 +464,12 @@ void ViewportPanel::draw(EditorContext& ctx, const char* title, Selection& selec
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Terrain clutter (grass, ferns, flowers, debris) from the terrain's tribble sets, placed as the game does,\n"
                           "in the 7 x 7 cells of 32 m around the camera: %zu instances, %zu drawn", scene.clutterInstances(), scene.drawnClutter());
+    ImGui::SameLine();
+    ImGui::Checkbox("Game distances", &ctx.view.gameDistances);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Hide map entities beyond the game's draw distance for their culling layer (layer 3: 100 m, layer 2: 300 m,\n"
+                          "at most 250 m), as tabula_rasa.exe does at View Distance 100 and full quality. Off: everything within the\n"
+                          "editor's draw distance.");
     ImGui::SameLine();
     ImGui::Checkbox("Placeholders", &ctx.view.showPlaceholders);
     if (serverControls_) {

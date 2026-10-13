@@ -128,6 +128,12 @@ public:
     // Terrain clutter (tribbles: grass, ferns, flowers, debris), placed as the client does (tr::placeTribbleCell) in
     // the cells within tribbleCellRange of the camera's cell.
     bool showClutter = true;
+    // The game's distance culling of map entities by culling layer (tabula_rasa.exe FUN_00856c00; see entityDistanceAlpha).
+    // viewDistanceMultiplier: the view object's scalar (+0xEC, at least 1; 1 fits the fountain trace with the user's
+    // Client.Graphics.ViewDistance 100); farCullLayerScalar: RQS "Far CullLayer Scalar" (TRRQS + 0x5C, 1 = full quality).
+    bool gameDistances = true;
+    float viewDistanceMultiplier = 1.0f;
+    float farCullLayerScalar = 1.0f;
     // The game draws trunc(N x factor) of each clutter container's shuffled instances, factor = FloraDensity x the RQS
     // flora scalar ("Flora Density I / II" lower it as the frame rate drops); 1 = full quality.
     float clutterDensity = 1.0f;
@@ -371,6 +377,7 @@ private:
     // poseAnimation: skin the model into the first frame of this .anm ("" = as authored, bind pose).
     Model* modelFor(const std::string& mesh, const std::string& poseAnimation = "", const std::string& skeletonMesh = "");
     std::string objectAnimationFor(const std::string& mesh);
+    float entityDistanceAlpha(const Placement& p) const;    // 1 opaque, (0.01, 1) fading, <= 0.01 culled
     Model* objectModelFor(const std::string& mesh, const std::string& packageAnimation = "");
     std::unordered_map<std::string, std::string> objectAnimations_;   // mesh -> its object animation ("" = none)
     SceneLighting skyLightingAt() const;       // the sky part of lighting()
