@@ -1,0 +1,42 @@
+--- a/src/gpu/d3d12/SDL_gpu_d3d12.c	2026-10-14 10:28:59.589586400 +1100
++++ b/src/gpu/d3d12/SDL_gpu_d3d12.c	2026-10-14 10:28:59.590589500 +1100
+@@ -5024,8 +5024,8 @@
+     D3D12DescriptorHeap *heap;
+     D3D12_CPU_DESCRIPTOR_HANDLE gpuHeapCpuHandle;
+ 
+-    /* Descriptor overflow, acquire new heaps */
+-    if (commandBuffer->gpuDescriptorHeaps[heapType]->currentDescriptorIndex >= commandBuffer->gpuDescriptorHeaps[heapType]->maxDescriptors) {
++    /* Descriptor overflow, acquire new heaps (RasaEdit patch: the whole range must fit, not only its first descriptor) */
++    if (commandBuffer->gpuDescriptorHeaps[heapType]->currentDescriptorIndex + resourceHandleCount > commandBuffer->gpuDescriptorHeaps[heapType]->maxDescriptors) {
+         D3D12_INTERNAL_SetGPUDescriptorHeaps(commandBuffer);
+     }
+ 
+@@ -5062,6 +5062,28 @@
+         D3D12_INTERNAL_SetGPUDescriptorHeaps(commandBuffer);
+     }
+ 
++    /* RasaEdit patch: if this draw's descriptors might not fit in the current heaps, switch heaps now and rebind every
++     * descriptor table - switching in the middle (WriteGPUDescriptors) leaves tables set earlier pointing into heaps that are
++     * no longer bound, and the old overflow test let a range run past the end of the heap (device removed on D3D12). */
++    {
++        const Uint32 views = graphicsPipeline->header.num_vertex_samplers + graphicsPipeline->header.num_vertex_storage_textures +
++                             graphicsPipeline->header.num_vertex_storage_buffers + graphicsPipeline->header.num_fragment_samplers +
++                             graphicsPipeline->header.num_fragment_storage_textures + graphicsPipeline->header.num_fragment_storage_buffers;
++        const Uint32 samplers = graphicsPipeline->header.num_vertex_samplers + graphicsPipeline->header.num_fragment_samplers;
++        D3D12DescriptorHeap *viewHeap = commandBuffer->gpuDescriptorHeaps[D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV];
++        D3D12DescriptorHeap *samplerHeap = commandBuffer->gpuDescriptorHeaps[D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER];
++        if (viewHeap->currentDescriptorIndex + views > viewHeap->maxDescriptors ||
++            samplerHeap->currentDescriptorIndex + samplers > samplerHeap->maxDescriptors) {
++            D3D12_INTERNAL_SetGPUDescriptorHeaps(commandBuffer);
++            commandBuffer->needVertexSamplerBind = true;
++            commandBuffer->needVertexStorageTextureBind = true;
++            commandBuffer->needVertexStorageBufferBind = true;
++            commandBuffer->needFragmentSamplerBind = true;
++            commandBuffer->needFragmentStorageTextureBind = true;
++            commandBuffer->needFragmentStorageBufferBind = true;
++        }
++    }
++
+     D3D12_CPU_DESCRIPTOR_HANDLE cpuHandles[MAX_TEXTURE_SAMPLERS_PER_STAGE];
+     D3D12_GPU_DESCRIPTOR_HANDLE gpuDescriptorHandle;
+     D3D12_VERTEX_BUFFER_VIEW vertexBufferViews[MAX_VERTEX_BUFFERS];
