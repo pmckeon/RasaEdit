@@ -1,5 +1,7 @@
 #include "EditorContext.h"
 
+#include <cstdlib>
+
 #include <filesystem>
 #include <fstream>
 
@@ -14,6 +16,8 @@ EditorContext::EditorContext(SDL_Window* window_, SDL_GPUDevice* device_) : wind
         settingsPath_ = "rasaedit_settings.ini";
         imguiIniPath = "imgui.ini";
     }
+    // RASAEDIT_SETTINGS=<file>: another settings file (tests point it at a copy, so they never touch the user's database).
+    if (const char* overridePath = std::getenv("RASAEDIT_SETTINGS"); overridePath && *overridePath) settingsPath_ = overridePath;
     try {
         renderer = std::make_unique<Renderer>(device);
     } catch (const std::exception& e) {

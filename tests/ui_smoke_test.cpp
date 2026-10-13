@@ -1,6 +1,8 @@
 // Headless smoke test of the whole editor: real ImGui frames (no window or platform backend), the
 // real Editor with both workspaces, and the GPU viewport on any Vulkan driver (e.g. lavapipe).
-// Settings come from $XDG_DATA_HOME/RasaEdit/RasaEdit/settings.ini (see the test script).
+// Settings come from RASAEDIT_SETTINGS if set (use one that names a COPY of the database: the test saves), else the SDL
+// pref folder (settings.ini: gameRoot, database, map = adv_foreas_concordia_wilderness, workspace = server).
+#define _ALLOW_KEYWORD_MACROS                // MSVC STL (xkeycheck.h) otherwise rejects the two defines below
 #define private public                       // the test inspects workspace internals
 #define protected public
 #include "Editor.h"
@@ -12,8 +14,17 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 
 static int failures = 0;
+
+// Viewport dumps go to RASA_SMOKE_OUT (a folder), else the temp folder.
+static std::string outputPath(const char* name) {
+    const char* dir = std::getenv("RASA_SMOKE_OUT");
+    if (!dir || !*dir) dir = std::getenv("TEMP");
+    if (!dir || !*dir) dir = "/tmp";
+    return std::string(dir) + "/" + name;
+}
 static void check(bool ok, const char* what) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     std::printf("%s  %s\n", ok ? "ok  " : "FAIL", what);
@@ -65,6 +76,7 @@ static void saveViewport(EditorContext& ctx, SDL_GPUDevice* device, const char* 
     SDL_WaitForGPUFences(device, true, &fence, 1);
     SDL_ReleaseGPUFence(device, fence);
     FILE* f = std::fopen(path, "wb");
+    if (!f) { std::printf("cannot write %s\n", path); return; }
     std::fprintf(f, "%u %u\n", w, h);
     std::fwrite(SDL_MapGPUTransferBuffer(device, download, false), 1, w * h * 4, f);
     std::fclose(f);
@@ -105,7 +117,7 @@ int main() {
         check(server.viewport_.visible_, "server viewport drawn");
         check(ctx.scene && ctx.scene->showServer, "server viewport shows the server overlay");
         frames(editor, device, 60);                                  // let models load
-        saveViewport(ctx, device, "/tmp/smoke_server.rgba");
+        saveViewport(ctx, device, outputPath("smoke_server.rgba").c_str());
 
         // Edit through the viewport hooks: select pool 0, move it, check the unsaved state through undo and redo.
         server.selection_ = Selection{SelectionKind::SpawnPool, 0};
@@ -128,6 +140,53 @@ int main() {
 
         check(server.saveChanges() && !server.hasUnsavedChanges(), "save succeeds and clears the unsaved state");
 
+        // Creatures panel: bring its tab to the front, select McAllister, draw (the editor widgets run), edit and save.
+        auto showTab = [&](const char* name) {
+            ImGuiWindow* w = ImGui::FindWindowByName(name);
+            if (w && w->DockNode) w->DockNode->SelectedTabId = w->TabId;
+            return w != nullptr;
+        };
+        check(showTab("Creatures###Server.Creatures"), "creatures panel exists");
+        server.creatureSelected_ = 510203;
+        frames(editor, device, 3);
+        CreatureDefinition* mcallister = nullptr;
+        for (CreatureDefinition& d : server.creatureDefs_)
+            if (d.creature.id == 510203) mcallister = &d;
+        check(mcallister && server.creatureDisplayName(*mcallister) == "Major McAllister", "creature list resolves McAllister's in-game name");
+        if (mcallister) {
+            const int32_t level = mcallister->creature.level;
+            mcallister->creature.level = level + 1;
+            frames(editor, device, 2);
+            check(server.creaturesChanged() && server.hasUnsavedChanges(), "creature edit marks unsaved changes");
+            check(server.saveCreatures() && !server.creaturesChanged(), "creature save succeeds");
+            const Creature* saved = server.database_->creature(510203);
+            check(saved && saved->level == level + 1, "saved creature level reads back");
+        }
+
+        // Missions panel: select the first mission, draw its tree, edit an objective comment and save.
+        check(showTab("Missions###Server.Missions"), "missions panel exists");
+        check(server.missions_.loaded(), "mission tables loaded");
+        if (server.missions_.loaded()) {
+            const DbTable& missions = server.missions_.tables_.front().edited;
+            server.missions_.selectedMission_ = missions.rows.front()[size_t(missions.column("mission_id"))].asInt();
+            server.missions_.selectedRevision_ = missions.rows.front()[size_t(missions.column("content_revision"))].t;
+            frames(editor, device, 3);
+            DbTable* objectives = nullptr;
+            for (auto& t : server.missions_.tables_)
+                if (t.edited.name == "mission_objective_definition") objectives = &t.edited;
+            if (objectives && !objectives->rows.empty()) {
+                objectives->rows.front()[size_t(objectives->column("comment"))] = DbValue::text("smoke test objective");
+                frames(editor, device, 2);
+                check(server.missions_.changed() && server.hasUnsavedChanges(), "mission edit marks unsaved changes");
+                std::string message;
+                check(server.missions_.save(*server.database_, message) && !server.missions_.changed(), "mission save succeeds");
+                const DbTable reloaded = server.database_->loadTable("mission_objective_definition");
+                bool found = false;
+                for (const auto& row : reloaded.rows) found = found || row[size_t(reloaded.column("comment"))].t == "smoke test objective";
+                check(found, "saved mission row reads back");
+            }
+        }
+
         // Switch to the client workspace.
         editor.setActive(editor.client_.get());
         frames(editor, device, 3);
@@ -135,7 +194,7 @@ int main() {
         check(editor.client_->viewport_.visible_, "client viewport drawn");
         check(!ctx.scene->showServer, "client viewport hides the server overlay");
         check(editor.client_->visibleEntities_.size() == ctx.map->map.entities.size(), "client entity table filled");
-        saveViewport(ctx, device, "/tmp/smoke_client.rgba");
+        saveViewport(ctx, device, outputPath("smoke_client.rgba").c_str());
 
         // Back to server: its selection and options survive the switch.
         editor.setActive(editor.server_.get());

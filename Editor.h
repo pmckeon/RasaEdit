@@ -32,11 +32,12 @@ public:
     bool requestQuit();
     bool quitApproved() const { return quitApproved_; }
 
+    void setActive(Workspace* workspace);           // switch workspaces (public for the smoke test)
+
 private:
     enum class PromptAction : uint8_t { None, OpenGame, OpenMap, OpenDatabase, Quit };
     void drawMenuBar();
     void drawUnsavedPrompt();
-    void setActive(Workspace* workspace);
 
     std::unique_ptr<EditorContext> context_;
     std::unique_ptr<ClientWorkspace> client_;

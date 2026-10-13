@@ -53,6 +53,11 @@ public:
     void contentChanged() override;
     void deleteSelected() override;
     bool& snapToGround() override { return snapToGround_; }
+    void undo();
+    void redo();
+    bool creaturesChanged() const;
+    bool saveCreatures();
+    std::string creatureDisplayName(const CreatureDefinition& d) const;   // what the client shows (creature.py GetName)
 
 private:
     static void SDLCALL databaseDialogCallback(void* userdata, const char* const* filelist, int filter);
@@ -65,8 +70,6 @@ private:
     void drawServerObjectEditor();
     void noteEdit();                                 // after a widget changed a value: one snapshot per interaction
     void validateSelection();
-    void undo();
-    void redo();
     bool saveServer();
     void revertServer();
     void duplicateSelected();
@@ -78,10 +81,7 @@ private:
     void drawMissionPanel();
     void drawCreatureEditor(CreatureDefinition& d, bool isNew);
     void reloadCreatureDefinitions();
-    bool creaturesChanged() const;
-    bool saveCreatures();
     std::string creatureLabel(const CreatureDefinition& d) const;
-    std::string creatureDisplayName(const CreatureDefinition& d) const;   // what the client shows (creature.py GetName)
 
     Selection selection_;
     std::unique_ptr<WorldDatabase> database_;
