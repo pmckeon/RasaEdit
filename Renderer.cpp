@@ -143,7 +143,7 @@ Renderer::Renderer(SDL_GPUDevice* device) : device_(device) {
     shadowFragment_ = createShader(shadowFragmentDxil, sizeof shadowFragmentDxil, shadowFragmentSpirv, sizeof shadowFragmentSpirv, "psShadow",
                                    SDL_GPU_SHADERSTAGE_FRAGMENT, 1);
     refractFragment_ = createShader(refractFragmentDxil, sizeof refractFragmentDxil, refractFragmentSpirv, sizeof refractFragmentSpirv, "psRefract",
-                                    SDL_GPU_SHADERSTAGE_FRAGMENT, 4);
+                                    SDL_GPU_SHADERSTAGE_FRAGMENT, 5);
     if (!SDL_GPUTextureSupportsFormat(device_, depthFormat_, SDL_GPU_TEXTURETYPE_2D, SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET))
         depthFormat_ = SDL_GPU_TEXTUREFORMAT_D24_UNORM;
     trianglePipeline_ = createPipeline(sceneVertex_, sceneFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST);
@@ -159,7 +159,7 @@ Renderer::Renderer(SDL_GPUDevice* device) : device_(device) {
     culledAdditivePipeline_ = createPipeline(sceneVertex_, sceneFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST, 2, true, flip);
     culledTranslucentPipeline_ = createPipeline(sceneVertex_, sceneFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST, 1, true, flip);
     subtractivePipeline_ = createPipeline(sceneVertex_, sceneFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST, 3);
-    refractPipeline_ = createPipeline(sceneVertex_, refractFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST, 4);
+    refractPipeline_ = createPipeline(sceneVertex_, refractFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST, 4, false, false, false);   // no depth target
     linearSampler_ = createSampler(device_, true, true);
     pointSampler_ = createSampler(device_, false, false);
     clampSampler_ = createSampler(device_, true, false);
@@ -370,7 +370,7 @@ SDL_GPUShader* Renderer::createShader(const unsigned char* dxil, size_t dxilSize
 }
 
 SDL_GPUGraphicsPipeline* Renderer::createPipeline(SDL_GPUShader* vertexShader, SDL_GPUShader* fragmentShader, SDL_GPUPrimitiveType primitive,
-                                                  int blend, bool cullBack, bool cullFront) {
+                                                  int blend, bool cullBack, bool cullFront, bool depthTarget) {
     SDL_GPUVertexBufferDescription buffer = {};
     buffer.slot = 0;
     buffer.pitch = sizeof(MeshVertex);
@@ -428,12 +428,12 @@ SDL_GPUGraphicsPipeline* Renderer::createPipeline(SDL_GPUShader* vertexShader, S
     info.rasterizer_state.front_face = SDL_GPU_FRONTFACE_CLOCKWISE;
     info.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
     info.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS_OR_EQUAL;
-    info.depth_stencil_state.enable_depth_test = true;
-    info.depth_stencil_state.enable_depth_write = blend == 0 || blend == 4;
+    info.depth_stencil_state.enable_depth_test = depthTarget;
+    info.depth_stencil_state.enable_depth_write = depthTarget && (blend == 0 || blend == 4);
     info.target_info.color_target_descriptions = &target;
     info.target_info.num_color_targets = 1;
     info.target_info.depth_stencil_format = depthFormat_;
-    info.target_info.has_depth_stencil_target = true;
+    info.target_info.has_depth_stencil_target = depthTarget;
     SDL_GPUGraphicsPipeline* pipeline = SDL_CreateGPUGraphicsPipeline(device_, &info);
     if (!pipeline) fail("SDL_CreateGPUGraphicsPipeline");
     return pipeline;
@@ -887,13 +887,11 @@ void Renderer::record(SDL_GPUCommandBuffer* /*caller's command buffer: the scene
         SDL_CopyGPUTextureToTexture(copy, &from, &to, width_, height_, 1, false);
         SDL_EndGPUCopyPass(copy);
         colour.load_op = SDL_GPU_LOADOP_LOAD;
-        depth.load_op = SDL_GPU_LOADOP_LOAD;
-        depth.store_op = SDL_GPU_STOREOP_DONT_CARE;
-        depth.cycle = false;
-        pass = beginPass(commands, &colour, &depth);
+        colour.cycle = false;
+        pass = beginPass(commands, &colour, nullptr);         // the shader tests against the sampled depth
         SDL_BindGPUGraphicsPipeline(pass, refractPipeline_);
         for (const RefractItem& item : refractDraws_) {
-            if (reserveDescriptors(commands, pass, 4, 2)) SDL_BindGPUGraphicsPipeline(pass, refractPipeline_);
+            if (reserveDescriptors(commands, pass, 5, 2)) SDL_BindGPUGraphicsPipeline(pass, refractPipeline_);
             SDL_GPUBufferBinding vertexBinding = {item.mesh->vertices, 0};
             SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
             SDL_GPUBufferBinding indexBinding = {item.mesh->indices, 0};
@@ -902,12 +900,13 @@ void Renderer::record(SDL_GPUCommandBuffer* /*caller's command buffer: the scene
             SDL_PushGPUVertexUniformData(commands, 0, &vertexUniforms, sizeof vertexUniforms);
             bindSkin(pass, item.skinVertices);
             const RefractMaterial& m = item.material;
-            const SDL_GPUTextureSamplerBinding samplers[4] = {{m.diffuse ? m.diffuse : white_, linearSampler_}, {m.normalMap ? m.normalMap : white_, linearSampler_},
-                                                              {m.fade ? m.fade : white_, clampSampler_}, {frameCopy_, clampSampler_}};
-            SDL_BindGPUFragmentSamplers(pass, 0, samplers, 4);
+            const SDL_GPUTextureSamplerBinding samplers[5] = {{m.diffuse ? m.diffuse : white_, linearSampler_}, {m.normalMap ? m.normalMap : white_, linearSampler_},
+                                                              {m.fade ? m.fade : white_, clampSampler_}, {frameCopy_, clampSampler_},
+                                                              {depth_, pointSampler_}};
+            SDL_BindGPUFragmentSamplers(pass, 0, samplers, 5);
             RefractUniforms u{};
             u.matDiffuse = m.matDiffuse;
-            u.params = Vec4f{m.displacement, 1.0f / float(width_), 1.0f / float(height_), 0};
+            u.params = Vec4f{m.displacement, 1.0f / float(width_), 1.0f / float(height_), item.skinVertices ? 1.0f : 0.0f};
             u.cameraRight = Vec4f{cameraRight_.x, cameraRight_.y, cameraRight_.z, 0};
             u.cameraUp = Vec4f{cameraUp_.x, cameraUp_.y, cameraUp_.z, 0};
             u.cameraForward = Vec4f{cameraForward_.x, cameraForward_.y, cameraForward_.z, 0};

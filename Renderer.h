@@ -297,7 +297,7 @@ private:
     SDL_GPUShader* createShader(const unsigned char* dxil, size_t dxilSize, const unsigned char* spirv, size_t spirvSize,
                                 const char* entryPoint, SDL_GPUShaderStage stage, uint32_t samplers, uint32_t storageBuffers = 0);
     SDL_GPUGraphicsPipeline* createPipeline(SDL_GPUShader* vertexShader, SDL_GPUShader* fragmentShader, SDL_GPUPrimitiveType primitive,
-                                            int blend = 0, bool cullBack = false, bool cullFront = false);
+                                            int blend = 0, bool cullBack = false, bool cullFront = false, bool depthTarget = true);
     void recordItem(SDL_GPUCommandBuffer*& commands, SDL_GPURenderPass*& pass, const DrawItem& item, SDL_GPUGraphicsPipeline*& bound);
     // Direct3D 12 descriptor budget (SDL 3.4's D3D12 backend: one 2,048-sampler / 65,536-view GPU descriptor heap pair per
     // command buffer, and its overflow handling corrupts the frame - see CLAUDE.md "D3D12 crash"). Before each draw: true when the
