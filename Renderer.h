@@ -298,7 +298,17 @@ private:
                                 const char* entryPoint, SDL_GPUShaderStage stage, uint32_t samplers, uint32_t storageBuffers = 0);
     SDL_GPUGraphicsPipeline* createPipeline(SDL_GPUShader* vertexShader, SDL_GPUShader* fragmentShader, SDL_GPUPrimitiveType primitive,
                                             int blend = 0, bool cullBack = false, bool cullFront = false);
-    void recordItem(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const DrawItem& item, SDL_GPUGraphicsPipeline*& bound);
+    void recordItem(SDL_GPUCommandBuffer*& commands, SDL_GPURenderPass*& pass, const DrawItem& item, SDL_GPUGraphicsPipeline*& bound);
+    // Direct3D 12 descriptor budget (SDL 3.4's D3D12 backend: one 2,048-sampler / 65,536-view GPU descriptor heap pair per
+    // command buffer, and its overflow handling corrupts the frame - see CLAUDE.md "D3D12 crash"). Before each draw: true when the
+    // draw's descriptors would not fit, after which the pass continues in a new command buffer (the caller rebinds its pipeline).
+    bool reserveDescriptors(SDL_GPUCommandBuffer*& commands, SDL_GPURenderPass*& pass, uint32_t samplers, uint32_t storageBuffers);
+    SDL_GPURenderPass* beginPass(SDL_GPUCommandBuffer* commands, const SDL_GPUColorTargetInfo* colour, SDL_GPUDepthStencilTargetInfo* depth);
+    bool splitCommandBuffers_ = false;         // Direct3D 12 only
+    uint32_t samplerDescriptors_ = 0, viewDescriptors_ = 0;
+    SDL_GPUColorTargetInfo passColour_ = {};
+    SDL_GPUDepthStencilTargetInfo passDepth_ = {};
+    bool passHasColour_ = false, passHasDepth_ = false;
 
     SDL_GPUDevice* device_;
     SDL_GPUShader* sceneVertex_ = nullptr;
@@ -345,7 +355,7 @@ private:
     SDL_GPUSampler* volumeSampler_ = nullptr;
     SDL_GPUTexture* whiteVolume_ = nullptr;  // linear, wrap u / v, clamp w (the water's volume map)
     Mat4 projection_ = identityMatrix();
-    void recordWater(SDL_GPUCommandBuffer* commands);
+    void recordWater(SDL_GPUCommandBuffer*& commands);
     tr::Vec3 cameraRight_{1, 0, 0}, cameraUp_{0, 1, 0}, cameraForward_{0, 0, 1};
     SDL_GPUGraphicsPipeline* additivePipeline_ = nullptr;
     SDL_GPUGraphicsPipeline* culledAdditivePipeline_ = nullptr;
@@ -364,7 +374,7 @@ private:
     SDL_GPUTransferBuffer* particleTransfer_ = nullptr;
     uint32_t particleCapacity_ = 0;            // vertices
     void uploadParticles(SDL_GPUCommandBuffer* commands);
-    void recordParticles(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass);
+    void recordParticles(SDL_GPUCommandBuffer*& commands, SDL_GPURenderPass*& pass);
     SDL_GPUShader* shadowFragment_ = nullptr;
     SDL_GPUGraphicsPipeline* shadowPipeline_ = nullptr;
     SDL_GPUTexture* shadowMap_ = nullptr;
@@ -374,7 +384,7 @@ private:
     SDL_GPUSampler* shadowSampler_ = nullptr;     // comparison sampler
     Mat4 shadowMatrix_;
     bool shadowsActive_ = false;
-    void recordShadows(SDL_GPUCommandBuffer* commands);
+    void recordShadows(SDL_GPUCommandBuffer*& commands);
     SDL_GPUSampler* linearSampler_ = nullptr;   // trilinear, repeat
     SDL_GPUSampler* pointSampler_ = nullptr;    // nearest, clamp (terrain data textures)
     SDL_GPUSampler* clampSampler_ = nullptr;    // trilinear, clamp (lookup ramps)

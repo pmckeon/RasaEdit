@@ -130,6 +130,8 @@ SDL_GPUDevice* createGpuDevice(SDL_GPUShaderFormat formats, bool debug) {
 }
 
 Renderer::Renderer(SDL_GPUDevice* device) : device_(device) {
+    const char* driver = SDL_GetGPUDeviceDriver(device_);
+    splitCommandBuffers_ = driver && std::strcmp(driver, "direct3d12") == 0;
     sceneVertex_ = createShader(sceneVertexDxil, sizeof sceneVertexDxil, sceneVertexSpirv, sizeof sceneVertexSpirv, "vsMain",
                                 SDL_GPU_SHADERSTAGE_VERTEX, 0, 2);       // storage buffers: skin vertices, bone rows
     sceneFragment_ = createShader(sceneFragmentDxil, sizeof sceneFragmentDxil, sceneFragmentSpirv, sizeof sceneFragmentSpirv, "psMain",
@@ -787,12 +789,13 @@ void Renderer::uploadParticles(SDL_GPUCommandBuffer* commands) {
     SDL_EndGPUCopyPass(copy);
 }
 
-void Renderer::recordParticles(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass) {
+void Renderer::recordParticles(SDL_GPUCommandBuffer*& commands, SDL_GPURenderPass*& pass) {
     if (particleBatches_.empty() || !particleBuffer_) return;
     SDL_GPUGraphicsPipeline* bound = nullptr;
     SDL_GPUBufferBinding vertexBinding = {particleBuffer_, 0};
     const VertexUniforms vertexUniforms{viewProjection_, identityMatrix()};
     for (const ParticleBatch& b : particleBatches_) {
+        if (reserveDescriptors(commands, pass, 10, 2)) bound = nullptr;
         SDL_GPUGraphicsPipeline* pipeline = b.blendType == 0 ? additivePipeline_ : b.blendType == 3 ? subtractivePipeline_ : translucentPipeline_;
         if (pipeline != bound) {
             SDL_BindGPUGraphicsPipeline(pass, pipeline);
@@ -828,8 +831,13 @@ void Renderer::drawTerrain(const GpuMesh& mesh, const TerrainMaterial& material)
     draws_.push_back(DrawItem{&mesh, identityMatrix(), Vec4f{1, 1, 1, 1}, true, nullptr, false, &material, false, Vec4f{0, 0, 0, 0}, nullptr});
 }
 
-void Renderer::record(SDL_GPUCommandBuffer* commands) {
+void Renderer::record(SDL_GPUCommandBuffer* /*caller's command buffer: the scene is recorded and submitted separately*/) {
     if (!colour_) return;
+    // The scene goes into the renderer's own command buffer(s), submitted here - before the caller's (ImGui, downloads), so the
+    // queue runs it first. On Direct3D 12 it may be split into several (reserveDescriptors).
+    SDL_GPUCommandBuffer* commands = SDL_AcquireGPUCommandBuffer(device_);
+    if (!commands) fail("SDL_AcquireGPUCommandBuffer");
+    samplerDescriptors_ = viewDescriptors_ = 0;
     uploadBones(commands);
     if (shadowsActive_) recordShadows(commands);
     uploadParticles(commands);
@@ -848,7 +856,7 @@ void Renderer::record(SDL_GPUCommandBuffer* commands) {
     depth.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
     depth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
     depth.cycle = true;
-    SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, &colour, 1, &depth);
+    SDL_GPURenderPass* pass = beginPass(commands, &colour, &depth);
 
     SDL_GPUGraphicsPipeline* bound = nullptr;
     for (const DrawItem& item : draws_) recordItem(commands, pass, item, bound);
@@ -861,7 +869,7 @@ void Renderer::record(SDL_GPUCommandBuffer* commands) {
         depth.load_op = SDL_GPU_LOADOP_LOAD;
         depth.store_op = refraction ? SDL_GPU_STOREOP_STORE : SDL_GPU_STOREOP_DONT_CARE;
         depth.cycle = false;
-        pass = SDL_BeginGPURenderPass(commands, &colour, 1, &depth);
+        pass = beginPass(commands, &colour, &depth);
         bound = nullptr;
     }
     for (const DrawItem& item : translucentDraws_) recordItem(commands, pass, item, bound);     // after all opaque geometry
@@ -882,9 +890,10 @@ void Renderer::record(SDL_GPUCommandBuffer* commands) {
         depth.load_op = SDL_GPU_LOADOP_LOAD;
         depth.store_op = SDL_GPU_STOREOP_DONT_CARE;
         depth.cycle = false;
-        pass = SDL_BeginGPURenderPass(commands, &colour, 1, &depth);
+        pass = beginPass(commands, &colour, &depth);
         SDL_BindGPUGraphicsPipeline(pass, refractPipeline_);
         for (const RefractItem& item : refractDraws_) {
+            if (reserveDescriptors(commands, pass, 4, 2)) SDL_BindGPUGraphicsPipeline(pass, refractPipeline_);
             SDL_GPUBufferBinding vertexBinding = {item.mesh->vertices, 0};
             SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
             SDL_GPUBufferBinding indexBinding = {item.mesh->indices, 0};
@@ -912,10 +921,55 @@ void Renderer::record(SDL_GPUCommandBuffer* commands) {
         bound = nullptr;
     }
     SDL_EndGPURenderPass(pass);
+    SDL_SubmitGPUCommandBuffer(commands);
+}
+
+// Begins a render pass and remembers its targets, so reserveDescriptors can continue it in a new command buffer. While command
+// buffers may be split (Direct3D 12) the depth target is always stored.
+SDL_GPURenderPass* Renderer::beginPass(SDL_GPUCommandBuffer* commands, const SDL_GPUColorTargetInfo* colour, SDL_GPUDepthStencilTargetInfo* depth) {
+    if (depth && splitCommandBuffers_) depth->store_op = SDL_GPU_STOREOP_STORE;
+    passHasColour_ = colour != nullptr;
+    passHasDepth_ = depth != nullptr;
+    if (colour) passColour_ = *colour;
+    if (depth) passDepth_ = *depth;
+    return SDL_BeginGPURenderPass(commands, colour, colour ? 1 : 0, depth);
+}
+
+// SDL 3.4.12's D3D12 backend writes each draw's descriptors into one shader-visible heap pair per command buffer (2,048 samplers,
+// 65,536 CBV/SRV/UAV); when a draw's range does not fit it switches heaps too late (SDL_gpu_d3d12.c
+// D3D12_INTERNAL_WriteGPUDescriptors tests only the first descriptor, and tables set earlier in the draw keep pointing into the old
+// heap) - the device is removed (exit 0x87D). A new command buffer starts with fresh heaps, so the editor never lets one command
+// buffer's draws exceed them. Counts are per draw, worst case: every sampler is a sampler plus a texture view.
+bool Renderer::reserveDescriptors(SDL_GPUCommandBuffer*& commands, SDL_GPURenderPass*& pass, uint32_t samplers, uint32_t storageBuffers) {
+    if (!splitCommandBuffers_) return false;
+    const uint32_t views = samplers + storageBuffers;
+    if (samplerDescriptors_ + samplers <= 2048 && viewDescriptors_ + views <= 65536) {
+        samplerDescriptors_ += samplers;
+        viewDescriptors_ += views;
+        return false;
+    }
+    SDL_EndGPURenderPass(pass);
+    SDL_SubmitGPUCommandBuffer(commands);
+    commands = SDL_AcquireGPUCommandBuffer(device_);
+    if (!commands) fail("SDL_AcquireGPUCommandBuffer");
+    samplerDescriptors_ = samplers;
+    viewDescriptors_ = views;
+    SDL_GPUColorTargetInfo colour = passColour_;
+    colour.load_op = SDL_GPU_LOADOP_LOAD;
+    colour.store_op = SDL_GPU_STOREOP_STORE;
+    colour.cycle = false;
+    SDL_GPUDepthStencilTargetInfo depth = passDepth_;
+    depth.load_op = SDL_GPU_LOADOP_LOAD;
+    depth.store_op = SDL_GPU_STOREOP_STORE;
+    depth.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
+    depth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
+    depth.cycle = false;
+    pass = SDL_BeginGPURenderPass(commands, passHasColour_ ? &colour : nullptr, passHasColour_ ? 1 : 0, passHasDepth_ ? &depth : nullptr);
+    return true;
 }
 
 // Water: over a copy of the frame so far, sampling the scene depth (depth_ is not attached; the shader tests against it).
-void Renderer::recordWater(SDL_GPUCommandBuffer* commands) {
+void Renderer::recordWater(SDL_GPUCommandBuffer*& commands) {
     SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(commands);
     SDL_GPUTextureLocation from = {}, to = {};
     from.texture = colour_;
@@ -926,7 +980,7 @@ void Renderer::recordWater(SDL_GPUCommandBuffer* commands) {
     colour.texture = colour_;
     colour.load_op = SDL_GPU_LOADOP_LOAD;
     colour.store_op = SDL_GPU_STOREOP_STORE;
-    SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, &colour, 1, nullptr);
+    SDL_GPURenderPass* pass = beginPass(commands, &colour, nullptr);
     SDL_BindGPUGraphicsPipeline(pass, waterPipeline_);
     struct WaterVertexUniforms {
         Mat4 viewProjection;
@@ -941,6 +995,7 @@ void Renderer::recordWater(SDL_GPUCommandBuffer* commands) {
     };
     const tr::Vec3 towards = normalized(lighting_.towardsLight);
     for (const WaterItem& item : waterDraws_) {
+        if (reserveDescriptors(commands, pass, 7, 0)) SDL_BindGPUGraphicsPipeline(pass, waterPipeline_);
         SDL_GPUBufferBinding vertexBinding = {item.mesh->vertices, 0};
         SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
         SDL_GPUBufferBinding indexBinding = {item.mesh->indices, 0};
@@ -981,7 +1036,7 @@ void Renderer::recordWater(SDL_GPUCommandBuffer* commands) {
 }
 
 // Shadow casters: the opaque lit draws (models and terrain) into the sun's depth map.
-void Renderer::recordShadows(SDL_GPUCommandBuffer* commands) {
+void Renderer::recordShadows(SDL_GPUCommandBuffer*& commands) {
     SDL_GPUDepthStencilTargetInfo depth = {};
     depth.texture = shadowMap_;
     depth.clear_depth = 1.0f;
@@ -989,10 +1044,11 @@ void Renderer::recordShadows(SDL_GPUCommandBuffer* commands) {
     depth.store_op = SDL_GPU_STOREOP_STORE;
     depth.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
     depth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
-    SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(commands, nullptr, 0, &depth);
+    SDL_GPURenderPass* pass = beginPass(commands, nullptr, &depth);
     SDL_BindGPUGraphicsPipeline(pass, shadowPipeline_);
     for (const DrawItem& item : draws_) {
         if (item.mesh->lines || !item.lit || !item.castsShadow) continue;
+        if (reserveDescriptors(commands, pass, 1, 2)) SDL_BindGPUGraphicsPipeline(pass, shadowPipeline_);
         SDL_GPUBufferBinding vertexBinding = {item.mesh->vertices, 0};
         SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
         SDL_GPUBufferBinding indexBinding = {item.mesh->indices, 0};
@@ -1012,7 +1068,8 @@ void Renderer::recordShadows(SDL_GPUCommandBuffer* commands) {
     SDL_EndGPURenderPass(pass);
 }
 
-void Renderer::recordItem(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const DrawItem& item, SDL_GPUGraphicsPipeline*& bound) {
+void Renderer::recordItem(SDL_GPUCommandBuffer*& commands, SDL_GPURenderPass*& pass, const DrawItem& item, SDL_GPUGraphicsPipeline*& bound) {
+    if (reserveDescriptors(commands, pass, item.terrain ? 5 : 10, 2)) bound = nullptr;
     // Terrain: TRTerrainClient's deferred passes set no CULLMODE, so PalGlobalEffect's CCW baseline culls its back faces
     // (seen from below, e.g. from Manhattan's subway, the game shows no terrain).
     SDL_GPUGraphicsPipeline* pipeline = item.terrain ? (cullBackFaces ? culledTerrainPipeline_ : terrainPipeline_) : item.additive ? (cullBackFaces && item.cullBlended ? culledAdditivePipeline_ : additivePipeline_) : item.translucent ? (cullBackFaces && item.cullBlended ? culledTranslucentPipeline_ : translucentPipeline_)
