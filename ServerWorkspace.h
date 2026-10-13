@@ -1,5 +1,6 @@
 #pragma once
 
+#include "MissionEditor.h"
 #include "Panels.h"
 #include "Workspace.h"
 #include "WorldDatabase.h"
@@ -22,11 +23,19 @@ public:
     void drawEditMenu() override;
     void drawPanels() override;
     void renderViewport(SDL_GPUCommandBuffer* commands) override { viewport_.render(ctx_, commands, selection_); }
-    bool hasUnsavedChanges() const override { return !cleanReachable_ || undoStack_.size() != cleanUndoDepth_ || creaturesChanged(); }
+    bool hasUnsavedChanges() const override {
+        return !cleanReachable_ || undoStack_.size() != cleanUndoDepth_ || creaturesChanged() || missions_.changed();
+    }
     bool saveChanges() override {
         bool ok = true;
         if (!cleanReachable_ || undoStack_.size() != cleanUndoDepth_) ok = saveServer();
         if (creaturesChanged()) ok = saveCreatures() && ok;
+        if (missions_.changed() && database_) {
+            std::string message;
+            const bool saved = missions_.save(*database_, message);
+            ctx_.setStatus(message, !saved);
+            ok = saved && ok;
+        }
         return ok;
     }
     void onGameOpened() override { loadServerContent(); }
@@ -66,11 +75,13 @@ private:
     // Creatures panel: creature definitions (creature, creature_stat, creature_appearance), database-wide, with its own
     // Save / Revert (no undo).
     void drawCreaturePanel();
+    void drawMissionPanel();
     void drawCreatureEditor(CreatureDefinition& d, bool isNew);
     void reloadCreatureDefinitions();
     bool creaturesChanged() const;
     bool saveCreatures();
     std::string creatureLabel(const CreatureDefinition& d) const;
+    std::string creatureDisplayName(const CreatureDefinition& d) const;   // what the client shows (creature.py GetName)
 
     Selection selection_;
     std::unique_ptr<WorldDatabase> database_;
@@ -84,6 +95,7 @@ private:
     bool snapToGround_ = true;
     char creatureFilter_[64] = "";
     char serverFilter_[128] = "";
+    MissionEditor missions_;
     std::vector<CreatureDefinition> creatureDefs_;
     std::vector<CreatureDefinition> creatureDefsSaved_;
     int32_t creatureSelected_ = 0;                    // creature id shown in the editor (0: none)

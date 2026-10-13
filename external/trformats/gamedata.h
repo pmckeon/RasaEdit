@@ -178,6 +178,12 @@ public:
     // A creature's in-game name: generated.client.language.english.creaturenamelanguage lookup[nameId] (the client's
     // creaturenamelanguage module; Rasa.NET sends creature.name_id in CreatureInfoPacket). "" if none.
     std::string creatureName(int32_t nameId);
+    // An NPC greeting line: generated.client.language.english.npcgreetinglanguage lookup[(id, gender)][0] (a gender module:
+    // clientlanguagemanager.py BuildModuleText; gender 1 = male, 2 = female). "" if none.
+    std::string npcGreeting(int32_t greetingId, int32_t gender = 1);
+    // Mission text (mission and objective names, bodies, counters): generated.client.language.english.missiontextlanguage
+    // lookup[(id, gender)][0], a gender module like npcgreetinglanguage. "" if none.
+    std::string missionText(int32_t textId, int32_t gender = 1);
     std::vector<SwapsetPart> itemSwapsetParts(int32_t itemClassId, int32_t baseMeshId);
     // equipmentdata.equipableClassAccessoryConnectionPointWeaponOverride[(itemClass, weaponPosition)] (1 stowed, 2 drawn) if
     // present, else equipableClassAccessoryConnectionPoint[itemClass]; each (mesh string id, connection point id).

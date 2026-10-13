@@ -1,5 +1,8 @@
 #include "WorldDatabase.h"
 
+#include <functional>
+#include <map>
+
 #include <sqlite3.h>
 
 #include <algorithm>
@@ -20,6 +23,9 @@ public:
     void bindInt(int index, int64_t value) { sqlite3_bind_int64(statement_, index, value); }
     void bindReal(int index, double value) { sqlite3_bind_double(statement_, index, value); }
     void bindText(int index, const std::string& value) { sqlite3_bind_text(statement_, index, value.c_str(), int(value.size()), SQLITE_TRANSIENT); }
+    void bindNull(int index) { sqlite3_bind_null(statement_, index); }
+    int columnType(int column) const { return sqlite3_column_type(statement_, column); }
+    double realDouble(int column) const { return sqlite3_column_double(statement_, column); }
     bool step() { return sqlite3_step(statement_) == SQLITE_ROW; }
     // For INSERT / UPDATE / DELETE: throws on failure.
     void run(sqlite3* db) {
@@ -157,6 +163,41 @@ void WorldDatabase::loadCreatures() {
     appearances_.clear();
     stats_.clear();
     actions_.clear();
+    npcPackages_.clear();
+    greetings_.clear();
+    actorNames_.clear();
+    vendors_.clear();
+    vendorPrices_.clear();
+    vendorItems_.clear();
+    itemTemplates_.clear();
+    if (requireColumns("npc_package", {"id", "package_id", "comment"})) {
+        Statement s(db_, "SELECT id, package_id, comment FROM npc_package");
+        while (s.step()) npcPackages_[s.int32(0)] = {s.int32(1), s.text(2)};
+    }
+    if (requireColumns("npc_greeting", {"id", "greeting_id"})) {
+        Statement s(db_, "SELECT id, greeting_id FROM npc_greeting");
+        while (s.step()) greetings_[s.int32(0)] = s.int32(1);
+    }
+    if (requireColumns("creature_actor_name", {"id", "actor_name"})) {
+        Statement s(db_, "SELECT id, actor_name FROM creature_actor_name");
+        while (s.step()) actorNames_[s.int32(0)] = s.text(1);
+    }
+    if (requireColumns("vendor", {"id", "package_id"})) {
+        Statement s(db_, "SELECT id, package_id FROM vendor");
+        while (s.step()) vendors_[s.int32(0)] = s.int32(1);
+    }
+    if (requireColumns("vendor_price", {"id", "item_price"})) {
+        Statement s(db_, "SELECT id, item_price FROM vendor_price");
+        while (s.step()) vendorPrices_[s.int32(0)] = s.int32(1);
+    }
+    if (requireColumns("vendor_item", {"id", "item_template_id"})) {
+        Statement s(db_, "SELECT id, item_template_id FROM vendor_item ORDER BY rowid");
+        while (s.step()) vendorItems_[s.int32(0)].push_back(s.int32(1));
+    }
+    if (requireColumns("itemtemplate", {"id", "buy_price"}) && requireColumns("itemtemplate_itemclass", {"itemtemplateid", "itemclassid"})) {
+        Statement s(db_, "SELECT t.id, c.itemClassId, t.buy_price FROM itemtemplate t LEFT JOIN itemtemplate_itemclass c ON c.itemTemplateId = t.id");
+        while (s.step()) itemTemplates_[s.int32(0)] = ItemTemplateInfo{s.int32(1), s.int32(2)};
+    }
     if (requireColumns("creature", {"id", "comment", "class_id", "faction", "level", "max_hp", "name_id", "run_speed", "walk_speed"})) {
         Statement s(db_, "SELECT id, comment, class_id, faction, level, max_hp, name_id, run_speed, walk_speed FROM creature");
         while (s.step()) {
@@ -304,12 +345,190 @@ bool sameCreatureDefinition(const CreatureDefinition& a, const CreatureDefinitio
     if (a.hasStat && (a.stat.body != b.stat.body || a.stat.mind != b.stat.mind || a.stat.spirit != b.stat.spirit || a.stat.health != b.stat.health ||
                       a.stat.armor != b.stat.armor))
         return false;
+    if (a.hasNpcPackage != b.hasNpcPackage || (a.hasNpcPackage && (a.npcPackageId != b.npcPackageId || a.npcPackageComment != b.npcPackageComment)))
+        return false;
+    if (a.hasGreeting != b.hasGreeting || (a.hasGreeting && a.greetingId != b.greetingId)) return false;
+    if (a.hasActorName != b.hasActorName || (a.hasActorName && a.actorName != b.actorName)) return false;
+    if (a.hasVendor != b.hasVendor || (a.hasVendor && a.vendorPackageId != b.vendorPackageId)) return false;
+    if (a.hasVendorPrice != b.hasVendorPrice || (a.hasVendorPrice && a.vendorPrice != b.vendorPrice)) return false;
+    if (a.vendorItems != b.vendorItems) return false;
     if (a.appearance.size() != b.appearance.size()) return false;
     for (size_t k = 0; k < a.appearance.size(); ++k)
         if (a.appearance[k].slotId != b.appearance[k].slotId || a.appearance[k].classId != b.appearance[k].classId ||
             a.appearance[k].colour != b.appearance[k].colour)
             return false;
     return true;
+}
+
+bool operator==(const DbValue& a, const DbValue& b) {
+    if (a.type != b.type) return false;
+    switch (a.type) {
+        case DbValue::Type::Null: return true;
+        case DbValue::Type::Int: return a.i == b.i;
+        case DbValue::Type::Real: return a.r == b.r;
+        default: return a.t == b.t;
+    }
+}
+
+int DbTable::column(const std::string& wanted) const {
+    for (size_t k = 0; k < columns.size(); ++k)
+        if (columns[k] == wanted) return int(k);
+    return -1;
+}
+
+DbTable WorldDatabase::loadTable(const std::string& table) const {
+    DbTable t;
+    t.name = table;
+    std::vector<std::pair<int, int>> keyOrder;             // (pk position, column)
+    {
+        Statement info(db_, "PRAGMA table_info(\"" + table + "\")");
+        while (info.step()) {
+            const int index = int(t.columns.size());
+            t.columns.push_back(info.text(1));
+            t.declaredTypes.push_back(info.text(2));
+            t.nullable.push_back(info.integer(3) == 0);
+            if (info.integer(5) > 0) keyOrder.emplace_back(int(info.integer(5)), index);
+        }
+    }
+    if (t.columns.empty()) throw std::runtime_error("no table " + table);
+    std::sort(keyOrder.begin(), keyOrder.end());
+    for (const auto& k : keyOrder) t.key.push_back(k.second);
+    std::string sql = "SELECT ";
+    for (size_t k = 0; k < t.columns.size(); ++k) sql += (k ? ", \"" : "\"") + t.columns[k] + "\"";
+    sql += " FROM \"" + table + "\"";
+    if (!t.key.empty()) {
+        sql += " ORDER BY ";
+        for (size_t k = 0; k < t.key.size(); ++k) sql += (k ? ", \"" : "\"") + t.columns[size_t(t.key[k])] + "\"";
+    }
+    Statement s(db_, sql);
+    while (s.step()) {
+        std::vector<DbValue> row(t.columns.size());
+        for (size_t k = 0; k < t.columns.size(); ++k) {
+            switch (s.columnType(int(k))) {
+                case SQLITE_INTEGER: row[k] = DbValue::integer(s.integer(int(k))); break;
+                case SQLITE_FLOAT: row[k] = DbValue::real(s.realDouble(int(k))); break;
+                case SQLITE_NULL: break;
+                default: row[k] = DbValue::text(s.text(int(k))); break;
+            }
+        }
+        t.rows.push_back(std::move(row));
+    }
+    return t;
+}
+
+namespace {
+
+void bindValue(Statement& s, int index, const DbValue& v) {
+    switch (v.type) {
+        case DbValue::Type::Null: s.bindNull(index); break;
+        case DbValue::Type::Int: s.bindInt(index, v.i); break;
+        case DbValue::Type::Real: s.bindReal(index, v.r); break;
+        default: s.bindText(index, v.t); break;
+    }
+}
+
+std::string keyString(const DbTable& t, const std::vector<DbValue>& row) {
+    std::string out;
+    for (int k : t.key) {
+        const DbValue& v = row[size_t(k)];
+        out += v.type == DbValue::Type::Text ? "s:" + v.t : v.type == DbValue::Type::Null ? "n:" : "i:" + std::to_string(v.asInt());
+        out += '\x1f';
+    }
+    return out;
+}
+
+}  // namespace
+
+bool WorldDatabase::saveTables(const std::vector<std::pair<const DbTable*, const DbTable*>>& tables, SaveSummary& summary, std::string& error) {
+    summary = SaveSummary{};
+    if (readOnly_) {
+        error = "the database was opened read-only";
+        return false;
+    }
+    try {
+        execute("BEGIN IMMEDIATE");
+    } catch (const std::exception& e) {
+        error = std::string("cannot start a transaction (is the server writing to the database?): ") + e.what();
+        return false;
+    }
+    try {
+        // Deletes, children first (reverse order).
+        for (auto it = tables.rbegin(); it != tables.rend(); ++it) {
+            const DbTable& saved = *it->first;
+            const DbTable& edited = *it->second;
+            if (saved.key.empty()) throw std::runtime_error(saved.name + " has no primary key");
+            std::set<std::string> kept;
+            for (const auto& row : edited.rows) kept.insert(keyString(edited, row));
+            for (const auto& row : saved.rows) {
+                if (kept.count(keyString(saved, row))) continue;
+                std::string sql = "DELETE FROM \"" + saved.name + "\" WHERE ";
+                for (size_t k = 0; k < saved.key.size(); ++k)
+                    sql += (k ? " AND \"" : "\"") + saved.columns[size_t(saved.key[k])] + "\" = ?" + std::to_string(k + 1);
+                Statement s(db_, sql);
+                for (size_t k = 0; k < saved.key.size(); ++k) bindValue(s, int(k + 1), row[size_t(saved.key[k])]);
+                s.run(db_);
+                ++summary.deleted;
+            }
+        }
+        // Inserts and updates, parents first.
+        for (const auto& pair : tables) {
+            const DbTable& saved = *pair.first;
+            const DbTable& edited = *pair.second;
+            std::map<std::string, const std::vector<DbValue>*> before;
+            for (const auto& row : saved.rows) before[keyString(saved, row)] = &row;
+            std::set<std::string> seen;
+            for (const auto& row : edited.rows) {
+                const std::string key = keyString(edited, row);
+                if (!seen.insert(key).second) throw std::runtime_error(edited.name + ": two rows have the same key");
+                const auto found = before.find(key);
+                if (found == before.end()) {
+                    std::string sql = "INSERT INTO \"" + edited.name + "\" (";
+                    for (size_t k = 0; k < edited.columns.size(); ++k) sql += (k ? ", \"" : "\"") + edited.columns[k] + "\"";
+                    sql += ") VALUES (";
+                    for (size_t k = 0; k < edited.columns.size(); ++k) sql += (k ? ", ?" : "?") + std::to_string(k + 1);
+                    sql += ")";
+                    Statement s(db_, sql);
+                    for (size_t k = 0; k < edited.columns.size(); ++k) bindValue(s, int(k + 1), row[k]);
+                    s.run(db_);
+                    ++summary.inserted;
+                } else if (*found->second != row) {
+                    std::string sql = "UPDATE \"" + edited.name + "\" SET ";
+                    int index = 1;
+                    bool first = true;
+                    for (size_t k = 0; k < edited.columns.size(); ++k) {
+                        if (std::find(edited.key.begin(), edited.key.end(), int(k)) != edited.key.end()) continue;
+                        sql += (first ? "\"" : ", \"") + edited.columns[k] + "\" = ?" + std::to_string(index++);
+                        first = false;
+                    }
+                    if (first) continue;                     // only key columns: nothing to update
+                    sql += " WHERE ";
+                    for (size_t k = 0; k < edited.key.size(); ++k)
+                        sql += (k ? " AND \"" : "\"") + edited.columns[size_t(edited.key[k])] + "\" = ?" + std::to_string(index + int(k));
+                    Statement s(db_, sql);
+                    int bind = 1;
+                    for (size_t k = 0; k < edited.columns.size(); ++k) {
+                        if (std::find(edited.key.begin(), edited.key.end(), int(k)) != edited.key.end()) continue;
+                        bindValue(s, bind++, row[k]);
+                    }
+                    for (size_t k = 0; k < edited.key.size(); ++k) bindValue(s, bind++, row[size_t(edited.key[k])]);
+                    s.run(db_);
+                    ++summary.updated;
+                }
+            }
+        }
+        execute("COMMIT");
+        return true;
+    } catch (const std::exception& e) {
+        error = e.what();
+        try { execute("ROLLBACK"); } catch (const std::exception&) {}
+        summary = SaveSummary{};
+        return false;
+    }
+}
+
+const ItemTemplateInfo* WorldDatabase::itemTemplate(int32_t templateId) const {
+    const auto it = itemTemplates_.find(templateId);
+    return it == itemTemplates_.end() ? nullptr : &it->second;
 }
 
 const CreatureStat* WorldDatabase::creatureStat(int32_t creatureId) const {
@@ -328,6 +547,16 @@ std::vector<CreatureDefinition> WorldDatabase::creatureDefinitions() const {
             d.stat = *stat;
         }
         d.appearance = appearance(c.id);
+        if (const auto it = npcPackages_.find(c.id); it != npcPackages_.end()) {
+            d.hasNpcPackage = true;
+            d.npcPackageId = it->second.first;
+            d.npcPackageComment = it->second.second;
+        }
+        if (const auto it = greetings_.find(c.id); it != greetings_.end()) { d.hasGreeting = true; d.greetingId = it->second; }
+        if (const auto it = actorNames_.find(c.id); it != actorNames_.end()) { d.hasActorName = true; d.actorName = it->second; }
+        if (const auto it = vendors_.find(c.id); it != vendors_.end()) { d.hasVendor = true; d.vendorPackageId = it->second; }
+        if (const auto it = vendorPrices_.find(c.id); it != vendorPrices_.end()) { d.hasVendorPrice = true; d.vendorPrice = it->second; }
+        if (const auto it = vendorItems_.find(c.id); it != vendorItems_.end()) d.vendorItems = it->second;
         out.push_back(std::move(d));
     }
     return out;
@@ -421,6 +650,69 @@ bool WorldDatabase::saveCreatures(const std::vector<CreatureDefinition>& saved, 
                     s.run(db_);
                 }
                 ++summary.updated;
+            }
+            // One-row tables keyed by the creature id: insert, update or delete the row as the flag and value say.
+            auto oneRow = [&](const char* table, bool had, bool has, bool same, const std::string& insertSql, const std::string& updateSql,
+                              const std::function<void(Statement&)>& bind) {
+                if (has && !had) {
+                    Statement s(db_, insertSql);
+                    bind(s);
+                    s.run(db_);
+                    ++summary.inserted;
+                } else if (has && had && !same) {
+                    Statement s(db_, updateSql);
+                    bind(s);
+                    s.run(db_);
+                    ++summary.updated;
+                } else if (!has && had) {
+                    Statement s(db_, std::string("DELETE FROM ") + table + " WHERE id = ?1");
+                    s.bindInt(1, c.id);
+                    s.run(db_);
+                    ++summary.deleted;
+                }
+            };
+            oneRow("npc_package", b && b->hasNpcPackage, d.hasNpcPackage,
+                   b && b->npcPackageId == d.npcPackageId && b->npcPackageComment == d.npcPackageComment,
+                   "INSERT INTO npc_package (id, package_id, comment) VALUES (?1, ?2, ?3)",
+                   "UPDATE npc_package SET package_id = ?2, comment = ?3 WHERE id = ?1", [&](Statement& s) {
+                       s.bindInt(1, c.id);
+                       s.bindInt(2, d.npcPackageId);
+                       s.bindText(3, d.npcPackageComment);
+                   });
+            oneRow("npc_greeting", b && b->hasGreeting, d.hasGreeting, b && b->greetingId == d.greetingId,
+                   "INSERT INTO npc_greeting (id, greeting_id) VALUES (?1, ?2)", "UPDATE npc_greeting SET greeting_id = ?2 WHERE id = ?1",
+                   [&](Statement& s) {
+                       s.bindInt(1, c.id);
+                       s.bindInt(2, d.greetingId);
+                   });
+            oneRow("creature_actor_name", b && b->hasActorName, d.hasActorName, b && b->actorName == d.actorName,
+                   "INSERT INTO creature_actor_name (id, actor_name) VALUES (?1, ?2)", "UPDATE creature_actor_name SET actor_name = ?2 WHERE id = ?1",
+                   [&](Statement& s) {
+                       s.bindInt(1, c.id);
+                       s.bindText(2, d.actorName);
+                   });
+            oneRow("vendor", b && b->hasVendor, d.hasVendor, b && b->vendorPackageId == d.vendorPackageId,
+                   "INSERT INTO vendor (id, package_id) VALUES (?1, ?2)", "UPDATE vendor SET package_id = ?2 WHERE id = ?1", [&](Statement& s) {
+                       s.bindInt(1, c.id);
+                       s.bindInt(2, d.vendorPackageId);
+                   });
+            oneRow("vendor_price", b && b->hasVendorPrice, d.hasVendorPrice, b && b->vendorPrice == d.vendorPrice,
+                   "INSERT INTO vendor_price (id, item_price) VALUES (?1, ?2)", "UPDATE vendor_price SET item_price = ?2 WHERE id = ?1",
+                   [&](Statement& s) {
+                       s.bindInt(1, c.id);
+                       s.bindInt(2, d.vendorPrice);
+                   });
+            if (!b || b->vendorItems != d.vendorItems) {     // vendor_item rows have no key of their own: replace the stock
+                Statement del(db_, "DELETE FROM vendor_item WHERE id = ?1");
+                del.bindInt(1, c.id);
+                del.run(db_);
+                for (int32_t item : d.vendorItems) {
+                    Statement s(db_, "INSERT INTO vendor_item (id, item_template_id) VALUES (?1, ?2)");
+                    s.bindInt(1, c.id);
+                    s.bindInt(2, item);
+                    s.run(db_);
+                }
+                if (b || !d.vendorItems.empty()) ++summary.updated;
             }
         }
         execute("COMMIT");

@@ -198,11 +198,33 @@ struct PlacedObject {
 };
 
 // One creature as the editor edits it: its creature row, its creature_stat row (if any) and its appearance slots.
+// The NPC and vendor rows are keyed by the creature id too (Rasa.NET CreatureManager.CreatureInit):
+//   npc_package (package_id: the NPC's conversation package, sent in NPCInfoPacket; comment), npc_greeting (greeting_id:
+//   the client's npcgreetinglanguage line; none = "Greetings."), creature_actor_name (a name the server gives in place of
+//   creaturenamelanguage), vendor (package_id), vendor_price (one price for every item it sells, in place of buy_price),
+//   vendor_item (its stock: item template ids). Only creatures whose class has the vendor augmentation get a vendor.
 struct CreatureDefinition {
     Creature creature;
     bool hasStat = false;
     CreatureStat stat;
     std::vector<AppearanceSlot> appearance;          // sorted by slot
+    bool hasNpcPackage = false;
+    int32_t npcPackageId = 0;
+    std::string npcPackageComment;
+    bool hasGreeting = false;
+    int32_t greetingId = 0;
+    bool hasActorName = false;
+    std::string actorName;
+    bool hasVendor = false;
+    int32_t vendorPackageId = 0;
+    bool hasVendorPrice = false;
+    int32_t vendorPrice = 0;
+    std::vector<int32_t> vendorItems;                // item template ids, in row order
+};
+
+struct ItemTemplateInfo {                            // itemtemplate + itemtemplate_itemclass (read-only)
+    int32_t classId = 0;                             // an entity class id (e.g. 15542 Armor_T1_..._Boots)
+    int32_t buyPrice = 0;
 };
 bool sameCreatureDefinition(const CreatureDefinition& a, const CreatureDefinition& b);
 
@@ -216,6 +238,34 @@ struct WorldContent {
     std::vector<MapRegion> regions;
     std::vector<MissionArea> missionAreas;
     std::vector<PlacedObject> objects;
+};
+
+// A database value as SQLite stores it (dynamic typing kept), for tables edited generically (missions).
+struct DbValue {
+    enum class Type : uint8_t { Null, Int, Real, Text };
+    Type type = Type::Null;
+    int64_t i = 0;
+    double r = 0;
+    std::string t;
+    static DbValue integer(int64_t v) { DbValue x; x.type = Type::Int; x.i = v; return x; }
+    static DbValue real(double v) { DbValue x; x.type = Type::Real; x.r = v; return x; }
+    static DbValue text(std::string v) { DbValue x; x.type = Type::Text; x.t = std::move(v); return x; }
+    bool isNull() const { return type == Type::Null; }
+    int64_t asInt() const { return type == Type::Int ? i : type == Type::Real ? int64_t(r) : 0; }
+    double asReal() const { return type == Type::Real ? r : type == Type::Int ? double(i) : 0.0; }
+};
+bool operator==(const DbValue& a, const DbValue& b);
+inline bool operator!=(const DbValue& a, const DbValue& b) { return !(a == b); }
+
+// A whole table: column names in table order, the primary key columns (indices, in key order) and every row.
+struct DbTable {
+    std::string name;
+    std::vector<std::string> columns;
+    std::vector<std::string> declaredTypes;          // PRAGMA table_info type, e.g. "INTEGER", "varchar(64)"
+    std::vector<bool> nullable;
+    std::vector<int> key;
+    std::vector<std::vector<DbValue>> rows;
+    int column(const std::string& name) const;       // -1 if absent
 };
 
 class WorldDatabase {
@@ -250,7 +300,13 @@ public:
     // Returns false (with nothing written) and sets error on failure.
     bool save(const WorldContent& saved, const WorldContent& edited, SaveSummary& summary, std::string& error);
     const std::vector<Creature>& creatureList() const { return creatureList_; }   // sorted by id
+    // Generic table access (the mission tables): the whole table with its primary key (throws std::runtime_error).
+    DbTable loadTable(const std::string& table) const;
+    // Writes the differences between each (saved, edited) pair by primary key in one transaction: inserts and updates in
+    // the given table order, deletes in reverse order. Returns false (nothing written) and sets error on failure.
+    bool saveTables(const std::vector<std::pair<const DbTable*, const DbTable*>>& tables, SaveSummary& summary, std::string& error);
     const CreatureStat* creatureStat(int32_t creatureId) const;                     // nullptr if the creature has no row
+    const ItemTemplateInfo* itemTemplate(int32_t templateId) const;                 // nullptr if unknown
     const std::vector<CreatureAction>& creatureActions() const { return actions_; }  // sorted by id
     std::vector<CreatureDefinition> creatureDefinitions() const;                    // every creature, sorted by id
     // Writes the creature definitions that differ (creature, creature_stat, creature_appearance) in one transaction; new
@@ -276,6 +332,13 @@ private:
     std::unordered_map<int32_t, Creature> creatures_;
     std::unordered_map<int32_t, std::vector<AppearanceSlot>> appearances_;   // creature id -> slots
     std::unordered_map<int32_t, CreatureStat> stats_;                        // creature id -> creature_stat
+    std::unordered_map<int32_t, std::pair<int32_t, std::string>> npcPackages_;   // creature id -> (package id, comment)
+    std::unordered_map<int32_t, int32_t> greetings_;
+    std::unordered_map<int32_t, std::string> actorNames_;
+    std::unordered_map<int32_t, int32_t> vendors_;                           // creature id -> vendor package id
+    std::unordered_map<int32_t, int32_t> vendorPrices_;
+    std::unordered_map<int32_t, std::vector<int32_t>> vendorItems_;
+    std::unordered_map<int32_t, ItemTemplateInfo> itemTemplates_;
     std::vector<CreatureAction> actions_;
     std::unordered_set<int32_t> npcClasses_;
     std::unordered_set<int32_t> vendorClasses_;

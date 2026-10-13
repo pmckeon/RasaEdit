@@ -388,6 +388,62 @@ int main(int argc, char** argv) {
                     std::printf("creature save test: saved %d (%d added, %d changed, %d deleted%s%s), checks %s\n", saved, summary.inserted,
                                 summary.updated, summary.deleted, error.empty() ? "" : ": ", error.c_str(), ok ? "passed" : "FAILED");
                 }
+                // Generic tables (missions): edit, delete and add rows of two tables, save, reload and compare row for row.
+                {
+                    const DbTable objectives = database->loadTable("mission_objective_definition");
+                    const DbTable triggers = database->loadTable("mission_trigger");
+                    DbTable objectives2 = objectives, triggers2 = triggers;
+                    const int comment = objectives2.column("comment"), objectiveId = objectives2.column("objective_id");
+                    objectives2.rows.front()[size_t(comment)] = DbValue::text("generic save test");
+                    std::vector<DbValue> added = objectives2.rows.front();
+                    added[size_t(objectiveId)] = DbValue::integer(9999);
+                    objectives2.rows.push_back(added);
+                    triggers2.rows.erase(triggers2.rows.begin());
+                    WorldDatabase::SaveSummary summary;
+                    std::string error;
+                    const bool saved = database->saveTables({{&objectives, &objectives2}, {&triggers, &triggers2}}, summary, error);
+                    const DbTable objectives3 = database->loadTable("mission_objective_definition");
+                    const DbTable triggers3 = database->loadTable("mission_trigger");
+                    auto sameRows = [](const DbTable& a, const DbTable& b) {
+                        if (a.rows.size() != b.rows.size()) return false;
+                        for (const auto& row : a.rows)
+                            if (std::find(b.rows.begin(), b.rows.end(), row) == b.rows.end()) return false;
+                        return true;
+                    };
+                    std::printf("generic table save test: saved %d (%d added, %d changed, %d deleted%s%s), objectives %s, triggers %s; key %zu columns\n",
+                                saved, summary.inserted, summary.updated, summary.deleted, error.empty() ? "" : ": ", error.c_str(),
+                                sameRows(objectives2, objectives3) ? "match" : "DIFFER", sameRows(triggers2, triggers3) ? "match" : "DIFFER",
+                                objectives.key.size());
+                }
+                // NPC / vendor rows: a vendor gets a flat price, loses its first stock item and gains one, a greeting and a package.
+                std::vector<CreatureDefinition> before2 = database->creatureDefinitions();
+                std::vector<CreatureDefinition> edited2 = before2;
+                for (CreatureDefinition& d : edited2) {
+                    if (!d.hasVendor || d.vendorItems.size() < 2 || d.hasVendorPrice) continue;
+                    const int32_t id = d.creature.id;
+                    std::vector<int32_t> stock(d.vendorItems.begin() + 1, d.vendorItems.end());
+                    stock.push_back(13066);
+                    d.vendorItems = stock;
+                    d.hasVendorPrice = true;
+                    d.vendorPrice = 77;
+                    d.hasGreeting = true;
+                    d.greetingId = 120;
+                    d.hasNpcPackage = true;
+                    d.npcPackageId = 113;
+                    d.npcPackageComment = "save test package";
+                    WorldDatabase::SaveSummary summary;
+                    std::string error;
+                    const bool saved = database->saveCreatures(before2, edited2, summary, error);
+                    bool ok = false;
+                    for (const CreatureDefinition& r : database->creatureDefinitions())
+                        if (r.creature.id == id)
+                            ok = r.hasVendorPrice && r.vendorPrice == 77 && r.vendorItems == stock && r.hasGreeting && r.greetingId == 120 &&
+                                 r.hasNpcPackage && r.npcPackageId == 113 && r.npcPackageComment == "save test package";
+                    std::printf("vendor save test (creature %d): saved %d (%d added, %d changed, %d deleted%s%s), checks %s; greeting 120 = \"%s\"\n", id,
+                                saved, summary.inserted, summary.updated, summary.deleted, error.empty() ? "" : ": ", error.c_str(),
+                                ok ? "passed" : "FAILED", data.npcGreeting(120).c_str());
+                    break;
+                }
             }
             // Avatar assembly of the first few spawned creatures that wear swap-set items.
             int listed = 0;

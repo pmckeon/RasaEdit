@@ -775,6 +775,18 @@ std::string GameData::creatureName(int32_t nameId) {
     return name && py::isString(name) ? py::asString(name) : "";
 }
 
+std::string GameData::missionText(int32_t textId, int32_t gender) {
+    const py::Object* lines = py::dictGetTuple(global("generated.client.language.english.missiontextlanguage", "lookup"), {textId, gender});
+    const py::Object* line = py::length(lines) > 0 ? py::item(lines, 0) : nullptr;
+    return line && py::isString(line) ? py::asString(line) : "";
+}
+
+std::string GameData::npcGreeting(int32_t greetingId, int32_t gender) {
+    const py::Object* lines = py::dictGetTuple(global("generated.client.language.english.npcgreetinglanguage", "lookup"), {greetingId, gender});
+    const py::Object* line = py::length(lines) > 0 ? py::item(lines, 0) : nullptr;
+    return line && py::isString(line) ? py::asString(line) : "";
+}
+
 std::vector<SwapsetPart> GameData::itemSwapsetParts(int32_t itemClassId, int32_t baseMeshId) {
     std::vector<SwapsetPart> parts;
     const py::Object* list = py::dictGetTuple(global("generated.client.equipmentdata", "equipableClassMeshSwapset"), {itemClassId, baseMeshId});

@@ -26,6 +26,7 @@ void ServerWorkspace::buildDefaultLayout(ImGuiID dockspace) {
     ImGui::DockBuilderDockWindow("Overview###Server.Overview", centre);
     ImGui::DockBuilderDockWindow("Inspector###Server.Inspector", right);
     ImGui::DockBuilderDockWindow("Creatures###Server.Creatures", right);
+    ImGui::DockBuilderDockWindow("Missions###Server.Missions", right);
     ImGui::DockBuilderDockWindow("Map###Server.Map", rightBottom);
     ImGui::DockBuilderFinish(dockspace);
 }
@@ -50,6 +51,7 @@ void ServerWorkspace::drawPanels() {
     drawServerPanel();
     drawInspectorPanel();
     drawCreaturePanel();
+    drawMissionPanel();
     drawMapInfoPanel(ctx_, "Map###Server.Map");
     OverviewLayers layers;
     layers.selection = &selection_;
@@ -101,6 +103,12 @@ void ServerWorkspace::openDatabase(const std::string& path) {
         if (selection_.kind != SelectionKind::MapEntity) selection_ = Selection{};
         database_ = std::move(database);
         reloadCreatureDefinitions();
+        try {
+            missions_.load(*database_);
+        } catch (const std::exception& e) {
+            missions_.clear();
+            ctx_.setStatus(std::string("Mission tables not loaded: ") + e.what(), true);
+        }
         ctx_.setSetting("database", path);
         loadServerContent();
         ctx_.setStatus("Opened server database " + path + (database_->warnings().empty() ? "" : "  (with schema warnings, see the Server panel)"),
@@ -1026,6 +1034,23 @@ void ServerWorkspace::drawServerObjectEditor() {
 }
 
 // ------------------------------------------------------------------------------------------
+// Missions
+// ------------------------------------------------------------------------------------------
+void ServerWorkspace::drawMissionPanel() {
+    if (!ImGui::Begin("Missions###Server.Missions")) { ImGui::End(); return; }
+    if (!database_) ImGui::TextDisabled("Open a server database first.");
+    else if (!missions_.loaded()) ImGui::TextDisabled("This database has no mission tables.");
+    else {
+        std::vector<int32_t> creatures;
+        for (const SpawnPool& p : serverContent_.spawnPools)
+            for (int k = 0; k < 6; ++k)
+                if (spawnSlot(p, k).creatureId > 0) creatures.push_back(spawnSlot(p, k).creatureId);
+        missions_.draw(ctx_, *database_, serverContent_.mapContextId, creatures, !database_->readOnly());
+    }
+    ImGui::End();
+}
+
+// ------------------------------------------------------------------------------------------
 // Creatures
 // ------------------------------------------------------------------------------------------
 void ServerWorkspace::reloadCreatureDefinitions() {
@@ -1056,12 +1081,24 @@ bool ServerWorkspace::saveCreatures() {
     return true;
 }
 
+// The name the client shows (creature.py Creature.GetName): with a name id, the creaturenamelanguage text, with the actor name
+// (else the entity class name) substituted when the text has exactly one "%s"; without one (the server sends none for 0),
+// the actor name (creature_actor_name), else the entity class name.
+std::string ServerWorkspace::creatureDisplayName(const CreatureDefinition& d) const {
+    const Creature& c = d.creature;
+    std::string fallback = d.hasActorName ? d.actorName : "";
+    if (fallback.empty()) fallback = ctx_.classInfo(c.classId).name;
+    if (c.nameId <= 0 || !ctx_.gameData) return fallback;
+    std::string name;
+    try { name = ctx_.gameData->creatureName(c.nameId); } catch (const std::exception&) {}
+    const size_t at = name.find("%s");
+    if (at != std::string::npos && name.find("%s", at + 2) == std::string::npos && !fallback.empty()) name.replace(at, 2, fallback);
+    return name;
+}
+
 std::string ServerWorkspace::creatureLabel(const CreatureDefinition& d) const {
     const Creature& c = d.creature;
-    std::string name;
-    if (ctx_.gameData && c.nameId > 0) {
-        try { name = ctx_.gameData->creatureName(c.nameId); } catch (const std::exception&) {}
-    }
+    const std::string name = creatureDisplayName(d);
     char text[256];
     std::snprintf(text, sizeof text, "%d  %s%s%s  (lvl %d, %s)", c.id, c.comment.c_str(), name.empty() || name == c.comment ? "" : "  \"",
                   name.empty() || name == c.comment ? "" : (name + "\"").c_str(), c.level, creatureFactionName(c.faction));
@@ -1184,11 +1221,13 @@ void ServerWorkspace::drawCreatureEditor(CreatureDefinition& d, bool isNew) {
     integer("Name id", c.nameId);
     ImGui::SameLine();
     {
-        std::string name;
+        std::string text;
         if (ctx_.gameData && c.nameId > 0) {
-            try { name = ctx_.gameData->creatureName(c.nameId); } catch (const std::exception&) {}
+            try { text = ctx_.gameData->creatureName(c.nameId); } catch (const std::exception&) {}
         }
-        ImGui::TextDisabled("%s", c.nameId <= 0 ? "(none: the server names it)" : name.empty() ? "(not in creaturenamelanguage)" : name.c_str());
+        if (c.nameId > 0 && text.empty()) ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.4f, 1.0f), "(not in creaturenamelanguage)");
+        else ImGui::TextDisabled("in game: \"%s\"%s", creatureDisplayName(d).c_str(),
+                                 c.nameId > 0 ? "" : d.hasActorName ? " (actor name)" : " (class name: no name id or actor name)");
     }
     integer("Class", c.classId);
     ImGui::SameLine();
@@ -1272,6 +1311,84 @@ void ServerWorkspace::drawCreatureEditor(CreatureDefinition& d, bool isNew) {
     if (ImGui::SmallButton("Add slot")) d.appearance.push_back(AppearanceSlot{15, 0, 0});
     std::sort(d.appearance.begin(), d.appearance.end(), [](const AppearanceSlot& a, const AppearanceSlot& b) { return a.slotId < b.slotId; });
     ImGui::TextDisabled("The viewport shows saved appearances (avatars are built from the database).");
+    // NPC and vendor rows (see CreatureDefinition).
+    const bool npcClass = database_->classIsNpc(c.classId), vendorClass = database_->classIsVendor(c.classId);
+    if (npcClass || d.hasNpcPackage || d.hasGreeting || d.hasActorName) {
+        ImGui::SeparatorText("NPC");
+        if (!npcClass) ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.4f, 1.0f), "Its class has no NPC augmentation: the server ignores these.");
+        ImGui::Checkbox("Conversation package (npc_package)", &d.hasNpcPackage);
+        if (d.hasNpcPackage) {
+            integer("Package id", d.npcPackageId);
+            char buffer[64];
+            std::snprintf(buffer, sizeof buffer, "%s", d.npcPackageComment.c_str());
+            ImGui::SetNextItemWidth(fieldWidth * 1.5f);
+            if (ImGui::InputText("Package comment", buffer, 51)) d.npcPackageComment = buffer;
+        }
+        ImGui::Checkbox("Greeting (npc_greeting)", &d.hasGreeting);
+        if (d.hasGreeting) {
+            integer("Greeting id", d.greetingId);
+            std::string line;
+            if (ctx_.gameData && d.greetingId > 0) {
+                try { line = ctx_.gameData->npcGreeting(d.greetingId); } catch (const std::exception&) {}
+            }
+            ImGui::TextWrapped("%s", line.empty() ? "(no such line in npcgreetinglanguage)" : ("\"" + line + "\"").c_str());
+        } else {
+            ImGui::TextDisabled("Says the server's default, \"Greetings.\"");
+        }
+        ImGui::Checkbox("Server-given name (creature_actor_name)", &d.hasActorName);
+        if (d.hasActorName) {
+            char buffer[128];
+            std::snprintf(buffer, sizeof buffer, "%s", d.actorName.c_str());
+            ImGui::SetNextItemWidth(fieldWidth * 1.5f);
+            if (ImGui::InputText("Actor name", buffer, sizeof buffer)) d.actorName = buffer;
+        }
+    }
+    if (vendorClass || d.hasVendor || !d.vendorItems.empty()) {
+        ImGui::SeparatorText("Vendor");
+        if (!vendorClass) ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.4f, 1.0f), "Its class has no vendor augmentation: the server ignores these.");
+        ImGui::Checkbox("Vendor row (vendor)", &d.hasVendor);
+        if (d.hasVendor) integer("Vendor package id", d.vendorPackageId);
+        ImGui::Checkbox("One price for everything (vendor_price)", &d.hasVendorPrice);
+        if (d.hasVendorPrice) integer("Price (credits)", d.vendorPrice);
+        ImGui::Text("Stock: %zu item template(s)", d.vendorItems.size());
+        int removeItem = -1;
+        if (ImGui::BeginTable("vendorstock", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp,
+                              ImVec2(0, ImGui::GetTextLineHeightWithSpacing() * std::min<size_t>(10, d.vendorItems.size() + 1)))) {
+            ImGui::TableSetupColumn("Template");
+            ImGui::TableSetupColumn("Item class");
+            ImGui::TableSetupColumn("Buy price");
+            ImGui::TableSetupColumn("");
+            ImGui::TableSetupScrollFreeze(0, 1);
+            ImGui::TableHeadersRow();
+            for (size_t k = 0; k < d.vendorItems.size(); ++k) {
+                ImGui::PushID(int(20000 + k));
+                const ItemTemplateInfo* info = database_->itemTemplate(d.vendorItems[k]);
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::Text("%d", d.vendorItems[k]);
+                ImGui::TableNextColumn();
+                if (info) ImGui::TextUnformatted(ctx_.classInfo(info->classId).name.c_str());
+                else ImGui::TextDisabled("(not in itemtemplate)");
+                ImGui::TableNextColumn();
+                if (info) ImGui::Text("%d", d.hasVendorPrice ? d.vendorPrice : info->buyPrice);
+                ImGui::TableNextColumn();
+                if (ImGui::SmallButton("Remove")) removeItem = int(k);
+                ImGui::PopID();
+            }
+            ImGui::EndTable();
+        }
+        if (removeItem >= 0) d.vendorItems.erase(d.vendorItems.begin() + removeItem);
+        static int newItem = 0;
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7);
+        ImGui::InputInt("##newitem", &newItem, 0);
+        ImGui::SameLine();
+        const ItemTemplateInfo* candidate = database_->itemTemplate(newItem);
+        if (!candidate) ImGui::BeginDisabled();
+        if (ImGui::SmallButton("Add item template")) d.vendorItems.push_back(newItem);
+        if (!candidate) ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", candidate ? ctx_.classInfo(candidate->classId).name.c_str() : "(enter an itemtemplate id)");
+    }
     ImGui::SeparatorText("Used on this map");
     int uses = 0;
     for (size_t k = 0; k < serverContent_.spawnPools.size(); ++k) {
