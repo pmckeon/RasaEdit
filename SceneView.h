@@ -169,6 +169,7 @@ public:
                                             // /dl_showspecintensity, /dl_showdiffuse)
     bool materialMaps = true;               // normal and gloss maps (Pal* materials); off for comparison
     bool environmentMaps = true;
+    bool showStateEffects = true;           // server objects' use-state particles and lights (special-FX packages)
     bool animateSkins = true;               // play blended skinned pieces of animated map objects (CPU skinning)
     std::string hiddenGroup;                // debug: skip model pieces of this GPCE group; "!<group>" draws only it
     int onlyEntity = -1;                    // debug: draw only this map entity (-1 = all)            // environment cube reflections (Pal*Env*); off for comparison
@@ -267,6 +268,14 @@ private:
         // spot/globe orientation = frame rotation x the template's. Placed per entity in lighting().
         std::vector<tr::PlacedLight> lights;
         std::vector<int32_t> lightBones;       // per light: its contact point's skeleton bone (-1: none)
+        // Every contact point by its CPDF id (special-FX particles and lights attach by id): model-space frame, rotation.
+        struct ContactFrame {
+            uint32_t id = 0;                   // CPDF id
+            tr::ConnectionPointName connection;    // what lookups match (see tr::ConnectionPointName)
+            Mat4 frame;                        // model space; posed models: on the posed skeleton
+            tr::Quat rotation;
+        };
+        std::vector<ContactFrame> contactFrames;
         // Animation playback (map objects with an X.anm named like their model): pieces skinned wholly to one bone are
         // built in the first frame and drawn with skin(t)[bone] x inverse(skin(0)[bone]); others stay in frame 0.
         tr::GeoModel skeleton;                 // bones only
@@ -301,6 +310,16 @@ private:
         uint32_t swapsetId = 0;
         Vec4f hue;                      // w: 1 = hue the non-flesh pieces
     };
+    // A special-FX event attached to a body: the placement's own model (body null) or one of its accessories (events of an
+    // accessory's nested package).
+    struct StateParticle {
+        Model* body = nullptr;
+        tr::SfxParticleAttach event;
+    };
+    struct StateLight {
+        Model* body = nullptr;
+        tr::SfxLight event;
+    };
     struct ServerPlacement {
         Selection selection;
         tr::Vec3 position;
@@ -308,6 +327,14 @@ private:
         Model* model = nullptr;         // the base suit for avatars
         std::vector<AvatarDraw> avatarParts;    // each replaces the base model's pieces of its swap set
         std::vector<Model*> accessories;        // the use state's special-FX accessory models (drawn at the same placement)
+        std::vector<StateParticle> stateParticles;   // the use state's particle attaches (PFXA)
+        std::vector<StateLight> stateLights;         // the use state's lights (SLIT)
+        struct BodyAccessory {                       // avatar accessories (weapons, holsters, headsets)
+            Model* model = nullptr;
+            uint32_t connectionPoint = 0;
+            Vec4f hue;
+        };
+        std::vector<BodyAccessory> bodyAccessories;
         Vec4f skinHue;                  // w: 1 = hue flesh pieces
         Vec4f colour;
         float ringRadius = 0;           // spawn radius / trigger radius (0: none)
@@ -373,7 +400,16 @@ private:
     const WorldDatabase* serverDatabase_ = nullptr;
     std::function<std::string(int32_t)> serverMeshForClass_;
     std::function<std::string(int32_t, int32_t)> usablePackageFor_;
-    std::vector<Model*> stateAccessories(int32_t classId, int32_t stateId);
+    struct StateEffects {
+        std::vector<Model*> accessories;
+        std::vector<StateParticle> particles;
+        std::vector<StateLight> lights;
+    };
+    StateEffects stateEffects(int32_t classId, int32_t stateId);
+    void addPackageEffects(const std::string& package, Model* body, int depth, StateEffects& effects);
+    // A contact point's frame on a body (cp 0 = the body itself); false when the body is not loaded or lacks the id.
+    // Lookup by connection point (type 1, `usage`, id) as FUN_00924880; id 0 = the body itself (special-FX events).
+    static bool contactFrame(const Model* body, uint32_t id, uint32_t usage, Mat4& frame, tr::Quat& rotation);
     AvatarResolver serverAvatarFor_;
     std::unordered_map<std::string, Model> models_;
     struct ParticleFile {
@@ -384,8 +420,9 @@ private:
     std::unordered_map<std::string, ParticleFile> particleFiles_;   // lower-case .pfx name
     const tr::ParticleSystem* particleSystem(const std::string& file);
     struct LiveParticles {
-        size_t placement = 0;
-        size_t mount = 0;
+        size_t placement = 0;                   // map entity index, or server placement index when `server`
+        size_t mount = 0;                       // model particle mount, or the server placement's stateParticles index
+        bool server = false;
         std::unique_ptr<ParticleInstance> instance;
     };
     std::vector<LiveParticles> liveParticles_;

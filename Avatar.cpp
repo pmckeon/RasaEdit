@@ -25,6 +25,8 @@ AvatarLook resolveAvatar(tr::GameData& data, const WorldDatabase& database, cons
             part.slotId = slot.slotId;
             if (!part.mesh.empty()) look.parts.push_back(std::move(part));
         }
+        for (const tr::AccessoryAttachment& a : data.itemAccessories(slot.classId, 1))
+            look.accessories.push_back(AvatarAccessory{a.mesh, a.connectionPoint, slot.colour});
     }
     return look;
 }

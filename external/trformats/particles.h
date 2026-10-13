@@ -198,7 +198,7 @@ ParticleSystem readParticleSystem(const Bytes& data);
 // event is decoded: `ACCY` v1-8 (SfxAccessoryEvent unserializer FUN_0075fdd0; all 859 in the shipped packages parse
 // exactly): u8, asset mesh, asset animation, u8, [v2+: asset, asset, u8], [v3+: u8 bool, asset (a nested package)],
 // [v4+: asset x3], [v5+: u8], [v7+: u8 bool], [v8+: f32]; an asset is an ISTR (name), INON (none) or ITNI (id) chunk.
-// What the unnamed fields do (attachment point, looping, timing) is NOT decoded.
+// What the unnamed fields do (attachment point, looping, timing) is NOT decoded. `PFXA` and `SLIT` are decoded too (below).
 struct SfxAccessory {
     std::string mesh;            // e.g. arch_hum_outpost_waypoint_fx.geo
     std::string animation;       // played on it (e.g. arch_hum_outpost_waypoint.anm)
@@ -206,9 +206,60 @@ struct SfxAccessory {
     std::string package;         // v3+ nested package (e.g. a light), "" if none
     uint32_t version = 0;
 };
+// `PFXA` particle attach v1-2 (SfxParticleAttachEvent, unserializer FUN_0076b140, trigger FUN_0076ab00; all 3,583 shipped
+// events parse exactly): u8, asset (.pfx), u8 target, u8 contact point, u8, [v2: u8 bool]. The trigger iterates the
+// bodies chosen by `target` (FUN_007552e0 / FUN_00755a40 with that selector; which body each value means is NOT decoded,
+// 0 is by far the most common) and attaches the system to the contact point whose connection point (type 1, usage 1,
+// id `contactPoint`; see tr::ConnectionPointName) matches (FUN_00924880; 0 = the body itself, a missing one skips it).
+struct SfxParticleAttach {
+    uint32_t version = 0;
+    uint32_t unknown0 = 0;
+    std::string file;
+    uint32_t target = 0;
+    uint32_t contactPoint = 0;
+    uint32_t unknown2 = 0;
+    bool flag = false;                           // v2 (+ 0x25): the trigger then calls FUN_008003e0 on the body (NOT decoded)
+};
+// One keyed track of an `SLIT` light event (FUN_00759c80): u8 loop, f32 uiMax, u32 n, n x (f32 seconds, f32 value).
+// Evaluated by FUN_00848c40: linear between keys, the time clamped to the last key; it never reads uiMax (an editor
+// slider limit - e.g. range 50, intensity 3 / 10, angles 150), so key values are absolute. With `loop` the product's
+// clock for that track wraps at the last key (FUN_00771740).
+struct SfxCurve {
+    bool loop = false;
+    float uiMax = 1;
+    std::vector<std::pair<float, float>> keys;   // (time s, value)
+};
+float sfxCurveValue(const SfxCurve& curve, float seconds);   // loop applied, then FUN_00848c40
+// `SLIT` light v1-5 (SfxLightEvent, unserializer FUN_0075ad70, trigger FUN_0075a510, product FUN_007711f0 / FUN_007717f0 /
+// FUN_00771410; all 1,112 shipped events parse exactly): u8 x4 (+ 8 ?, + 0xc target, + 0x10 contact point, + 0x14 ?),
+// u32 durationMs (0 = no end), f32 Priority, u8 CastsShadows, u32 ShadowQuality, f32 ShadowBiasPercent, f32 x3 Position,
+// f32 x3 Offset, [v < 4: cstr (converted), else asset GlobeMapFile], [v < 3: quaternion x y z w, else f32 x3 rotation in
+// degrees: D3DXQuaternionRotationYawPitchRoll(rotation[1], rotation[0], rotation[2])], 7 curves, [v2+: 2 curves, u8 spot
+// (1 = 'LISP' spot, else 'LIPT' point)], [v5+: u8 RenderMode]. The trigger sets those light properties by name; the
+// product sets Color = curves 0-3, Range = 4 (the light is switched off while it is below a small constant), FalloffPercent
+// = 5, Intensity = 6, PenumbraAngle = 7, ConeAngle = 8 every frame from the elapsed milliseconds.
+struct SfxLight {
+    uint32_t version = 0;
+    uint32_t unknown0 = 0, target = 0, contactPoint = 0, unknown3 = 0;
+    uint32_t durationMs = 0;
+    float priority = 1;
+    bool castsShadows = false;
+    uint32_t shadowQuality = 0;
+    float shadowBiasPercent = 0;
+    Vec3 position;
+    Vec3 offset;
+    std::string globeMap;
+    Quat rotation;                               // from the degrees as the trigger converts them (or v < 3 as stored)
+    bool spot = false;
+    uint32_t renderMode = 0;
+    SfxCurve colourR, colourG, colourB, colourA, range, falloffPercent, intensity, penumbraAngle, coneAngle;
+};
+const SfxCurve& sfxLightCurve(const SfxLight& light, int index);   // 0..8 in file order
 struct SfxPackage {
     std::vector<uint32_t> events;                // every event's tag, in order
     std::vector<SfxAccessory> accessories;
+    std::vector<SfxParticleAttach> particles;
+    std::vector<SfxLight> lights;
 };
 SfxPackage readSfxPackage(const Bytes& data);
 

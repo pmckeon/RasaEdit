@@ -595,6 +595,23 @@ struct GeoContactPoint {
     std::vector<GeoParameter> values;
 };
 
+// A contact point's connection-point identity (TRasa::ConnectionPointUtil::ParseName, tabula_rasa.exe FUN_00924470,
+// verified 2026-10-13): from its "cpNameId" value ("<type letter><usage letter><number>": H 1, P 2, S 3, D 4; S 1, P 2)
+// or else its "cpName": a 4-character prefix from the table at 0x00d02aa0 (HPP_ 1/2, HPS_ 1/1, PPP_ 2/2, PPS_ 2/1,
+// SPP_ 3/2, SPS_ 3/1, DPP_ 4/2, DPS_ 4/1 = type / usage) and the rest matched case-insensitively against the name table at
+// 0x00d02b10 (= generated.client.connectionpoint: 11 Right_Hand, 14 Left_Hand, 28 VFX1, 66 Pistol_Holster, ...).
+// The CPDF id is NOT this id (avatar_hum_m_nude_caucasian_v01: HPS_Right_Hand has CPDF id 8). Lookups by connection point
+// (FUN_00924880) match type 1 and the requested usage: 1 (HPS_, the socket on a body; special-FX events, an avatar's side
+// of an accessory) or 2 (HPP_, the plug on an accessory, TRasa::EntityBody::FinalizeAddAccessory FUN_00502060).
+struct ConnectionPointName {
+    bool valid = false;
+    uint32_t type = 0;
+    uint32_t usage = 0;
+    uint32_t id = 0;
+};
+ConnectionPointName parseConnectionPointName(const GeoContactPoint& cp);
+std::string connectionPointIdName(uint32_t id);       // "Right_Hand" etc.; "" if unknown
+
 struct GeoModel {
     uint32_t version = 0;
     Bounds bounds;

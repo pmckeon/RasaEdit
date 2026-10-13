@@ -783,6 +783,21 @@ std::vector<SwapsetPart> GameData::itemSwapsetParts(int32_t itemClassId, int32_t
     return parts;
 }
 
+std::vector<AccessoryAttachment> GameData::itemAccessories(int32_t itemClassId, int32_t weaponPosition) {
+    std::vector<AccessoryAttachment> out;
+    const py::Object* list = py::dictGetTuple(global("generated.client.equipmentdata", "equipableClassAccessoryConnectionPointWeaponOverride"),
+                                              {itemClassId, weaponPosition});
+    if (!list) list = py::dictGet(global("generated.client.equipmentdata", "equipableClassAccessoryConnectionPoint"), itemClassId);
+    for (size_t k = 0; k < py::length(list); ++k) {
+        const py::Object* pair = py::item(list, k);
+        AccessoryAttachment a;
+        a.mesh = stringById(int32_t(py::asInt(py::item(pair, 0))));
+        a.connectionPoint = int32_t(py::asInt(py::item(pair, 1)));
+        if (!a.mesh.empty()) out.push_back(a);
+    }
+    return out;
+}
+
 std::string GameData::suitName(int32_t suitId) {
     return py::asString(py::item(py::dictGet(global("generated.client.equipmentdata", "suit"), suitId), 0));
 }

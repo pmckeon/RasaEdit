@@ -1567,6 +1567,72 @@ AnimKey readKey(ByteReader& r, const KeyLayout& layout) {
 
 }  // namespace
 
+namespace {
+// tabula_rasa.exe 0x00d02b10: (name, id) pairs; 60 is not used.
+const std::pair<uint32_t, const char*> kConnectionPointNames[] = {
+    {0, "InvalidCP"}, {1, "BoneTracker1"}, {2, "BoneTracker2"}, {3, "BoneTracker3"}, {4, "BoneTracker4"}, {5, "Head"}, {6, "Mouth"},
+    {7, "Left_Shoulder"}, {8, "Right_Shoulder"}, {9, "Right_Bicep"}, {10, "Right_Forearm"}, {11, "Right_Hand"}, {12, "Left_Bicep"},
+    {13, "Left_Forearm"}, {14, "Left_Hand"}, {15, "Upper_Torso"}, {16, "Lower_Torso"}, {17, "Butt"}, {18, "Left_Thigh"},
+    {19, "Right_Thigh"}, {20, "Left_Calf"}, {21, "Right_Calf"}, {22, "Left_Foot"}, {23, "Right_Foot"}, {24, "Face"}, {25, "Neck"},
+    {26, "Terra"}, {27, "Arch"}, {28, "VFX1"}, {29, "VFX2"}, {30, "VFX3"}, {31, "VFX4"}, {32, "VFX5"}, {33, "Projectile"},
+    {34, "Float"}, {35, "Access1"}, {36, "Power1"}, {37, "Switch1"}, {38, "Damage1"}, {39, "Damage2"}, {40, "Ground_Small"},
+    {41, "Ground_Medium"}, {42, "Ground_Large"}, {43, "Floor_Small"}, {44, "Floor_Medium"}, {45, "Floor_Large"},
+    {46, "Wall_Small"}, {47, "Wall_Medium"}, {48, "Wall_Large"}, {49, "Window_Drapery"}, {50, "Player_Vendor"},
+    {51, "Player_Crafting"}, {52, "Tabletop_Small"}, {53, "Tabletop_Medium"}, {54, "Tabletop_Large"},
+    {55, "Creature_Head_Small"}, {56, "Creature_Head_Medium"}, {57, "Creature_Head_Large"}, {58, "Lightbulb"}, {59, "Helmet"},
+    {61, "Backpack"}, {62, "PackHolster"}, {63, "Left_Wrist_Object"}, {64, "Satchel"}, {65, "Sword"}, {66, "Pistol_Holster"},
+    {67, "Thigh_Pack"}, {68, "LIT1"}, {69, "LIT2"}, {70, "LIT3"}, {71, "LIT4"}, {72, "LIT5"}, {73, "LIT6"}, {74, "LIT7"},
+    {75, "LIT8"}, {76, "LIT9"}, {77, "LIT10"}, {78, "USABLE_SMALL"}, {79, "USABLE_MED"}, {80, "USABLE_LARGE"}, {81, "USABLE_TOP"},
+    {82, "USABLE_BOTTOM"}, {83, "USABLE_FRONT"}, {84, "USABLE_BACK"}, {85, "USABLE_LEFT"}, {86, "USABLE_RIGHT"}, {87, "COG"},
+    {88, "Camera_Proxy"}};
+}  // namespace
+
+ConnectionPointName parseConnectionPointName(const GeoContactPoint& cp) {
+    ConnectionPointName out;
+    const GeoParameter* name = nullptr;
+    const GeoParameter* nameId = nullptr;
+    for (const GeoParameter& p : cp.values) {      // the first cpNameId or cpName key, as the exe scans
+        const std::string key = toLowerAscii(p.key);
+        if (key == "cpnameid") { nameId = &p; break; }
+        if (key == "cpname") { name = &p; break; }
+    }
+    if (nameId) {
+        const std::string& v = nameId->value;
+        if (v.size() < 3) return out;
+        const char t = char(std::tolower(static_cast<unsigned char>(v[0]))), u = char(std::tolower(static_cast<unsigned char>(v[1])));
+        out.type = t == 'h' ? 1 : t == 'p' ? 2 : t == 's' ? 3 : t == 'd' ? 4 : 0;
+        out.usage = u == 's' ? 1 : u == 'p' ? 2 : 0;
+        if (out.type == 0 || out.usage == 0) return out;
+        out.id = uint32_t(std::strtol(v.c_str() + 2, nullptr, 10));
+        out.valid = true;
+        return out;
+    }
+    if (!name || name->value.size() < 5) return out;
+    static const std::pair<const char*, std::pair<uint32_t, uint32_t>> prefixes[] = {
+        {"hpp_", {1, 2}}, {"hps_", {1, 1}}, {"ppp_", {2, 2}}, {"pps_", {2, 1}}, {"spp_", {3, 2}}, {"sps_", {3, 1}}, {"dpp_", {4, 2}}, {"dps_", {4, 1}}};
+    const std::string lower = toLowerAscii(name->value);
+    for (const auto& prefix : prefixes) {
+        if (lower.compare(0, 4, prefix.first) != 0) continue;
+        const std::string rest = lower.substr(4);
+        for (const auto& entry : kConnectionPointNames)
+            if (toLowerAscii(entry.second) == rest) {
+                out.type = prefix.second.first;
+                out.usage = prefix.second.second;
+                out.id = entry.first;
+                out.valid = true;
+                return out;
+            }
+        return out;
+    }
+    return out;
+}
+
+std::string connectionPointIdName(uint32_t id) {
+    for (const auto& entry : kConnectionPointNames)
+        if (entry.first == id) return entry.second;
+    return "";
+}
+
 Animation readAnimation(const Bytes& data) {
     if (data.size() < 8 || std::memcmp(data.data(), "CHNK", 4) != 0) throw FormatError("not a chunk file (no CHNK header)");
     if (data[4] != 'B') throw FormatError("text chunk files are not supported");

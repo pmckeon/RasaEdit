@@ -1,5 +1,7 @@
 #include "particles.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <cstdlib>
 
@@ -423,6 +425,35 @@ const GeoContactPoint* findContactPoint(const GeoModel& model, uint32_t id) {
 
 namespace tr {
 
+float sfxCurveValue(const SfxCurve& curve, float seconds) {
+    if (curve.keys.empty()) return 1.0f;
+    if (curve.keys.size() == 1) return curve.keys.front().second;
+    const float last = curve.keys.back().first;
+    float t = seconds;
+    if (curve.loop && last > 0.0f) t = std::fmod(std::max(t, 0.0f), last);
+    t = std::clamp(t, 0.0f, last);
+    for (size_t k = 0; k + 1 < curve.keys.size(); ++k) {
+        const auto& a = curve.keys[k];
+        const auto& b = curve.keys[k + 1];
+        if (t >= a.first && t <= b.first && b.first > a.first) return a.second + (b.second - a.second) * (t - a.first) / (b.first - a.first);
+    }
+    return curve.keys.back().second;
+}
+
+const SfxCurve& sfxLightCurve(const SfxLight& light, int index) {
+    switch (index) {
+        case 0: return light.colourR;
+        case 1: return light.colourG;
+        case 2: return light.colourB;
+        case 3: return light.colourA;
+        case 4: return light.range;
+        case 5: return light.falloffPercent;
+        case 6: return light.intensity;
+        case 7: return light.penumbraAngle;
+        default: return light.coneAngle;
+    }
+}
+
 SfxPackage readSfxPackage(const Bytes& data) {
     ByteReader r(data);
     if (data.size() < 8 || std::memcmp(data.data(), "CHNKBLXX", 8) != 0) throw FormatError("pkg: not a chunk file");
@@ -455,6 +486,62 @@ SfxPackage readSfxPackage(const Bytes& data) {
             if (event.version > 7) r.f32();
             finish(r, event);
             package.accessories.push_back(a);
+        } else if (event.tag == fourcc("PFXA")) {
+            SfxParticleAttach p;
+            p.version = event.version;
+            p.unknown0 = r.u8();
+            p.file = readAsset(r);
+            p.target = r.u8();
+            p.contactPoint = r.u8();
+            p.unknown2 = r.u8();
+            if (event.version == 2) p.flag = r.u8() != 0;
+            finish(r, event);
+            package.particles.push_back(p);
+        } else if (event.tag == fourcc("SLIT")) {
+            SfxLight l;
+            l.version = event.version;
+            l.unknown0 = r.u8();
+            l.target = r.u8();
+            l.contactPoint = r.u8();
+            l.unknown3 = r.u8();
+            l.durationMs = r.u32();
+            l.priority = r.f32();
+            l.castsShadows = r.u8() != 0;
+            l.shadowQuality = r.u32();
+            l.shadowBiasPercent = r.f32();
+            l.position = Vec3{r.f32(), r.f32(), r.f32()};
+            l.offset = Vec3{r.f32(), r.f32(), r.f32()};
+            l.globeMap = event.version < 4 ? r.cstr() : readAsset(r);
+            if (event.version < 3) {
+                l.rotation = Quat{r.f32(), r.f32(), r.f32(), r.f32()};
+            } else {
+                // D3DXQuaternionRotationYawPitchRoll(yaw = rotation[1], pitch = rotation[0], roll = rotation[2]), degrees.
+                const float d = 3.14159265f / 180.0f;
+                const float pitch = r.f32() * d, yaw = r.f32() * d, roll = r.f32() * d;
+                const float cy = std::cos(yaw * 0.5f), sy = std::sin(yaw * 0.5f), cp = std::cos(pitch * 0.5f), sp = std::sin(pitch * 0.5f);
+                const float cr = std::cos(roll * 0.5f), sr = std::sin(roll * 0.5f);
+                l.rotation = Quat{cy * sp * cr + sy * cp * sr, sy * cp * cr - cy * sp * sr, cy * cp * sr - sy * sp * cr, cy * cp * cr + sy * sp * sr};
+            }
+            auto curve = [&r]() {
+                SfxCurve c;
+                c.loop = r.u8() != 0;
+                c.uiMax = r.f32();
+                const uint32_t n = r.u32();
+                for (uint32_t k = 0; k < n; ++k) {
+                    const float t = r.f32();
+                    c.keys.emplace_back(t, r.f32());
+                }
+                return c;
+            };
+            l.colourR = curve(); l.colourG = curve(); l.colourB = curve(); l.colourA = curve();
+            l.range = curve(); l.falloffPercent = curve(); l.intensity = curve();
+            if (event.version >= 2) {
+                l.penumbraAngle = curve(); l.coneAngle = curve();
+                l.spot = r.u8() == 1;
+            }
+            if (event.version >= 5) l.renderMode = r.u8();
+            finish(r, event);
+            package.lights.push_back(l);
         }
         r.seek(event.end);
     }

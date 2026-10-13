@@ -149,6 +149,23 @@ int main(int argc, char** argv) {
                 for (const tr::GeoParameter& p : piece.parameters) std::printf("    %s = %s\n", p.key.c_str(), p.value.c_str());
             }
         }
+        // RASA_PKGSCAN=1: parse every special-FX package; counts of accessory / particle / light events and failures.
+        if (envValue("RASA_PKGSCAN")) {
+            size_t packages = 0, failed = 0, accessories = 0, particles = 0, lights = 0;
+            for (const std::string& name : assets.namesWithExtension(".pkg")) {
+                ++packages;
+                try {
+                    const tr::SfxPackage p = tr::readSfxPackage(assets.read(name));
+                    accessories += p.accessories.size();
+                    particles += p.particles.size();
+                    lights += p.lights.size();
+                } catch (const std::exception& e) {
+                    if (++failed <= 5) std::printf("pkg %s: %s\n", name.c_str(), e.what());
+                }
+            }
+            std::printf("pkg scan: %zu packages, %zu failed; %zu accessories, %zu particle attaches, %zu lights\n", packages, failed,
+                        accessories, particles, lights);
+        }
         // RASA_GEOSCAN=1: every model's pieces whose vertex colours are all zero (colour and alpha), with names.
         if (envValue("RASA_GEOSCAN")) {
             std::map<std::string, size_t> byName;
@@ -306,6 +323,9 @@ int main(int argc, char** argv) {
                 for (const AvatarPart& part : look.parts)
                     std::printf("    slot %d -> swap set %u (%s) from %s, colour %08x\n", part.slotId, part.swapsetId,
                                 data.swapsetName(int32_t(part.swapsetId)).c_str(), part.mesh.c_str(), part.colour);
+                for (const AvatarAccessory& a : look.accessories)
+                    std::printf("    accessory %s on connection point %d (%s)\n", a.mesh.c_str(), a.connectionPoint,
+                                tr::connectionPointIdName(uint32_t(a.connectionPoint)).c_str());
             }
             std::printf("server content: %zu spawn pools, %zu teleporters, %zu objects, %zu links\n", content.spawnPools.size(),
                         content.teleporters.size(), content.objects.size(), content.mapLinks.size());
@@ -334,6 +354,7 @@ int main(int argc, char** argv) {
         // Particle systems: started (with their warm-up) and run for RASA_PARTICLES seconds more (default 0.5);
         // RASA_NOPARTICLES=1 leaves them out.
         if (envValue("RASA_NOPARTICLES")) scene.showParticles = false;
+        if (envValue("RASA_NOSTATEFX")) scene.showStateEffects = false;   // no use-state particles / lights of server objects
         if (envValue("RASA_NOTERRAIN")) scene.showTerrain = false;
         scene.terrainBuildsPerFrame = SIZE_MAX;      // a single frame: every chunk at its distance's detail
         if (envValue("RASA_TWOSIDED")) renderer.cullBackFaces = false;

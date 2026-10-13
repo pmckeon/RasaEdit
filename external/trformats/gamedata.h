@@ -137,6 +137,12 @@ struct SwapsetPart {
     int32_t swapsetId = 0;
 };
 
+// An accessory an item attaches to its wearer (client/augmentations/actor.py _AddAccessory -> body.AddAccessory).
+struct AccessoryAttachment {
+    std::string mesh;
+    int32_t connectionPoint = 0;       // connection point id (see tr::ConnectionPointName)
+};
+
 class GameData {
 public:
     explicit GameData(const std::string& gameZipPath);       // e.g. AssetLibrary::gameDataPath()
@@ -170,6 +176,9 @@ public:
     // Avatar swap sets (generated.client.equipmentdata). baseMeshId is the body's mesh string id
     // (classMeshId of e.g. NPC_Human_Swapset_Male = 4257 avatar_hum_m_nude_caucasian_v01.geo).
     std::vector<SwapsetPart> itemSwapsetParts(int32_t itemClassId, int32_t baseMeshId);
+    // equipmentdata.equipableClassAccessoryConnectionPointWeaponOverride[(itemClass, weaponPosition)] (1 stowed, 2 drawn) if
+    // present, else equipableClassAccessoryConnectionPoint[itemClass]; each (mesh string id, connection point id).
+    std::vector<AccessoryAttachment> itemAccessories(int32_t itemClassId, int32_t weaponPosition);
     std::string suitName(int32_t suitId);                     // suit[id][0], e.g. "NPC Officer 1 Male"
     std::string suitMeshName(int32_t suitId);                 // suit[id][1] via the string table; "" if none
     std::string swapsetName(int32_t swapsetId);               // swapset[id], e.g. "Torso"

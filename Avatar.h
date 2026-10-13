@@ -20,6 +20,15 @@ struct AvatarPart {
     int32_t slotId = 0;            // creature_appearance slot that supplied it
 };
 
+// An accessory (weapon, holster, headset ...) attached to a connection point of the body; the client adds one per
+// appearance item (actor.py _ProcessAppearanceData -> _AddAccessory). Idle NPCs are taken as not weapon-ready, so the
+// stowed (1) weapon override applies (UNVERIFIED for NPCs the server marks as weapon-ready).
+struct AvatarAccessory {
+    std::string mesh;
+    int32_t connectionPoint = 0;
+    uint32_t colour = 0;           // the item's hue, ABGR; 0 = none
+};
+
 struct AvatarLook {
     std::string baseMesh;          // "" if the creature class has no mesh
     // Pose: the first "Idle - Non Combat" animation of the base mesh's skeleton (animationdata); "" = bind pose.
@@ -27,6 +36,7 @@ struct AvatarLook {
     std::string poseAnimation;
     uint32_t skinColour = 0;       // ABGR hue for "flesh" pieces: the Face slot (17) colour; 0 = none (UNVERIFIED rule)
     std::vector<AvatarPart> parts;
+    std::vector<AvatarAccessory> accessories;
 };
 
 AvatarLook resolveAvatar(tr::GameData& data, const WorldDatabase& database, const Creature& creature);

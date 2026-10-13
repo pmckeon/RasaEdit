@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstring>
 #include <map>
+#include <set>
 #include <sstream>
 #include <chrono>
 #include <cmath>
@@ -131,7 +132,8 @@ Mat4 inverseBindMatrix(const tr::GeoBone& bone) {
 // skeleton (optional): pose bones from that model's skeleton, matched by name - avatar swap-set parts follow the body's
 // skeleton, and some part files carry a different hierarchy (avatar_hum_m_face_asian_v04_round: Spine under Pelvis,
 // without the Body Correction / Spine1 target bones), so posing them on their own chain put the head at hip height.
-std::vector<Mat4> skinMatrices(const tr::GeoModel& geo, const tr::Animation& animation, float time, const tr::GeoModel* skeleton = nullptr) {
+std::vector<Mat4> skinMatrices(const tr::GeoModel& geo, const tr::Animation& animation, float time, const tr::GeoModel* skeleton = nullptr,
+                               std::vector<Mat4>* posedOut = nullptr) {
     std::unordered_map<std::string, Mat4> skeletonPosed;
     if (skeleton) {
         const size_t m = skeleton->bones.size();
@@ -187,6 +189,7 @@ std::vector<Mat4> skinMatrices(const tr::GeoModel& geo, const tr::Animation& ani
         rootScaling.row2.z = rootScale[k].z;
         skin[k] = multiply(multiply(posedWorld[k], affineInverse(bindWorld[k])), rootScaling);
     }
+    if (posedOut) *posedOut = posedWorld;
     return skin;
 }
 
@@ -561,6 +564,33 @@ SceneLighting SceneView::lighting() const {
             consider(light);
         }
     }
+    // Special-FX lights of server objects' use states (SLIT; see tr::SfxLight): persistent ones only (durationMs 0) on the
+    // object itself or an accessory (target 0), at contact point frame x (Position + Offset) - the same placement rule as
+    // the model lights (UNVERIFIED for these); the curves are evaluated on the light clock.
+    for (const ServerPlacement& s : serverPlacements_) {
+        if (!showStateEffects) break;
+        for (const StateLight& sl : s.stateLights) {
+            const tr::SfxLight& e = sl.event;
+            if (e.durationMs != 0 || e.target != 0) continue;
+            Mat4 frame;
+            tr::Quat cpRotation;
+            if (!contactFrame(sl.body ? sl.body : s.model, e.contactPoint, 1, frame, cpRotation)) continue;
+            tr::PlacedLight light;
+            light.kind = e.spot ? tr::PlacedLight::Kind::Spot : tr::PlacedLight::Kind::Point;
+            light.colour = tr::Vec3{tr::sfxCurveValue(e.colourR, lightTime), tr::sfxCurveValue(e.colourG, lightTime), tr::sfxCurveValue(e.colourB, lightTime)};
+            light.range = tr::sfxCurveValue(e.range, lightTime);
+            if (light.range < 0.06f) continue;               // the product switches the light off (FUN_00771410, 0x00c2b8f8)
+            light.falloffPercent = tr::sfxCurveValue(e.falloffPercent, lightTime);
+            light.intensity = tr::sfxCurveValue(e.intensity, lightTime);
+            light.penumbraAngle = tr::sfxCurveValue(e.penumbraAngle, lightTime);
+            light.coneAngle = tr::sfxCurveValue(e.coneAngle, lightTime);
+            light.globeMap = e.globeMap;
+            light.castsShadows = e.castsShadows;
+            light.position = transformPoint(s.world, transformPoint(frame, add(e.position, e.offset)));
+            light.worldOrientation = multiplyQuat(quatFromMatrix(s.world), multiplyQuat(cpRotation, e.rotation));
+            consider(light);
+        }
+    }
     std::sort(nearest.begin(), nearest.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
     for (const auto& n : nearest) {
         if (l.localCount >= SceneLighting::maxLocalLights) break;
@@ -610,6 +640,15 @@ void SceneView::loadGlobeMaps() {
     for (const tr::PlacedLight& light : mapLights_) all.push_back(&light);
     for (const auto& m : models_)
         for (const tr::PlacedLight& light : m.second.lights) all.push_back(&light);
+    std::vector<tr::PlacedLight> stateGlobes;           // special-FX lights only contribute their globe name
+    for (const ServerPlacement& s : serverPlacements_)
+        for (const StateLight& l : s.stateLights)
+            if (!l.event.globeMap.empty()) {
+                tr::PlacedLight light;
+                light.globeMap = l.event.globeMap;
+                stateGlobes.push_back(light);
+            }
+    for (const tr::PlacedLight& light : stateGlobes) all.push_back(&light);
     for (const tr::PlacedLight* lightPointer : all) {
         const tr::PlacedLight& light = *lightPointer;
         if (light.globeMap.empty()) continue;
@@ -1056,6 +1095,7 @@ void SceneView::loadModel(const std::string& name, Model& model) {
         const size_t bar2 = bar == std::string::npos ? std::string::npos : name.find('|', bar + 1);
         const tr::GeoModel geo = tr::readGeo(assets_.read(name.substr(0, bar)));
         std::vector<Mat4> skin;                    // per skeleton bone; empty = draw as authored
+        std::vector<Mat4> posedBones;              // per skeleton bone: posed world (contact points of posed models)
         bool objectAnimation = false;
         if (bar != std::string::npos && !geo.bones.empty()) {
             try {
@@ -1063,7 +1103,7 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 tr::GeoModel skeletonGeo;
                 if (bar2 != std::string::npos) skeletonGeo = tr::readGeo(assets_.read(name.substr(bar2 + 1)));
                 const tr::Animation animation = tr::readAnimation(assets_.read(animationName));
-                skin = skinMatrices(geo, animation, 0.0f, bar2 != std::string::npos ? &skeletonGeo : nullptr);
+                skin = skinMatrices(geo, animation, 0.0f, bar2 != std::string::npos ? &skeletonGeo : nullptr, &posedBones);
                 if (bar2 == std::string::npos && animation.duration > 0.0f) {
                     // X.geo with X.anm (map objects): blended skinned pieces are played too; creatures' idles stay posed.
                     auto stem = [](std::string s) {
@@ -1432,6 +1472,17 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                     }
             }
         }
+        for (const tr::GeoContactPoint& cp : geo.contactPoints) {
+            Mat4 frame = contactPointFrame(geo, cp);
+            if (cp.bone >= 0 && size_t(cp.bone) < posedBones.size()) {
+                Mat4 local = rotationMatrix(cp.rotation);
+                local.row0.w = cp.position.x;
+                local.row1.w = cp.position.y;
+                local.row2.w = cp.position.z;
+                frame = multiply(posedBones[size_t(cp.bone)], local);
+            }
+            model.contactFrames.push_back(Model::ContactFrame{cp.id, tr::parseConnectionPointName(cp), frame, cp.rotation});
+        }
         // Particle systems on contact points ("psys" "<cp>,<file>.pfx"): the point's frame, on its bone's bind pose.
         for (const tr::ParticleAttachment& a : tr::particleAttachments(geo)) {
             const tr::GeoContactPoint* cp = tr::findContactPoint(geo, a.contactPoint);
@@ -1536,12 +1587,41 @@ void SceneView::advanceParticles(float dt) {
     // Drop systems the camera has left behind (with some slack so they do not flicker at the edge).
     const float keep = particleDistance * 1.25f;
     liveParticles_.erase(std::remove_if(liveParticles_.begin(), liveParticles_.end(), [&](const LiveParticles& l) {
-                             const tr::Vec3 d = subtract(placements_[l.placement].centre, camera_.position);
+                             const tr::Vec3 centre = l.server ? serverPlacements_[l.placement].position : placements_[l.placement].centre;
+                             const tr::Vec3 d = subtract(centre, camera_.position);
                              return dot(d, d) > keep * keep;
                          }),
                          liveParticles_.end());
+    // Special-FX particle attaches of server objects' use states (target 0 only; see tr::SfxParticleAttach).
+    std::set<std::pair<size_t, size_t>> liveServer;
+    for (const LiveParticles& l : liveParticles_)
+        if (l.server) liveServer.insert({l.placement, l.mount});
+    for (size_t k = 0; k < serverPlacements_.size(); ++k) {
+        const ServerPlacement& s = serverPlacements_[k];
+        if (s.stateParticles.empty() || !showStateEffects) continue;
+        const tr::Vec3 d = subtract(s.position, camera_.position);
+        if (dot(d, d) > particleDistance * particleDistance) continue;
+        for (size_t m = 0; m < s.stateParticles.size(); ++m) {
+            if (liveServer.count({k, m})) continue;
+            const StateParticle& sp = s.stateParticles[m];
+            if (sp.event.target != 0) continue;
+            Mat4 frame;
+            tr::Quat rotation;
+            if (!contactFrame(sp.body ? sp.body : s.model, sp.event.contactPoint, 1, frame, rotation)) continue;
+            const tr::ParticleSystem* system = particleSystem(sp.event.file);
+            if (!system) continue;
+            LiveParticles l;
+            l.placement = k;
+            l.mount = m;
+            l.server = true;
+            l.instance = std::make_unique<ParticleInstance>(*system, multiply(s.world, frame), uint32_t(k * 6271u + m * 15485863u + 7u));
+            for (int step = 0; step < 90; ++step) l.instance->update(1.0f / 30.0f);
+            liveParticles_.push_back(std::move(l));
+        }
+    }
     std::vector<uint8_t> live(placements_.size(), 0);
-    for (const LiveParticles& l : liveParticles_) live[l.placement] = 1;
+    for (const LiveParticles& l : liveParticles_)
+        if (!l.server) live[l.placement] = 1;
     for (size_t k = 0; k < placements_.size(); ++k) {
         const Placement& p = placements_[k];
         if (live[k] || !p.model || !p.model->loaded || p.model->particles.empty()) continue;
@@ -1638,21 +1718,45 @@ void SceneView::updateSkinnedModels() {
 // ------------------------------------------------------------------------------------------
 // Special-FX accessories of usable objects
 // ------------------------------------------------------------------------------------------
-std::vector<SceneView::Model*> SceneView::stateAccessories(int32_t classId, int32_t stateId) {
-    std::vector<Model*> models;
-    if (!usablePackageFor_) return models;
+SceneView::StateEffects SceneView::stateEffects(int32_t classId, int32_t stateId) {
+    StateEffects effects;
+    if (!usablePackageFor_) return effects;
     std::string package;
-    try { package = usablePackageFor_(classId, stateId); } catch (const std::exception&) { return models; }
-    if (package.empty()) return models;
+    try { package = usablePackageFor_(classId, stateId); } catch (const std::exception&) { return effects; }
+    if (!package.empty()) addPackageEffects(package, nullptr, 0, effects);
+    return effects;
+}
+
+// A package's accessories, particle attaches and lights; an accessory's nested package attaches to the accessory's model.
+void SceneView::addPackageEffects(const std::string& package, Model* body, int depth, StateEffects& effects) {
+    if (depth > 3) return;
     try {
         const tr::SfxPackage p = tr::readSfxPackage(assets_.read(package));
-        // The accessory is posed in the first frame of its animation (playback is not implemented).
-        for (const tr::SfxAccessory& a : p.accessories)
-            if (!a.mesh.empty()) models.push_back(modelFor(a.mesh, a.animation));
+        for (const tr::SfxParticleAttach& a : p.particles) effects.particles.push_back(StateParticle{body, a});
+        for (const tr::SfxLight& l : p.lights) effects.lights.push_back(StateLight{body, l});
+        // Accessories are drawn at the placement (their own attachment fields are not decoded).
+        for (const tr::SfxAccessory& a : p.accessories) {
+            Model* accessory = a.mesh.empty() ? nullptr : modelFor(a.mesh, a.animation);
+            if (accessory) effects.accessories.push_back(accessory);
+            if (!a.package.empty()) addPackageEffects(a.package, accessory ? accessory : body, depth + 1, effects);
+        }
     } catch (const std::exception& e) {
         SDL_Log("special fx %s: %s", package.c_str(), e.what());
     }
-    return models;
+}
+
+bool SceneView::contactFrame(const Model* body, uint32_t id, uint32_t usage, Mat4& frame, tr::Quat& rotation) {
+    frame = identityMatrix();
+    rotation = tr::Quat{};
+    if (id == 0) return true;
+    if (!body || !body->loaded) return false;
+    for (const Model::ContactFrame& c : body->contactFrames)
+        if (c.connection.valid && c.connection.type == 1 && c.connection.usage == usage && c.connection.id == id) {
+            frame = c.frame;
+            rotation = c.rotation;
+            return true;
+        }
+    return false;
 }
 
 // ------------------------------------------------------------------------------------------
@@ -1880,8 +1984,9 @@ void SceneView::queueDraws(const Selection& selection) {
     if (showEntities && showParticles) {
         const tr::Vec3 right = camera_.right(), up = camera_.up();
         for (const LiveParticles& l : liveParticles_) {
-            const Placement& p = placements_[l.placement];
-            if (!visible(p.centre, p.radius + 30.0f)) continue;          // effects reach beyond the model's bounds
+            const tr::Vec3 centre = l.server ? serverPlacements_[l.placement].position : placements_[l.placement].centre;
+            const float radius = l.server ? 5.0f : placements_[l.placement].radius;
+            if (!visible(centre, radius + 30.0f)) continue;          // effects reach beyond the model's bounds
             const tr::ParticleSystem& system = l.instance->system();
             for (size_t g = 0; g < system.groups.size(); ++g) {
                 particleScratch_.clear();
@@ -1923,23 +2028,24 @@ void SceneView::queueDraws(const Selection& selection) {
         const bool hasModel = s.model && s.model->loaded && (s.model->hasSolid || s.model->effectOnly);
         if (hasModel) {
             const Vec4f tint = modelTint(selected);
+            Mat4 drawWorld = s.world;          // accessories on connection points draw elsewhere
             auto drawPiece = [&](const ModelPiece& piece, const Vec4f& partHue) {
                 if (piece.additive) {
-                    if (showEffects) drawEffect(nullptr, piece, s.world);   // avatar parts come from several models: no material tracks
+                    if (showEffects) drawEffect(nullptr, piece, drawWorld);   // avatar parts come from several models: no material tracks
                     return;
                 }
                 if (piece.water) {
-                    renderer_.drawTranslucent(piece.mesh, s.world, waterTint(selected));
+                    renderer_.drawTranslucent(piece.mesh, drawWorld, waterTint(selected));
                     return;
                 }
                 if (piece.translucent) {
-                    renderer_.drawTranslucent(piece.mesh, s.world, scaledTint(Vec4f{tint.x, tint.y, tint.z, tint.w * piece.matDiffuseAlpha}, piece.colourScale),
+                    renderer_.drawTranslucent(piece.mesh, drawWorld, scaledTint(Vec4f{tint.x, tint.y, tint.z, tint.w * piece.matDiffuseAlpha}, piece.colourScale),
                                               showTextures ? piece.texture : nullptr, showTextures ? piece.detail : nullptr, piece.detailUv1, !piece.twoSided);
                     return;
                 }
                 Vec4f hue = !showTextures || !piece.hued ? Vec4f{0, 0, 0, 0} : piece.flesh ? s.skinHue : partHue;
                 if (hue.w > 0.5f && piece.hueUnweighted) hue.w = 2.0f;
-                renderer_.draw(piece.mesh, s.world, scaledTint(tint, piece.colourScale), true, showTextures ? piece.texture : nullptr, showTextures && piece.alphaTest, hue,
+                renderer_.draw(piece.mesh, drawWorld, scaledTint(tint, piece.colourScale), true, showTextures ? piece.texture : nullptr, showTextures && piece.alphaTest, hue,
                                showTextures ? piece.glow : nullptr, piece.twoSided, piece.alphaReference,
                                showTextures && materialMaps ? piece.normalMap : nullptr, showTextures && materialMaps ? piece.glossMap : nullptr,
                                showTextures && materialMaps && piece.environment,
@@ -1967,6 +2073,19 @@ void SceneView::queueDraws(const Selection& selection) {
             for (const Model* accessory : s.accessories)
                 if (accessory && accessory->loaded)
                     for (const ModelPiece& piece : accessory->pieces) drawPiece(piece, Vec4f{0, 0, 0, 0});
+            // Avatar accessories: the accessory's plug (HPP_<name>, usage 2) is put on the body's socket (HPS_<name>, usage 1)
+            // of the same connection point (TRasa::EntityBody::FinalizeAddAccessory FUN_00502060 links the two through a
+            // gfxConnection; world = socket x inverse(plug) is the usual meaning - the composition itself is NOT traced).
+            for (const ServerPlacement::BodyAccessory& a : s.bodyAccessories) {
+                if (!a.model || !a.model->loaded) continue;
+                Mat4 socket, plug;
+                tr::Quat ignored;
+                if (!contactFrame(s.model, a.connectionPoint, 1, socket, ignored)) continue;
+                if (!contactFrame(a.model, a.connectionPoint, 2, plug, ignored)) plug = identityMatrix();
+                drawWorld = multiply(s.world, multiply(socket, affineInverse(plug)));
+                for (const ModelPiece& piece : a.model->pieces) drawPiece(piece, a.hue);
+            }
+            drawWorld = s.world;
         } else {
             renderer_.draw(unitBoxLines_, multiply(s.world, boxMatrix(tr::Bounds{tr::Vec3{-0.5f, 0, -0.5f}, tr::Vec3{0.5f, 2, 0.5f}})), colour, false);
         }
@@ -2337,6 +2456,19 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
     serverMeshForClass_ = meshForClass;
     serverAvatarFor_ = avatarFor;
     serverPlacements_.clear();
+    liveParticles_.erase(std::remove_if(liveParticles_.begin(), liveParticles_.end(), [](const LiveParticles& l) { return l.server; }),
+                         liveParticles_.end());
+    struct GlobeReload {
+        SceneView& view;
+        ~GlobeReload() {
+            for (const ServerPlacement& s : view.serverPlacements_)
+                for (const StateLight& l : s.stateLights)
+                    if (!l.event.globeMap.empty() && !view.globeIndex_.count(tr::toLowerAscii(l.event.globeMap))) {
+                        view.loadGlobeMaps();
+                        return;
+                    }
+        }
+    } globeReload{*this};
     if (!content) return;
     auto yawPlacement = [](const tr::Vec3& position, float rotation) {
         return placementMatrix(position, tr::Quat{0, std::sin(rotation * 0.5f), 0, std::cos(rotation * 0.5f)}, 1.0f);
@@ -2357,6 +2489,8 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
             s.skinHue = hueFromAbgr(look.skinColour);
             for (const AvatarPart& part : look.parts)
                 s.avatarParts.push_back(AvatarDraw{modelFor(part.mesh, look.poseAnimation, look.baseMesh), part.swapsetId, hueFromAbgr(part.colour)});
+            for (const AvatarAccessory& a : look.accessories)
+                s.bodyAccessories.push_back(ServerPlacement::BodyAccessory{modelFor(a.mesh), uint32_t(a.connectionPoint), hueFromAbgr(a.colour)});
         }
         s.colour = vendor ? markerColour::vendor : npc ? markerColour::npc : markerColour::hostileCreature;
         s.ringRadius = std::max(pool.radius, 1.5f);
@@ -2370,7 +2504,10 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
         s.position = t.position;
         s.world = yawPlacement(t.position, t.rotation);
         s.model = modelFor(meshForClass(t.classId));
-        s.accessories = stateAccessories(t.classId, 56);
+        StateEffects fx = stateEffects(t.classId, 56);
+        s.accessories = fx.accessories;
+        s.stateParticles = fx.particles;
+        s.stateLights = fx.lights;
         s.colour = markerColour::teleporter;
         s.ringRadius = 2.0f;
         s.facing = true;
