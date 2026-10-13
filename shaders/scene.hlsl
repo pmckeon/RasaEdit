@@ -116,32 +116,36 @@ VertexOutput vsMain(VertexInput input)
     return output;
 }
 
-// The game's TRAdditiveAnisoSpecMapDiffMap[DetMapDecMap]VertColor pixel shader (effects.glm, disassembled):
-// a detail layer added around 0.5 grey, a decal blended by its alpha, and a specular term from LightTexture,
-// an alpha ramp looked up by how directly the surface faces the camera (N.V, not two-sided).
-float3 anisoAdditive(VertexOutput input)
-{
-    const float4 diffuse = diffuseTexture.Sample(diffuseSampler, input.uv);
-    float3 albedo = diffuse.rgb;
-    if (layers.z > 0.5)
-        albedo += detailTexture.Sample(detailSampler, layers.x > 0.5 ? input.uv1 : input.uv).rgb - 0.5;
-    if (layers.w > 0.5)
-    {
-        const float4 decal = decalTexture.Sample(decalSampler, layers.y > 0.5 ? input.uv1 : input.uv);
-        albedo = lerp(albedo, decal.rgb, decal.a);
-    }
-    const float facing = max(dot(normalize(input.normal), normalize(cameraPosition.xyz - input.world)), 0.0);
-    const float ramp = lightTexture.Sample(lightSampler, float2(0.5, facing)).a;
-    const float alpha = diffuse.a * input.colour.a * tint.a;
-    return max(4.0 * alpha * albedo * (albedo * input.colour.rgb + ramp * specular.rgb), 0.0);
-}
-
 // TexCoordTransform<slot> as the TR vertex shaders apply it: dp3 of (u, v, 1) with the matrix's first two columns (the
 // shader constant is MATRIX_COLUMNS; SceneView passes (e0, e4, e8) and (e1, e5, e9) of the stored 16 floats).
 float2 trTransformUv(float2 uv, uint slot)
 {
     const float3 h = float3(uv, 1.0);
     return float2(dot(h, trTransform[slot * 2].xyz), dot(h, trTransform[slot * 2 + 1].xyz));
+}
+
+// The game's TRAdditiveAnisoSpecMapDiffMap[DetMapDecMap]VertColor pixel shader (effects.glm, disassembled):
+// a detail layer added around 0.5 grey, a decal blended by its alpha, and a specular term from LightTexture,
+// an alpha ramp looked up by how directly the surface faces the camera (N.V, not two-sided).
+float3 anisoAdditive(VertexOutput input)
+{
+    // vs2x_AnisoDetDec: diffuse = UV set 0 x TexCoordTransform0, detail = its UV set (uv1) x TexCoordTransform1, decal = its UV
+    // set (uv2) x TexCoordTransform2.
+    const float4 diffuse = diffuseTexture.Sample(diffuseSampler, trTransformUv(input.uv, 0));
+    float3 albedo = diffuse.rgb;
+    if (layers.z > 0.5)
+        albedo += detailTexture.Sample(detailSampler, trTransformUv(input.uv1, 1)).rgb - 0.5;
+    if (layers.w > 0.5)
+    {
+        const float4 decal = decalTexture.Sample(decalSampler, trTransformUv(input.uv2, 2));
+        albedo = lerp(albedo, decal.rgb, decal.a);
+    }
+    const float facing = max(dot(normalize(input.normal), normalize(cameraPosition.xyz - input.world)), 0.0);
+    const float ramp = lightTexture.Sample(lightSampler, float2(0.5, facing)).a;
+    const float alpha = diffuse.a * input.colour.a * tint.a;
+    // The shader writes this alpha to oC0.w and its pass blends SRCALPHA / ONE, so the frame gets the colour x alpha
+    // again (alpha squared overall); the editor's additive pipeline is ONE / ONE, so it is applied here.
+    return max(4.0 * alpha * albedo * (albedo * input.colour.rgb + ramp * specular.rgb), 0.0) * alpha;
 }
 
 // One TR map slot applied to the albedo: 1 modifier (second diffuse, lerp by vertex alpha), 2 detail (+ map - 0.5),
@@ -161,8 +165,8 @@ float4 psMain(VertexOutput input) : SV_Target0
         return float4(0, 0, 0, options.y > 0.5 ? 0 : 1);   // debug views: additive / forward effects are not in the G-buffer
     if (options.w > 0.5)
     {
-        const float3 colour = applyFog(anisoAdditive(input), length(cameraPosition.xyz - input.world), float4(0, 0, 0, fogColour.w), fogRange);
-        return float4(colour, 1.0);
+        // No fog: the effect's passes set FOGENABLE 0 (tradditiveanisospec*sp_2.fxc, verified 2026-10-12).
+        return float4(anisoAdditive(input), 1.0);
     }
     const uint trBits = (uint)trFlags.w;
     const float2 uv0 = (trBits & 0x1) ? trTransformUv(input.uv, 0) : input.uv;

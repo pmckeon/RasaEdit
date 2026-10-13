@@ -639,15 +639,39 @@ struct AnimTrack {
     std::vector<AnimKey> keys;
 };
 
+// Material ("EFCT") tracks animate a texture transform of every .geo piece whose GPCE group (GeoPiece::swapGroup) is the
+// track's group. Layout (verified on all .anm, 106,229 keys): cstr group, cstr parameter (TexCoordTransform0..2), u32 0,
+// u32 keyCount, KEUV chunk of keyCount x 8 f32. Key = scaleU, scaleV, rotation (3), translateU, translateV, time (exe
+// FUN_00609c90 reader, FUN_006d2360 interpolates every component linearly). Verified in game 2026-10-13: the Bootcamp
+// hologram's "hologram 2d" pieces (TexCoordTransform0 translateV 0 -> 3 over 6 s) repeat every 1.99 s in a capture.
+struct MaterialKey {
+    float scaleU = 1, scaleV = 1;
+    Vec3 rotation;                     // only z (component 4) is used, radians
+    float translateU = 0, translateV = 0;
+    float time = 0;                    // seconds
+};
+
+struct MaterialTrack {
+    std::string group;                 // .geo piece group
+    std::string parameter;             // effect parameter, e.g. "TexCoordTransform0"
+    std::vector<MaterialKey> keys;
+};
+
 struct Animation {
     uint32_t version = 0;
-    float duration = 0;                // last key time over all bone tracks
-    std::vector<AnimTrack> tracks;     // bone tracks only ("EFCT" tracks are skipped)
+    float duration = 0;                // last key time over all tracks (bone and material)
+    std::vector<AnimTrack> tracks;     // bone ("SKEL") tracks
+    std::vector<MaterialTrack> materialTracks;
 };
 
 Animation readAnimation(const Bytes& data);
 const AnimTrack* findTrack(const Animation& animation, const std::string& boneName);
 // Interpolated key at time (clamped to the track's range): linear scale/translation, normalised lerp rotation.
 AnimKey sampleTrack(const AnimTrack& track, float time);
+MaterialKey sampleMaterialTrack(const MaterialTrack& track, float time);   // linear, clamped to the track's range
+// A key as the TexCoordTransform the vertex shaders apply: u' = dot((u, v, 1), rowU), v' = dot((u, v, 1), rowV), from
+// c = (u, v) - 0.5 rotated by rotation.z, scaled, + 0.5 + translation. The exe's conversion is not found; this is fitted
+// exactly to the .geo files' stored matrices (written from the first key; see CLAUDE.md "Material animation tracks").
+void materialKeyTransform(const MaterialKey& key, Vec3& rowU, Vec3& rowV);
 
 }  // namespace tr

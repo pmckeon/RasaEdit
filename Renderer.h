@@ -57,15 +57,20 @@ struct RefractMaterial {
 // Material of the game's TRAdditiveAnisoSpecMapDiffMap[DetMapDecMap]VertColor effects (shader in effects.glm, verified by disassembly):
 //   albedo = lerp(diffuse + detail - 0.5, decal, decal.a);  alpha = diffuse.a * vertex.a * MatDiffuse.a
 //   colour = 4 * alpha * albedo * (albedo * vertex.rgb + LightTexture(0.5, max(N.V, 0)).a * MatSpecular)
+//   (N.V per vertex in the game's vertex shader: oT0 = (0.5, max(N.V, 0)))
 struct AnisoMaterial {
     SDL_GPUTexture* diffuse = nullptr;     // UV set 0
     SDL_GPUTexture* detail = nullptr;      // null: no detail layer (diffuse used as is)
     SDL_GPUTexture* decal = nullptr;       // null: no decal
     SDL_GPUTexture* light = nullptr;       // LightTexture: alpha ramp indexed by N.V
-    bool detailUv1 = false;                // DetailTexCoord = 1
-    bool decalUv1 = false;                 // DecalTexCoord = 1
     Vec4f specular = Vec4f{0, 0, 0, 0};    // MatSpecular
     Vec4f diffuseAlpha = Vec4f{1, 1, 1, 1};  // MatDiffuse
+    // TexCoordTransform0..2 (u row, v row as in TrMaterial): diffuse on UV set 0, detail on UV set DetailTexCoord (baked into
+    // MeshVertex texU1/V1), decal on UV set DecalTexCoord (texU2/V2) - vs2x_AnisoDetDec[DetailTexCoord x 3 + DecalTexCoord],
+    // disassembled 2026-10-13 (element layout; the index expression itself is not decoded).
+    Vec4f transform0u = Vec4f{1, 0, 0, 0}, transform0v = Vec4f{0, 1, 0, 0};
+    Vec4f transform1u = Vec4f{1, 0, 0, 0}, transform1v = Vec4f{0, 1, 0, 0};
+    Vec4f transform2u = Vec4f{1, 0, 0, 0}, transform2v = Vec4f{0, 1, 0, 0};
 };
 
 struct GpuMesh {
@@ -150,6 +155,8 @@ public:
 
     GpuMesh createMesh(const std::vector<MeshVertex>& vertices, const std::vector<uint32_t>& indices, bool lines);
     void destroyMesh(GpuMesh& mesh);
+    // Replaces a mesh's vertices (same count; the buffer is cycled, so draws already recorded keep the old data).
+    void updateMeshVertices(const GpuMesh& mesh, const std::vector<MeshVertex>& vertices);
 
     // Frame: begin, queue draws, then record everything into a command buffer.
     void beginFrame(const Mat4& viewProjection, const tr::Vec3& cameraPosition, const SceneLighting& lighting);
@@ -174,14 +181,17 @@ public:
     // Alpha-blended (opacity = tint.w x vertex alpha x texture alpha), lit, drawn after all opaque draws, without depth
     // writes: water, and pieces in the game's Translucent phase (SRCALPHA / INVSRCALPHA, PhaseTranslucent.fx).
     // detail: the forward pieces' detail layer (added around 0.5), sampled with UV set 1 when detailUv1.
+    // cullBack (translucent, additive, aniso): back faces culled when cullBackFaces is on - every phase and TRAdditive*
+    // effect sets no CULLMODE, so PalGlobalEffect's CCW applies (fxcull.py, 2026-10-13); water (TRWaterReflectRefract) and
+    // the four NONE effects are two-sided.
     void drawTranslucent(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, SDL_GPUTexture* texture = nullptr,
-                         SDL_GPUTexture* detail = nullptr, bool detailUv1 = false);
+                         SDL_GPUTexture* detail = nullptr, bool detailUv1 = false, bool cullBack = false);
     // Additive (one, one), unlit, faded by fog, drawn last without depth writes: the game's TRAdditive* effects.
     // lit: a forward-phase piece in the Additive phase (lit per vertex, opacity x tint.w = MatDiffuse alpha).
     void drawAdditive(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, SDL_GPUTexture* texture, bool lit = false,
-                      SDL_GPUTexture* detail = nullptr, bool detailUv1 = false);
+                      SDL_GPUTexture* detail = nullptr, bool detailUv1 = false, bool cullBack = false);
     // The game's TRAdditiveAnisoSpec* effects (holograms): additive, with detail/decal layers and a view-angle light ramp.
-    void drawAnisoAdditive(const GpuMesh& mesh, const Mat4& model, const AnisoMaterial& material);
+    void drawAnisoAdditive(const GpuMesh& mesh, const Mat4& model, const AnisoMaterial& material, bool cullBack = false);
     void drawTerrain(const GpuMesh& mesh, const TerrainMaterial& material);
     // Particle quads (world-space triangle list, see ParticleSim.h). blendType as tr::particleBlendType: 0 additive (the
     // game's SRCALPHA/ONE/ADD), 3 subtractive (reverse subtract); 1 multiply and 2 diffuse are alpha blended. Unlit,
@@ -218,6 +228,7 @@ private:
         bool aniso = false;
         bool forwardLit = false;                 // lit additive (forward-phase piece)
         bool twoSided = false;
+        bool cullBlended = false;                // translucent / additive draw with back faces culled (see drawTranslucent)
         float alphaReference = 0.5f;             // alpha test: texels below it are discarded
         SDL_GPUTexture* normalMap = nullptr;     // Pal* materials: normal map (tangent space) and gloss map
         SDL_GPUTexture* glossMap = nullptr;
@@ -250,6 +261,8 @@ private:
     std::vector<RefractItem> refractDraws_;
     tr::Vec3 cameraRight_{1, 0, 0}, cameraUp_{0, 1, 0}, cameraForward_{0, 0, 1};
     SDL_GPUGraphicsPipeline* additivePipeline_ = nullptr;
+    SDL_GPUGraphicsPipeline* culledAdditivePipeline_ = nullptr;
+    SDL_GPUGraphicsPipeline* culledTranslucentPipeline_ = nullptr;
     SDL_GPUGraphicsPipeline* subtractivePipeline_ = nullptr;   // particles: destination - source
     // Particles: this frame's vertices (uploaded in record()) and their draws.
     struct ParticleBatch {

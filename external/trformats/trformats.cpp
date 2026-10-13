@@ -1582,7 +1582,33 @@ Animation readAnimation(const Bytes& data) {
         AnimTrack track;
         r.u8();                                // UNKNOWN, always 0
         track.target = r.u32();
-        if (track.target != fourcc("SKEL")) {  // material ("EFCT") tracks use another layout: skipped
+        if (track.target == fourcc("EFCT")) {
+            MaterialTrack m;
+            m.group = r.cstr();
+            m.parameter = r.cstr();
+            r.u32();                           // UNKNOWN, always 0
+            const uint32_t keyCount = r.u32();
+            const Chunk keys = readChunk(r);
+            if (keys.tag == fourcc("KEUV") && size_t(keyCount) * 32 == keys.size) {
+                for (uint32_t k = 0; k < keyCount; ++k) {
+                    MaterialKey key;
+                    key.scaleU = r.f32();
+                    key.scaleV = r.f32();
+                    key.rotation.x = r.f32();
+                    key.rotation.y = r.f32();
+                    key.rotation.z = r.f32();
+                    key.translateU = r.f32();
+                    key.translateV = r.f32();
+                    key.time = r.f32();
+                    m.keys.push_back(key);
+                }
+                if (!m.keys.empty()) animation.duration = std::max(animation.duration, m.keys.back().time);
+                animation.materialTracks.push_back(std::move(m));
+            }
+            r.seek(trak.end);
+            continue;
+        }
+        if (track.target != fourcc("SKEL")) {
             r.seek(trak.end);
             continue;
         }
@@ -1615,6 +1641,34 @@ const AnimTrack* findTrack(const Animation& animation, const std::string& boneNa
     for (const AnimTrack& t : animation.tracks)
         if (toLowerAscii(t.name) == wanted) return &t;
     return nullptr;
+}
+
+MaterialKey sampleMaterialTrack(const MaterialTrack& track, float time) {
+    if (track.keys.empty()) return MaterialKey{};
+    if (time <= track.keys.front().time) return track.keys.front();
+    if (time >= track.keys.back().time) return track.keys.back();
+    const auto next = std::upper_bound(track.keys.begin(), track.keys.end(), time,
+                                       [](float t, const MaterialKey& k) { return t < k.time; });
+    const MaterialKey& b = *next;
+    const MaterialKey& a = *(next - 1);
+    const float span = b.time - a.time;
+    const float u = span > 0 ? (time - a.time) / span : 0.0f;
+    auto mix = [u](float p, float q) { return p + (q - p) * u; };
+    MaterialKey out;
+    out.scaleU = mix(a.scaleU, b.scaleU);
+    out.scaleV = mix(a.scaleV, b.scaleV);
+    out.rotation = Vec3{mix(a.rotation.x, b.rotation.x), mix(a.rotation.y, b.rotation.y), mix(a.rotation.z, b.rotation.z)};
+    out.translateU = mix(a.translateU, b.translateU);
+    out.translateV = mix(a.translateV, b.translateV);
+    out.time = time;
+    return out;
+}
+
+void materialKeyTransform(const MaterialKey& key, Vec3& rowU, Vec3& rowV) {
+    const float c = std::cos(key.rotation.z), s = std::sin(key.rotation.z);
+    // u' = scaleU (c (u - 0.5) - s (v - 0.5)) + 0.5 + translateU; v' = scaleV (s (u - 0.5) + c (v - 0.5)) + 0.5 + translateV
+    rowU = Vec3{key.scaleU * c, -key.scaleU * s, key.scaleU * (-0.5f * c + 0.5f * s) + 0.5f + key.translateU};
+    rowV = Vec3{key.scaleV * s, key.scaleV * c, key.scaleV * (-0.5f * s - 0.5f * c) + 0.5f + key.translateV};
 }
 
 AnimKey sampleTrack(const AnimTrack& track, float time) {

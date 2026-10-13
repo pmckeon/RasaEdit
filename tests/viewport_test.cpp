@@ -122,6 +122,11 @@ int main(int argc, char** argv) {
                 for (const tr::VertexElement& e : piece.layout) std::printf(" usage%u.%u type%u", e.usage, e.usageIndex, e.type);
                 std::printf("\n    bone %s, stored positions (%.2f %.2f %.2f) - (%.2f %.2f %.2f)\n", piece.boneName.c_str(), pmin.x, pmin.y, pmin.z,
                             pmax.x, pmax.y, pmax.z);
+                // RASA_GEOVERTS=<piece>: every vertex of that piece (position, normal, uv, uv1, ARGB colour).
+                if (const char* dump = envValue("RASA_GEOVERTS"); dump && size_t(std::atoi(dump)) == k)
+                    for (const tr::GeoVertex& v : piece.vertices)
+                        std::printf("    v %.3f %.3f %.3f n %.3f %.3f %.3f uv %.3f %.3f uv1 %.3f %.3f c %08x\n", v.position.x, v.position.y, v.position.z,
+                                    v.normal.x, v.normal.y, v.normal.z, v.uv.x, v.uv.y, v.uv1.x, v.uv1.y, v.colour);
                 // Winding: Direct3D's default cull (CCW) keeps triangles that are clockwise on screen, whose face normal
                 // in this left-handed space is cross(b - a, c - a). Count those facing away from the piece's centre and
                 // those agreeing with the stored vertex normals.
@@ -367,6 +372,8 @@ int main(int argc, char** argv) {
         for (const auto& e : scene.textureErrors()) std::printf("texture error: %s: %s\n", e.first.c_str(), e.second.c_str());
         // RASA_SELECT=<map entity index>: draw that entity highlighted, as the editor shows a selection.
         Selection highlighted{};
+        if (const char* group = envValue("RASA_HIDEGROUP")) scene.hiddenGroup = group;   // skip model pieces of one GPCE group
+        if (envValue("RASA_NOSKINANIM")) scene.animateSkins = false;   // keep blended skinned pieces in frame 0
         if (const char* only = envValue("RASA_ONLY")) scene.onlyEntity = std::atoi(only);   // draw one map entity alone
         if (const char* sel = envValue("RASA_SELECT")) highlighted = Selection{SelectionKind::MapEntity, size_t(std::atoi(sel))};
         scene.queueDraws(highlighted);

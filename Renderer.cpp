@@ -145,6 +145,8 @@ Renderer::Renderer(SDL_GPUDevice* device) : device_(device) {
     culledTerrainPipeline_ = createPipeline(terrainVertex_, terrainFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST, 0, true);
     translucentPipeline_ = createPipeline(sceneVertex_, sceneFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST, 1);
     additivePipeline_ = createPipeline(sceneVertex_, sceneFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST, 2);
+    culledAdditivePipeline_ = createPipeline(sceneVertex_, sceneFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST, 2, true);
+    culledTranslucentPipeline_ = createPipeline(sceneVertex_, sceneFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST, 1, true);
     subtractivePipeline_ = createPipeline(sceneVertex_, sceneFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST, 3);
     refractPipeline_ = createPipeline(sceneVertex_, refractFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST, 4);
     linearSampler_ = createSampler(device_, true, true);
@@ -236,7 +238,7 @@ Renderer::~Renderer() {
     if (shadowFragment_) SDL_ReleaseGPUShader(device_, shadowFragment_);
     if (particleBuffer_) SDL_ReleaseGPUBuffer(device_, particleBuffer_);
     if (particleTransfer_) SDL_ReleaseGPUTransferBuffer(device_, particleTransfer_);
-    for (SDL_GPUGraphicsPipeline* p : {trianglePipeline_, culledTrianglePipeline_, linePipeline_, terrainPipeline_, culledTerrainPipeline_, translucentPipeline_, additivePipeline_, subtractivePipeline_, refractPipeline_})
+    for (SDL_GPUGraphicsPipeline* p : {trianglePipeline_, culledTrianglePipeline_, linePipeline_, terrainPipeline_, culledTerrainPipeline_, translucentPipeline_, additivePipeline_, culledAdditivePipeline_, culledTranslucentPipeline_, subtractivePipeline_, refractPipeline_})
         if (p) SDL_ReleaseGPUGraphicsPipeline(device_, p);
     if (frameCopy_) SDL_ReleaseGPUTexture(device_, frameCopy_);
     for (SDL_GPUShader* s : {sceneVertex_, sceneFragment_, terrainVertex_, terrainFragment_, refractFragment_})
@@ -366,6 +368,29 @@ void Renderer::resize(uint32_t width, uint32_t height) {
     height_ = height;
 }
 
+void Renderer::updateMeshVertices(const GpuMesh& mesh, const std::vector<MeshVertex>& vertices) {
+    if (!mesh.vertices || vertices.empty()) return;
+    const uint32_t vertexBytes = uint32_t(vertices.size() * sizeof(MeshVertex));
+    SDL_GPUTransferBufferCreateInfo transferInfo = {};
+    transferInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+    transferInfo.size = vertexBytes;
+    SDL_GPUTransferBuffer* transfer = SDL_CreateGPUTransferBuffer(device_, &transferInfo);
+    if (!transfer) fail("SDL_CreateGPUTransferBuffer");
+    std::memcpy(SDL_MapGPUTransferBuffer(device_, transfer, false), vertices.data(), vertexBytes);
+    SDL_UnmapGPUTransferBuffer(device_, transfer);
+    SDL_GPUCommandBuffer* commands = SDL_AcquireGPUCommandBuffer(device_);
+    SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(commands);
+    SDL_GPUTransferBufferLocation source = {};
+    source.transfer_buffer = transfer;
+    SDL_GPUBufferRegion destination = {};
+    destination.buffer = mesh.vertices;
+    destination.size = vertexBytes;
+    SDL_UploadToGPUBuffer(copy, &source, &destination, true);
+    SDL_EndGPUCopyPass(copy);
+    SDL_SubmitGPUCommandBuffer(commands);
+    SDL_ReleaseGPUTransferBuffer(device_, transfer);
+}
+
 GpuMesh Renderer::createMesh(const std::vector<MeshVertex>& vertices, const std::vector<uint32_t>& indices, bool lines) {
     GpuMesh mesh;
     mesh.lines = lines;
@@ -485,26 +510,28 @@ void Renderer::drawRefract(const GpuMesh& mesh, const Mat4& model, const Refract
 }
 
 void Renderer::drawTranslucent(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, SDL_GPUTexture* texture, SDL_GPUTexture* detail,
-                               bool detailUv1) {
+                               bool detailUv1, bool cullBack) {
     if (!mesh.vertices || mesh.indexCount == 0) return;
     DrawItem item{&mesh, model, tint, true, texture ? texture : white_, false, nullptr, true, Vec4f{0, 0, 0, 0}, black_};
     item.detail = detail;
     item.layers = Vec4f{detailUv1 ? 1.0f : 0.0f, 0, detail ? 1.0f : 0.0f, 0};
+    item.cullBlended = cullBack;
     translucentDraws_.push_back(item);
 }
 
 void Renderer::drawAdditive(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, SDL_GPUTexture* texture, bool lit, SDL_GPUTexture* detail,
-                            bool detailUv1) {
+                            bool detailUv1, bool cullBack) {
     if (!mesh.vertices || mesh.indexCount == 0) return;
     DrawItem item{&mesh, model, tint, false, texture ? texture : white_, false, nullptr, true, Vec4f{0, 0, 0, 0}, black_};
     item.additive = true;
     item.forwardLit = lit;
+    item.cullBlended = cullBack;
     item.detail = detail;
     item.layers = Vec4f{detailUv1 ? 1.0f : 0.0f, 0, detail ? 1.0f : 0.0f, 0};
     additiveDraws_.push_back(item);
 }
 
-void Renderer::drawAnisoAdditive(const GpuMesh& mesh, const Mat4& model, const AnisoMaterial& material) {
+void Renderer::drawAnisoAdditive(const GpuMesh& mesh, const Mat4& model, const AnisoMaterial& material, bool cullBack) {
     if (!mesh.vertices || mesh.indexCount == 0) return;
     DrawItem item{&mesh, model, material.diffuseAlpha, false, material.diffuse ? material.diffuse : white_, false, nullptr, true, Vec4f{0, 0, 0, 0},
                   black_};
@@ -514,7 +541,11 @@ void Renderer::drawAnisoAdditive(const GpuMesh& mesh, const Mat4& model, const A
     item.light = material.light;
     item.specular = material.specular;
     item.aniso = true;
-    item.layers = Vec4f{material.detailUv1 ? 1.0f : 0.0f, material.decalUv1 ? 1.0f : 0.0f, material.detail ? 1.0f : 0.0f, material.decal ? 1.0f : 0.0f};
+    item.cullBlended = cullBack;
+    item.layers = Vec4f{0, 0, material.detail ? 1.0f : 0.0f, material.decal ? 1.0f : 0.0f};
+    item.tr.transform0u = material.transform0u; item.tr.transform0v = material.transform0v;     // tr.active stays false
+    item.tr.transform1u = material.transform1u; item.tr.transform1v = material.transform1v;
+    item.tr.transform2u = material.transform2u; item.tr.transform2v = material.transform2v;
     additiveDraws_.push_back(item);
 }
 
@@ -709,7 +740,7 @@ void Renderer::recordShadows(SDL_GPUCommandBuffer* commands) {
 void Renderer::recordItem(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const DrawItem& item, SDL_GPUGraphicsPipeline*& bound) {
     // Terrain: TRTerrainClient's deferred passes set no CULLMODE, so PalGlobalEffect's CCW baseline culls its back faces
     // (seen from below, e.g. from Manhattan's subway, the game shows no terrain).
-    SDL_GPUGraphicsPipeline* pipeline = item.terrain ? (cullBackFaces ? culledTerrainPipeline_ : terrainPipeline_) : item.additive ? additivePipeline_ : item.translucent ? translucentPipeline_
+    SDL_GPUGraphicsPipeline* pipeline = item.terrain ? (cullBackFaces ? culledTerrainPipeline_ : terrainPipeline_) : item.additive ? (cullBackFaces && item.cullBlended ? culledAdditivePipeline_ : additivePipeline_) : item.translucent ? (cullBackFaces && item.cullBlended ? culledTranslucentPipeline_ : translucentPipeline_)
                                         : item.mesh->lines ? linePipeline_ : cullBackFaces && item.lit && !item.twoSided ? culledTrianglePipeline_ : trianglePipeline_;
     if (pipeline != bound) {
         SDL_BindGPUGraphicsPipeline(pass, pipeline);

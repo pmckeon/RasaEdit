@@ -169,6 +169,8 @@ public:
                                             // /dl_showspecintensity, /dl_showdiffuse)
     bool materialMaps = true;               // normal and gloss maps (Pal* materials); off for comparison
     bool environmentMaps = true;
+    bool animateSkins = true;               // play blended skinned pieces of animated map objects (CPU skinning)
+    std::string hiddenGroup;                // debug: skip model pieces of this GPCE group; "!<group>" draws only it
     int onlyEntity = -1;                    // debug: draw only this map entity (-1 = all)            // environment cube reflections (Pal*Env*); off for comparison
     std::unordered_map<std::string, int> globeIndex_;    // lower-case GlobeMapFile -> cube index (1-based; 0 = none)
     std::string globeErrors_;
@@ -228,6 +230,21 @@ private:
         bool aniso = false;                    // TRAdditiveAnisoSpec* effect (holograms): drawn with anisoMaterial
         bool twoSided = false;                 // the effect sets CULLMODE = NONE (PalDiffMap, TRDiffMapNoLight, TRLava, TRBeam)
         AnisoMaterial anisoMaterial;           // textures owned by textures_
+        // Object animation (X.anm of X.geo): a skinned piece blended over several bones is re-skinned whenever the clock
+        // moves (SceneView::updateSkinnedModels) from its stored vertices; null for every other piece.
+        struct SkinSource {
+            std::vector<tr::GeoVertex> vertices;
+            std::vector<int> palette;          // palette slot -> skeleton bone
+            std::vector<MeshVertex> baked;     // the frame-0 vertices (colours, UVs kept; positions / normals replaced)
+            bool meshNormals = false;          // TRAdditiveAnisoSpec*: the game skins only the position
+        };
+        std::shared_ptr<SkinSource> skinSource;
+        // Model animation's material tracks (index into animation.materialTracks, -1: none) for TexCoordTransform0..2.
+        int uvTrack0 = -1, uvTrack1 = -1, uvTrack2 = -1;
+        std::string group;                     // GPCE group (GeoPiece::swapGroup)
+    };
+    struct UvTransforms {                      // TexCoordTransform0..2 as u / v rows (see TrMaterial)
+        Vec4f u0, v0, u1, v1, u2, v2;
     };
     struct Model {
         std::vector<ModelPiece> pieces;
@@ -256,9 +273,16 @@ private:
         tr::Animation animation;
         std::vector<Mat4> restInverse;         // per bone: inverse of the frame-0 skin matrix
         bool animated = false;
+        bool materialAnimated = false;         // some drawn piece has material (texture transform) tracks
+        bool skinAnimated = false;             // some piece has a skinSource
+        float skinnedTime = 0;                 // animation time the skinned pieces were last posed at
     };
     // Per-piece matrices of an animated model at time t (loops over the animation's duration); empty if not animated.
     std::vector<Mat4> animatedPieceMatrices(const Model& model, float time) const;
+    // Re-skins the blended skinned pieces of animated map objects at lightTime (CPU skinning, vertex buffers replaced).
+    void updateSkinnedModels();
+    // A piece's texture transforms at time t from its material tracks (slots without a track keep out's values); false if none.
+    bool animatedUvTransforms(const Model& model, const ModelPiece& piece, float time, UvTransforms& out) const;
     struct Placement {
         Mat4 world;                 // entity placement
         Mat4 boxWorld;              // placement * local bounds (for placeholders and selection)

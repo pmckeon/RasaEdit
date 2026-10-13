@@ -1056,6 +1056,7 @@ void SceneView::loadModel(const std::string& name, Model& model) {
         const size_t bar2 = bar == std::string::npos ? std::string::npos : name.find('|', bar + 1);
         const tr::GeoModel geo = tr::readGeo(assets_.read(name.substr(0, bar)));
         std::vector<Mat4> skin;                    // per skeleton bone; empty = draw as authored
+        bool objectAnimation = false;
         if (bar != std::string::npos && !geo.bones.empty()) {
             try {
                 const std::string animationName = name.substr(bar + 1, bar2 == std::string::npos ? std::string::npos : bar2 - bar - 1);
@@ -1064,6 +1065,13 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 const tr::Animation animation = tr::readAnimation(assets_.read(animationName));
                 skin = skinMatrices(geo, animation, 0.0f, bar2 != std::string::npos ? &skeletonGeo : nullptr);
                 if (bar2 == std::string::npos && animation.duration > 0.0f) {
+                    // X.geo with X.anm (map objects): blended skinned pieces are played too; creatures' idles stay posed.
+                    auto stem = [](std::string s) {
+                        s = tr::toLowerAscii(s);
+                        const size_t dot = s.rfind('.');
+                        return dot == std::string::npos ? s : s.substr(0, dot);
+                    };
+                    objectAnimation = stem(name.substr(0, bar)) == stem(animationName);
                     model.animation = animation;
                     model.skeleton.bones = geo.bones;
                     model.restInverse.clear();
@@ -1147,8 +1155,9 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                     if (gp.key == key) return std::atoi(gp.value.c_str());
                 return fallback;
             };
-            const int uvSet1 = trDesc.slot1Uv ? parameterInt(trDesc.slot1Uv, 0) : 0;
-            const int uvSet2 = trDesc.slot2Uv ? parameterInt(trDesc.slot2Uv, 0) : 0;
+            // TRAdditiveAnisoSpec*: vs2x_AnisoDetDec[DetailTexCoord x 3 + DecalTexCoord] (element layout, 2026-10-13).
+            const int uvSet1 = aniso ? parameterInt("DetailTexCoord", 0) : trDesc.slot1Uv ? parameterInt(trDesc.slot1Uv, 0) : 0;
+            const int uvSet2 = aniso ? parameterInt("DecalTexCoord", 0) : trDesc.slot2Uv ? parameterInt(trDesc.slot2Uv, 0) : 0;
             auto uvOfSet = [](const tr::GeoVertex& gv, int set) { return set == 2 ? gv.uv2 : set == 1 ? gv.uv1 : gv.uv; };
             // Static pieces attached to a bone are moved by it (as in the OBJ exporter).
             const tr::GeoBone* bone = nullptr;
@@ -1158,9 +1167,10 @@ void SceneView::loadModel(const std::string& name, Model& model) {
             Mat4 boneMatrix = identityMatrix();
             if (bone) {
                 boneMatrix = rotationMatrix(bone->rotation);
-                boneMatrix.row0 = {boneMatrix.row0.x * bone->scale.x, boneMatrix.row0.y * bone->scale.y, boneMatrix.row0.z * bone->scale.z, bone->translation.x};
-                boneMatrix.row1 = {boneMatrix.row1.x * bone->scale.x, boneMatrix.row1.y * bone->scale.y, boneMatrix.row1.z * bone->scale.z, bone->translation.y};
-                boneMatrix.row2 = {boneMatrix.row2.x * bone->scale.x, boneMatrix.row2.y * bone->scale.y, boneMatrix.row2.z * bone->scale.z, bone->translation.z};
+                const tr::Vec3 bs = bone->scale;
+                boneMatrix.row0 = {boneMatrix.row0.x * bs.x, boneMatrix.row0.y * bs.y, boneMatrix.row0.z * bs.z, bone->translation.x};
+                boneMatrix.row1 = {boneMatrix.row1.x * bs.x, boneMatrix.row1.y * bs.y, boneMatrix.row1.z * bs.z, bone->translation.y};
+                boneMatrix.row2 = {boneMatrix.row2.x * bs.x, boneMatrix.row2.y * bs.y, boneMatrix.row2.z * bs.z, bone->translation.z};
             }
             // Skinned pieces: palette slot -> skeleton bone (by name); -1 = not in the skeleton (left in place).
             std::vector<int> palette;
@@ -1210,7 +1220,9 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                     }
                     if (total > 0) {
                         p = scaled(sp, 1.0f / total);
-                        n = sn;
+                        // TRAdditiveAnisoSpec*: the skinned vertex shader (vs2x_AnisoDetDec_Skinned, disassembled 2026-10-13)
+                        // skins only the position; N.V uses the mesh-space normal x gWorldMatrix x gInvWorldScale.
+                        n = aniso ? gv.normal : sn;
                         tangent = st;
                         binormal = sb;
                     }
@@ -1228,7 +1240,7 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 v.texV = gv.uv.y;
                 v.texU1 = glowUvSet == 0 ? gv.uv.x : gv.uv1.x;
                 v.texV1 = glowUvSet == 0 ? gv.uv.y : gv.uv1.y;
-                if (trDesc.slot1) {
+                if (trDesc.slot1 || aniso) {
                     v.texU1 = uvOfSet(gv, uvSet1).x;
                     v.texV1 = uvOfSet(gv, uvSet1).y;
                 }
@@ -1239,6 +1251,15 @@ void SceneView::loadModel(const std::string& name, Model& model) {
             if (!vertices.empty() && piece.indices.size() >= 3) {
                 ModelPiece part;
                 part.mesh = renderer_.createMesh(vertices, piece.indices, false);
+                if (objectAnimation && !palette.empty() && rigidBone < 0) {
+                    auto source = std::make_shared<ModelPiece::SkinSource>();
+                    source->vertices = piece.vertices;
+                    source->palette = palette;
+                    source->baked = vertices;
+                    source->meshNormals = aniso;
+                    part.skinSource = source;
+                    model.skinAnimated = true;
+                }
                 part.water = water;
                 model.hasWater = model.hasWater || water;
                 part.texture = water ? nullptr : texture(piece.diffuseTexture);    // water's diffuse map is a stand-in
@@ -1372,12 +1393,33 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                         if (p.key == "DetailTexture") m.detail = texture(p.value);
                         if (p.key == "DecalTexture") m.decal = texture(p.value);
                         if (p.key == "LightTexture") m.light = texture(p.value);
-                        if (p.key == "DetailTexCoord") m.detailUv1 = std::atoi(p.value.c_str()) == 1;
-                        if (p.key == "DecalTexCoord") m.decalUv1 = std::atoi(p.value.c_str()) == 1;
                         if (p.key == "MatSpecular") m.specular = parseColour(p.value);
                         if (p.key == "MatDiffuse") m.diffuseAlpha = parseColour(p.value);
+                        // TexCoordTransform<n>: MATRIX_COLUMNS in vs2x_AnisoDetDec as in the TR shaders (u row e0 e4 e8, v row
+                        // e1 e5 e9).
+                        for (int slot = 0; slot < 3; ++slot) {
+                            if (p.key != "TexCoordTransform" + std::to_string(slot)) continue;
+                            float e[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+                            std::istringstream values(p.value);
+                            for (float& x : e) values >> x;
+                            const Vec4f u{e[0], e[4], e[8], 0}, v{e[1], e[5], e[9], 0};
+                            if (slot == 0) { m.transform0u = u; m.transform0v = v; }
+                            if (slot == 1) { m.transform1u = u; m.transform1v = v; }
+                            if (slot == 2) { m.transform2u = u; m.transform2v = v; }
+                        }
                     }
                 }
+                part.group = piece.swapGroup;
+                // Material animation: the model animation's EFCT tracks whose group is this piece's GPCE group.
+                for (size_t t = 0; t < model.animation.materialTracks.size(); ++t) {
+                    const tr::MaterialTrack& track = model.animation.materialTracks[t];
+                    if (track.group != piece.swapGroup || track.keys.empty()) continue;
+                    if (track.parameter == "TexCoordTransform0") part.uvTrack0 = int(t);
+                    if (track.parameter == "TexCoordTransform1") part.uvTrack1 = int(t);
+                    if (track.parameter == "TexCoordTransform2") part.uvTrack2 = int(t);
+                }
+                if ((part.uvTrack0 >= 0 || part.uvTrack1 >= 0 || part.uvTrack2 >= 0) && (part.aniso || part.refract || part.trMaterial.active))
+                    model.materialAnimated = true;
                 model.pieces.push_back(part);
                 if (additive) continue;
                 model.hasSolid = true;
@@ -1532,6 +1574,67 @@ std::vector<Mat4> SceneView::animatedPieceMatrices(const Model& model, float tim
     return matrices;
 }
 
+bool SceneView::animatedUvTransforms(const Model& model, const ModelPiece& piece, float time, UvTransforms& out) const {
+    if (!model.materialAnimated || model.animation.duration <= 0.0f) return false;
+    if (piece.uvTrack0 < 0 && piece.uvTrack1 < 0 && piece.uvTrack2 < 0) return false;
+    // Same clock and loop as the bone animation (the controller wraps by the animation's length).
+    const float t = std::fmod(std::max(time, 0.0f), model.animation.duration);
+    auto apply = [&](int track, Vec4f& u, Vec4f& v) {
+        if (track < 0) return;
+        tr::Vec3 ru, rv;
+        tr::materialKeyTransform(tr::sampleMaterialTrack(model.animation.materialTracks[size_t(track)], t), ru, rv);
+        u = Vec4f{ru.x, ru.y, ru.z, 0};
+        v = Vec4f{rv.x, rv.y, rv.z, 0};
+    };
+    apply(piece.uvTrack0, out.u0, out.v0);
+    apply(piece.uvTrack1, out.u1, out.v1);
+    apply(piece.uvTrack2, out.u2, out.v2);
+    return true;
+}
+
+void SceneView::updateSkinnedModels() {
+    for (auto& entry : models_) {
+        Model& model = entry.second;
+        if (!model.loaded || !model.skinAnimated || model.animation.duration <= 0.0f) continue;
+        const float t = std::fmod(std::max(lightTime, 0.0f), model.animation.duration);
+        if (t == model.skinnedTime) continue;
+        model.skinnedTime = t;
+        const std::vector<Mat4> skin = skinMatrices(model.skeleton, model.animation, t);
+        for (ModelPiece& piece : model.pieces) {
+            if (!piece.skinSource) continue;
+            const ModelPiece::SkinSource& source = *piece.skinSource;
+            std::vector<MeshVertex> vertices = source.baked;
+            for (size_t k = 0; k < vertices.size() && k < source.vertices.size(); ++k) {
+                // The same linear blend as loadModel's frame-0 pose.
+                const tr::GeoVertex& gv = source.vertices[k];
+                tr::Vec3 sp{0, 0, 0}, sn{0, 0, 0}, st{0, 0, 0}, sb{0, 0, 0};
+                float total = 0;
+                for (uint32_t i = 0; i < 4; ++i) {
+                    const float w = tr::blendWeight(gv, i);
+                    const uint32_t slot = tr::blendIndex(gv, i);
+                    if (w <= 0 || slot >= source.palette.size() || source.palette[slot] < 0 || size_t(source.palette[slot]) >= skin.size()) continue;
+                    const Mat4& m = skin[size_t(source.palette[slot])];
+                    sp = add(sp, scaled(transformPoint(m, gv.position), w));
+                    const tr::Vec3 o = transformPoint(m, tr::Vec3{0, 0, 0});
+                    sn = add(sn, scaled(subtract(transformPoint(m, gv.normal), o), w));
+                    st = add(st, scaled(subtract(transformPoint(m, gv.tangent), o), w));
+                    sb = add(sb, scaled(subtract(transformPoint(m, gv.binormal), o), w));
+                    total += w;
+                }
+                if (total <= 0) continue;
+                MeshVertex& v = vertices[k];
+                const tr::Vec3 p = scaled(sp, 1.0f / total);
+                const tr::Vec3 n = source.meshNormals ? gv.normal : sn;
+                v.positionX = p.x; v.positionY = p.y; v.positionZ = p.z;
+                v.normalX = n.x; v.normalY = n.y; v.normalZ = n.z;
+                v.tangentX = st.x; v.tangentY = st.y; v.tangentZ = st.z;
+                v.binormalX = sb.x; v.binormalY = sb.y; v.binormalZ = sb.z;
+            }
+            renderer_.updateMeshVertices(piece.mesh, vertices);
+        }
+    }
+}
+
 // ------------------------------------------------------------------------------------------
 // Special-FX accessories of usable objects
 // ------------------------------------------------------------------------------------------
@@ -1618,6 +1721,7 @@ void SceneView::updateClutterCells() {
 // Frame
 // ------------------------------------------------------------------------------------------
 void SceneView::queueDraws(const Selection& selection) {
+    if (animateSkins) updateSkinnedModels();
     const int selectedEntity = selection.kind == SelectionKind::MapEntity ? int(selection.index) : -1;
     const float aspect = float(renderer_.width()) / float(std::max<uint32_t>(1, renderer_.height()));
     const Mat4 viewProjection = multiply(camera_.projectionMatrix(aspect), camera_.viewMatrix());
@@ -1650,15 +1754,30 @@ void SceneView::queueDraws(const Selection& selection) {
     };
     auto scaledTint = [](const Vec4f& t, float s) { return Vec4f{t.x * s, t.y * s, t.z * s, t.w}; };   // VertColor x2
     // Additive pieces; holograms (aniso) use the game's own material when textures are shown.
-    auto drawEffect = [&](const ModelPiece& piece, const Mat4& world) {
-        if (piece.aniso && showTextures) renderer_.drawAnisoAdditive(piece.mesh, world, piece.anisoMaterial);
+    auto drawEffect = [&](const Model* model, const ModelPiece& piece, const Mat4& world) {   // model: for material tracks
+        if (piece.aniso && showTextures) {
+            AnisoMaterial m = piece.anisoMaterial;
+            UvTransforms uv{m.transform0u, m.transform0v, m.transform1u, m.transform1v, m.transform2u, m.transform2v};
+            if (model && animatedUvTransforms(*model, piece, lightTime, uv)) {
+                m.transform0u = uv.u0; m.transform0v = uv.v0; m.transform1u = uv.u1; m.transform1v = uv.v1;
+                m.transform2u = uv.u2; m.transform2v = uv.v2;
+            }
+            renderer_.drawAnisoAdditive(piece.mesh, world, m, !piece.twoSided);
+        }
         else if (piece.forwardLit)
             renderer_.drawAdditive(piece.mesh, world, scaledTint(Vec4f{1, 1, 1, piece.matDiffuseAlpha}, piece.colourScale), showTextures ? piece.texture : nullptr,
-                                   true, showTextures ? piece.detail : nullptr, piece.detailUv1);
-        else renderer_.drawAdditive(piece.mesh, world, scaledTint(Vec4f{1, 1, 1, 1}, piece.colourScale), showTextures ? piece.texture : nullptr);
+                                   true, showTextures ? piece.detail : nullptr, piece.detailUv1, !piece.twoSided);
+        else renderer_.drawAdditive(piece.mesh, world, scaledTint(Vec4f{1, 1, 1, 1}, piece.colourScale), showTextures ? piece.texture : nullptr, false, nullptr,
+                                    false, !piece.twoSided);
     };
     auto waterTint = [](bool selected) { return Vec4f{0.22f, 0.42f, 0.58f, selected ? 0.75f : 0.55f}; };
 
+    // Debug (hiddenGroup): "<group>" hides that GPCE group, "!<group>" draws only that group.
+    auto groupHidden = [&](const ModelPiece& piece) {
+        if (hiddenGroup.empty()) return false;
+        if (hiddenGroup[0] == '!') return piece.group != hiddenGroup.substr(1);
+        return piece.group == hiddenGroup;
+    };
     // A placed model's pieces, as map entities draw them (entityHue: the entity's hue when set, w = 1).
     auto drawModelPieces = [&](const Model& model, const Mat4& placementWorld, const Vec4f& entityHue, bool selected) {
         const std::vector<Mat4> animatedMatrices = animatedPieceMatrices(model, lightTime);
@@ -1667,28 +1786,41 @@ void SceneView::queueDraws(const Selection& selection) {
         };
         if (showEffects)       // additive pieces: glows, holograms, light cones
             for (const ModelPiece& piece : model.pieces)
-                if (piece.additive) drawEffect(piece, pieceWorld(piece));
+                if (piece.additive && !groupHidden(piece)) drawEffect(&model, piece, pieceWorld(piece));
         if (!model.hasSolid) return;
         const Vec4f tint = modelTint(selected);
         for (const ModelPiece& piece : model.pieces) {
-            if (piece.additive) continue;
+            if (piece.additive || groupHidden(piece)) continue;
             const Mat4 world = pieceWorld(piece);
             if (piece.refract) {
-                if (showTextures && showEffects) renderer_.drawRefract(piece.mesh, world, piece.refractMaterial);
+                if (showTextures && showEffects) {
+                    RefractMaterial m = piece.refractMaterial;
+                    UvTransforms uv{m.transform0u, m.transform0v, m.transform1u, m.transform1v, Vec4f{1, 0, 0, 0}, Vec4f{0, 1, 0, 0}};
+                    if (animatedUvTransforms(model, piece, lightTime, uv)) {
+                        m.transform0u = uv.u0; m.transform0v = uv.v0; m.transform1u = uv.u1; m.transform1v = uv.v1;
+                    }
+                    renderer_.drawRefract(piece.mesh, world, m);
+                }
                 continue;
             }
             if (piece.water) renderer_.drawTranslucent(piece.mesh, world, waterTint(selected));
             else if (piece.translucent)
                 renderer_.drawTranslucent(piece.mesh, world, scaledTint(Vec4f{tint.x, tint.y, tint.z, tint.w * piece.matDiffuseAlpha}, piece.colourScale),
-                                          showTextures ? piece.texture : nullptr, showTextures ? piece.detail : nullptr, piece.detailUv1);
+                                          showTextures ? piece.texture : nullptr, showTextures ? piece.detail : nullptr, piece.detailUv1, !piece.twoSided);
             else {
                 Vec4f hue = !showTextures || !piece.hued ? Vec4f{0, 0, 0, 0} : entityHue.w > 0.5f ? entityHue : piece.materialHue;
                 if (hue.w > 0.5f && piece.hueUnweighted) hue.w = 2.0f;
+                TrMaterial trm = piece.trMaterial;
+                UvTransforms uv{trm.transform0u, trm.transform0v, trm.transform1u, trm.transform1v, trm.transform2u, trm.transform2v};
+                if (trm.active && animatedUvTransforms(model, piece, lightTime, uv)) {
+                    trm.transform0u = uv.u0; trm.transform0v = uv.v0; trm.transform1u = uv.u1; trm.transform1v = uv.v1;
+                    trm.transform2u = uv.u2; trm.transform2v = uv.v2;
+                }
                 renderer_.draw(piece.mesh, world, scaledTint(tint, piece.colourScale), true, showTextures ? piece.texture : nullptr, showTextures && piece.alphaTest,
                                 hue, showTextures ? piece.glow : nullptr, piece.twoSided, piece.alphaReference,
                                 showTextures && materialMaps ? piece.normalMap : nullptr, showTextures && materialMaps ? piece.glossMap : nullptr,
                                 showTextures && materialMaps && piece.environment,
-                                showTextures && materialMaps && piece.trMaterial.active ? &piece.trMaterial : nullptr,
+                                showTextures && materialMaps && trm.active ? &trm : nullptr,
                                 showTextures && piece.hairCutout);
             }
         }
@@ -1793,7 +1925,7 @@ void SceneView::queueDraws(const Selection& selection) {
             const Vec4f tint = modelTint(selected);
             auto drawPiece = [&](const ModelPiece& piece, const Vec4f& partHue) {
                 if (piece.additive) {
-                    if (showEffects) drawEffect(piece, s.world);
+                    if (showEffects) drawEffect(nullptr, piece, s.world);   // avatar parts come from several models: no material tracks
                     return;
                 }
                 if (piece.water) {
@@ -1802,7 +1934,7 @@ void SceneView::queueDraws(const Selection& selection) {
                 }
                 if (piece.translucent) {
                     renderer_.drawTranslucent(piece.mesh, s.world, scaledTint(Vec4f{tint.x, tint.y, tint.z, tint.w * piece.matDiffuseAlpha}, piece.colourScale),
-                                              showTextures ? piece.texture : nullptr, showTextures ? piece.detail : nullptr, piece.detailUv1);
+                                              showTextures ? piece.texture : nullptr, showTextures ? piece.detail : nullptr, piece.detailUv1, !piece.twoSided);
                     return;
                 }
                 Vec4f hue = !showTextures || !piece.hued ? Vec4f{0, 0, 0, 0} : piece.flesh ? s.skinHue : partHue;
