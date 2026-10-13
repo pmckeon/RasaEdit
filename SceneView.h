@@ -170,7 +170,7 @@ public:
     bool materialMaps = true;               // normal and gloss maps (Pal* materials); off for comparison
     bool environmentMaps = true;
     bool showStateEffects = true;           // server objects' use-state particles and lights (special-FX packages)
-    bool animateSkins = true;               // play blended skinned pieces of animated map objects (CPU skinning)
+    bool animateSkins = true;               // play blended skinned pieces of animated map objects (GPU skinning)
     std::string hiddenGroup;                // debug: skip model pieces of this GPCE group; "!<group>" draws only it
     int onlyEntity = -1;                    // debug: draw only this map entity (-1 = all)            // environment cube reflections (Pal*Env*); off for comparison
     std::unordered_map<std::string, int> globeIndex_;    // lower-case GlobeMapFile -> cube index (1-based; 0 = none)
@@ -196,6 +196,7 @@ public:
     size_t clutterInstances() const;             // in the cells currently built
 
 private:
+    struct Model;
     struct ModelPiece {
         GpuMesh mesh;
         SDL_GPUTexture* texture = nullptr;     // owned by textures_; nullptr = untextured
@@ -231,15 +232,11 @@ private:
         bool aniso = false;                    // TRAdditiveAnisoSpec* effect (holograms): drawn with anisoMaterial
         bool twoSided = false;                 // the effect sets CULLMODE = NONE (PalDiffMap, TRDiffMapNoLight, TRLava, TRBeam)
         AnisoMaterial anisoMaterial;           // textures owned by textures_
-        // Object animation (X.anm of X.geo): a skinned piece blended over several bones is re-skinned whenever the clock
-        // moves (SceneView::updateSkinnedModels) from its stored vertices; null for every other piece.
-        struct SkinSource {
-            std::vector<tr::GeoVertex> vertices;
-            std::vector<int> palette;          // palette slot -> skeleton bone
-            std::vector<MeshVertex> baked;     // the frame-0 vertices (colours, UVs kept; positions / normals replaced)
-            bool meshNormals = false;          // TRAdditiveAnisoSpec*: the game skins only the position
-        };
-        std::shared_ptr<SkinSource> skinSource;
+        // Object animation (X.anm of X.geo): a skinned piece blended over several bones keeps its stored (unskinned) vertices
+        // in its mesh and is skinned on the GPU each frame (SceneView::setPieceSkin); null for every other piece.
+        SDL_GPUBuffer* skinBuffer = nullptr;   // SkinVertex per vertex: skeleton bones and weights
+        bool skinNormals = true;               // false for TRAdditiveAnisoSpec*: the game skins only the position
+        const Model* skinOwner = nullptr;         // the model whose skeleton and animation pose it
         // Model animation's material tracks (index into animation.materialTracks, -1: none) for TexCoordTransform0..2.
         int uvTrack0 = -1, uvTrack1 = -1, uvTrack2 = -1;
         std::string group;                     // GPCE group (GeoPiece::swapGroup)
@@ -281,15 +278,18 @@ private:
         tr::GeoModel skeleton;                 // bones only
         tr::Animation animation;
         std::vector<Mat4> restInverse;         // per bone: inverse of the frame-0 skin matrix
+        std::vector<int> boneTracks;           // per bone: its track in animation (-1: none)
         bool animated = false;
         bool materialAnimated = false;         // some drawn piece has material (texture transform) tracks
-        bool skinAnimated = false;             // some piece has a skinSource
-        float skinnedTime = 0;                 // animation time the skinned pieces were last posed at
+        bool skinAnimated = false;             // some piece has a skinBuffer
+        mutable uint64_t boneFrame = 0;        // frame whose bone palette was uploaded (setPieceSkin)
+        mutable uint32_t boneBase = 0;
     };
     // Per-piece matrices of an animated model at time t (loops over the animation's duration); empty if not animated.
     std::vector<Mat4> animatedPieceMatrices(const Model& model, float time) const;
-    // Re-skins the blended skinned pieces of animated map objects at lightTime (CPU skinning, vertex buffers replaced).
-    void updateSkinnedModels();
+    // Before drawing a piece: GPU skinning on (its model's bone palette at lightTime, uploaded once per frame) or off.
+    void setPieceSkin(const ModelPiece& piece);
+    uint64_t frameNumber_ = 1;
     // A piece's texture transforms at time t from its material tracks (slots without a track keep out's values); false if none.
     bool animatedUvTransforms(const Model& model, const ModelPiece& piece, float time, UvTransforms& out) const;
     struct Placement {

@@ -13,7 +13,19 @@ cbuffer VertexUniforms : register(b0, space1)
 {
     row_major float4x4 viewProjection;
     row_major float4x4 model;
+    uint4 skin;               // x: 1 = skinned (GPU skinning), y: first bone row in boneRows, z: 1 = skin the normal too (tangents always)
 };
+
+// GPU skinning (Renderer::setSkin): per vertex up to 4 bones of the model's skeleton and their weights (SV_VertexID indexes it;
+// weight 0 = unused), and the frame's bone matrices as 3 rows each (the affine part of skin = posed world x inverse bind).
+// Vertex storage buffers are t[n] in space0 (SDL_gpu).
+struct SkinVertex
+{
+    uint4 bones;
+    float4 weights;
+};
+StructuredBuffer<SkinVertex> skinVertices : register(t0, space0);
+StructuredBuffer<float4> boneRows : register(t1, space0);
 
 cbuffer FragmentUniforms : register(b0, space3)
 {
@@ -100,14 +112,42 @@ struct VertexOutput
     float2 uv2      : TEXCOORD7;
 };
 
-VertexOutput vsMain(VertexInput input)
+VertexOutput vsMain(VertexInput input, uint vertexId : SV_VertexID)
 {
     VertexOutput output;
-    const float4 world = mul(model, float4(input.position, 1.0));
+    float3 position = input.position, normal = input.normal, tangent = input.tangent, binormal = input.binormal;
+    if (skin.x != 0)
+    {
+        // Linear blend as SceneView's CPU skinning did: the position averaged by the total weight, directions summed.
+        const SkinVertex sv = skinVertices[vertexId];
+        float3 sp = 0, sn = 0, st = 0, sb = 0;
+        float total = 0;
+        [unroll] for (uint k = 0; k < 4; ++k)
+        {
+            const float w = sv.weights[k];
+            if (w <= 0.0) continue;
+            const uint row = skin.y + sv.bones[k] * 3;
+            const float4 r0 = boneRows[row], r1 = boneRows[row + 1], r2 = boneRows[row + 2];
+            const float4 p = float4(input.position, 1.0);
+            sp += w * float3(dot(r0, p), dot(r1, p), dot(r2, p));
+            sn += w * float3(dot(r0.xyz, input.normal), dot(r1.xyz, input.normal), dot(r2.xyz, input.normal));
+            st += w * float3(dot(r0.xyz, input.tangent), dot(r1.xyz, input.tangent), dot(r2.xyz, input.tangent));
+            sb += w * float3(dot(r0.xyz, input.binormal), dot(r1.xyz, input.binormal), dot(r2.xyz, input.binormal));
+            total += w;
+        }
+        if (total > 0.0)
+        {
+            position = sp / total;
+            if (skin.z != 0) normal = sn;
+            tangent = st;
+            binormal = sb;
+        }
+    }
+    const float4 world = mul(model, float4(position, 1.0));
     output.position = mul(viewProjection, world);
-    output.normal = mul((float3x3)model, input.normal);
-    output.tangent = mul((float3x3)model, input.tangent);
-    output.binormal = mul((float3x3)model, input.binormal);
+    output.normal = mul((float3x3)model, normal);
+    output.tangent = mul((float3x3)model, tangent);
+    output.binormal = mul((float3x3)model, binormal);
     output.colour = input.colour;
     output.uv = input.uv;
     output.world = world.xyz;

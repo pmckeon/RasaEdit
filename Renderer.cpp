@@ -19,6 +19,7 @@ struct RefractUniforms {   // shaders/refract.hlsl RefractUniforms
 struct VertexUniforms {
     Mat4 viewProjection;
     Mat4 model;
+    uint32_t skinned = 0, boneBase = 0, skinNormals = 0, unused = 0;    // scene.hlsl `skin`
 };
 
 // The lighting fields shared by both fragment shaders (shaders/lighting.hlsli), in cbuffer order.
@@ -125,7 +126,7 @@ SDL_GPUDevice* createGpuDevice(SDL_GPUShaderFormat formats, bool debug) {
 
 Renderer::Renderer(SDL_GPUDevice* device) : device_(device) {
     sceneVertex_ = createShader(sceneVertexDxil, sizeof sceneVertexDxil, sceneVertexSpirv, sizeof sceneVertexSpirv, "vsMain",
-                                SDL_GPU_SHADERSTAGE_VERTEX, 0);
+                                SDL_GPU_SHADERSTAGE_VERTEX, 0, 2);       // storage buffers: skin vertices, bone rows
     sceneFragment_ = createShader(sceneFragmentDxil, sizeof sceneFragmentDxil, sceneFragmentSpirv, sizeof sceneFragmentSpirv, "psMain",
                                   SDL_GPU_SHADERSTAGE_FRAGMENT, 10);
     terrainVertex_ = createShader(terrainVertexDxil, sizeof terrainVertexDxil, terrainVertexSpirv, sizeof terrainVertexSpirv, "vsMain",
@@ -236,6 +237,9 @@ Renderer::~Renderer() {
     if (globes_) SDL_ReleaseGPUTexture(device_, globes_);
     if (shadowPipeline_) SDL_ReleaseGPUGraphicsPipeline(device_, shadowPipeline_);
     if (shadowFragment_) SDL_ReleaseGPUShader(device_, shadowFragment_);
+    if (boneBuffer_) SDL_ReleaseGPUBuffer(device_, boneBuffer_);
+    if (boneTransfer_) SDL_ReleaseGPUTransferBuffer(device_, boneTransfer_);
+    if (skinDummy_) SDL_ReleaseGPUBuffer(device_, skinDummy_);
     if (particleBuffer_) SDL_ReleaseGPUBuffer(device_, particleBuffer_);
     if (particleTransfer_) SDL_ReleaseGPUTransferBuffer(device_, particleTransfer_);
     for (SDL_GPUGraphicsPipeline* p : {trianglePipeline_, culledTrianglePipeline_, linePipeline_, terrainPipeline_, culledTerrainPipeline_, translucentPipeline_, additivePipeline_, culledAdditivePipeline_, culledTranslucentPipeline_, subtractivePipeline_, refractPipeline_})
@@ -246,7 +250,7 @@ Renderer::~Renderer() {
 }
 
 SDL_GPUShader* Renderer::createShader(const unsigned char* dxil, size_t dxilSize, const unsigned char* spirv, size_t spirvSize,
-                                      const char* entryPoint, SDL_GPUShaderStage stage, uint32_t samplers) {
+                                      const char* entryPoint, SDL_GPUShaderStage stage, uint32_t samplers, uint32_t storageBuffers) {
     const SDL_GPUShaderFormat formats = SDL_GetGPUShaderFormats(device_);
     SDL_GPUShaderCreateInfo info = {};
     if (formats & SDL_GPU_SHADERFORMAT_DXIL) {
@@ -263,6 +267,7 @@ SDL_GPUShader* Renderer::createShader(const unsigned char* dxil, size_t dxilSize
     info.entrypoint = entryPoint;
     info.stage = stage;
     info.num_samplers = samplers;
+    info.num_storage_buffers = storageBuffers;
     info.num_uniform_buffers = 1;
     SDL_GPUShader* shader = SDL_CreateGPUShader(device_, &info);
     if (!shader) fail("SDL_CreateGPUShader");
@@ -368,29 +373,6 @@ void Renderer::resize(uint32_t width, uint32_t height) {
     height_ = height;
 }
 
-void Renderer::updateMeshVertices(const GpuMesh& mesh, const std::vector<MeshVertex>& vertices) {
-    if (!mesh.vertices || vertices.empty()) return;
-    const uint32_t vertexBytes = uint32_t(vertices.size() * sizeof(MeshVertex));
-    SDL_GPUTransferBufferCreateInfo transferInfo = {};
-    transferInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
-    transferInfo.size = vertexBytes;
-    SDL_GPUTransferBuffer* transfer = SDL_CreateGPUTransferBuffer(device_, &transferInfo);
-    if (!transfer) fail("SDL_CreateGPUTransferBuffer");
-    std::memcpy(SDL_MapGPUTransferBuffer(device_, transfer, false), vertices.data(), vertexBytes);
-    SDL_UnmapGPUTransferBuffer(device_, transfer);
-    SDL_GPUCommandBuffer* commands = SDL_AcquireGPUCommandBuffer(device_);
-    SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(commands);
-    SDL_GPUTransferBufferLocation source = {};
-    source.transfer_buffer = transfer;
-    SDL_GPUBufferRegion destination = {};
-    destination.buffer = mesh.vertices;
-    destination.size = vertexBytes;
-    SDL_UploadToGPUBuffer(copy, &source, &destination, true);
-    SDL_EndGPUCopyPass(copy);
-    SDL_SubmitGPUCommandBuffer(commands);
-    SDL_ReleaseGPUTransferBuffer(device_, transfer);
-}
-
 GpuMesh Renderer::createMesh(const std::vector<MeshVertex>& vertices, const std::vector<uint32_t>& indices, bool lines) {
     GpuMesh mesh;
     mesh.lines = lines;
@@ -480,6 +462,8 @@ void Renderer::beginFrame(const Mat4& viewProjection, const tr::Vec3& cameraPosi
     translucentDraws_.clear();
     additiveDraws_.clear();
     refractDraws_.clear();
+    bones_.clear();
+    currentSkin_ = nullptr;
     particleVertices_.clear();
     particleBatches_.clear();
 }
@@ -501,12 +485,15 @@ void Renderer::draw(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, b
         item.detail = trMaterial->slot1;         // slot 1 / 2 maps use the detail (t2) and decal (t3) bindings
         item.decal = trMaterial->slot2;
     }
+    item.skinVertices = currentSkin_;
+    item.boneBase = currentBoneBase_;
+    item.skinNormals = currentSkinNormals_;
     draws_.push_back(item);
 }
 
 void Renderer::drawRefract(const GpuMesh& mesh, const Mat4& model, const RefractMaterial& material) {
     if (!mesh.vertices || mesh.indexCount == 0) return;
-    refractDraws_.push_back(RefractItem{&mesh, model, material});
+    refractDraws_.push_back(RefractItem{&mesh, model, material, currentSkin_, currentBoneBase_, currentSkinNormals_});
 }
 
 void Renderer::drawTranslucent(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, SDL_GPUTexture* texture, SDL_GPUTexture* detail,
@@ -516,6 +503,9 @@ void Renderer::drawTranslucent(const GpuMesh& mesh, const Mat4& model, const Vec
     item.detail = detail;
     item.layers = Vec4f{detailUv1 ? 1.0f : 0.0f, 0, detail ? 1.0f : 0.0f, 0};
     item.cullBlended = cullBack;
+    item.skinVertices = currentSkin_;
+    item.boneBase = currentBoneBase_;
+    item.skinNormals = currentSkinNormals_;
     translucentDraws_.push_back(item);
 }
 
@@ -528,6 +518,9 @@ void Renderer::drawAdditive(const GpuMesh& mesh, const Mat4& model, const Vec4f&
     item.cullBlended = cullBack;
     item.detail = detail;
     item.layers = Vec4f{detailUv1 ? 1.0f : 0.0f, 0, detail ? 1.0f : 0.0f, 0};
+    item.skinVertices = currentSkin_;
+    item.boneBase = currentBoneBase_;
+    item.skinNormals = currentSkinNormals_;
     additiveDraws_.push_back(item);
 }
 
@@ -546,6 +539,9 @@ void Renderer::drawAnisoAdditive(const GpuMesh& mesh, const Mat4& model, const A
     item.tr.transform0u = material.transform0u; item.tr.transform0v = material.transform0v;     // tr.active stays false
     item.tr.transform1u = material.transform1u; item.tr.transform1v = material.transform1v;
     item.tr.transform2u = material.transform2u; item.tr.transform2v = material.transform2v;
+    item.skinVertices = currentSkin_;
+    item.boneBase = currentBoneBase_;
+    item.skinNormals = currentSkinNormals_;
     additiveDraws_.push_back(item);
 }
 
@@ -562,6 +558,100 @@ void Renderer::drawParticles(const std::vector<MeshVertex>& vertices, SDL_GPUTex
     else
         particleBatches_.push_back(batch);
     particleVertices_.insert(particleVertices_.end(), vertices.begin(), vertices.end());
+}
+
+SDL_GPUBuffer* Renderer::createSkinBuffer(const std::vector<SkinVertex>& vertices) {
+    if (vertices.empty()) return nullptr;
+    const uint32_t bytes = uint32_t(vertices.size() * sizeof(SkinVertex));
+    SDL_GPUBufferCreateInfo info = {};
+    info.usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ;
+    info.size = bytes;
+    SDL_GPUBuffer* buffer = SDL_CreateGPUBuffer(device_, &info);
+    if (!buffer) fail("SDL_CreateGPUBuffer (skin)");
+    SDL_GPUTransferBufferCreateInfo transferInfo = {};
+    transferInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+    transferInfo.size = bytes;
+    SDL_GPUTransferBuffer* transfer = SDL_CreateGPUTransferBuffer(device_, &transferInfo);
+    if (!transfer) fail("SDL_CreateGPUTransferBuffer (skin)");
+    std::memcpy(SDL_MapGPUTransferBuffer(device_, transfer, false), vertices.data(), bytes);
+    SDL_UnmapGPUTransferBuffer(device_, transfer);
+    SDL_GPUCommandBuffer* commands = SDL_AcquireGPUCommandBuffer(device_);
+    SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(commands);
+    SDL_GPUTransferBufferLocation source = {};
+    source.transfer_buffer = transfer;
+    SDL_GPUBufferRegion destination = {};
+    destination.buffer = buffer;
+    destination.size = bytes;
+    SDL_UploadToGPUBuffer(copy, &source, &destination, false);
+    SDL_EndGPUCopyPass(copy);
+    SDL_SubmitGPUCommandBuffer(commands);
+    SDL_ReleaseGPUTransferBuffer(device_, transfer);
+    return buffer;
+}
+
+void Renderer::destroyBuffer(SDL_GPUBuffer*& buffer) {
+    if (buffer) SDL_ReleaseGPUBuffer(device_, buffer);
+    buffer = nullptr;
+}
+
+uint32_t Renderer::addBones(const std::vector<Mat4>& skinMatrices) {
+    const uint32_t base = uint32_t(bones_.size());
+    for (const Mat4& m : skinMatrices) {
+        bones_.push_back(m.row0);
+        bones_.push_back(m.row1);
+        bones_.push_back(m.row2);
+    }
+    return base;
+}
+
+void Renderer::setSkin(SDL_GPUBuffer* skinVertices, uint32_t boneBase, bool skinNormals) {
+    currentSkin_ = skinVertices;
+    currentBoneBase_ = boneBase;
+    currentSkinNormals_ = skinNormals;
+}
+
+// The frame's bone rows into boneBuffer_ (grown as needed; always at least one row so it can be bound).
+void Renderer::uploadBones(SDL_GPUCommandBuffer* commands) {
+    const uint32_t rows = std::max<uint32_t>(uint32_t(bones_.size()), 1);
+    if (rows > boneCapacity_ || !boneBuffer_) {
+        if (boneBuffer_) SDL_ReleaseGPUBuffer(device_, boneBuffer_);
+        if (boneTransfer_) SDL_ReleaseGPUTransferBuffer(device_, boneTransfer_);
+        boneCapacity_ = std::max<uint32_t>(rows + rows / 2, 3 * 256);
+        SDL_GPUBufferCreateInfo info = {};
+        info.usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ;
+        info.size = boneCapacity_ * uint32_t(sizeof(Vec4f));
+        boneBuffer_ = SDL_CreateGPUBuffer(device_, &info);
+        SDL_GPUTransferBufferCreateInfo transferInfo = {};
+        transferInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+        transferInfo.size = info.size;
+        boneTransfer_ = SDL_CreateGPUTransferBuffer(device_, &transferInfo);
+        if (!boneBuffer_ || !boneTransfer_) fail("bone buffers");
+    }
+    if (!skinDummy_) {
+        SDL_GPUBufferCreateInfo info = {};
+        info.usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ;
+        info.size = uint32_t(sizeof(SkinVertex));
+        skinDummy_ = SDL_CreateGPUBuffer(device_, &info);
+        if (!skinDummy_) fail("skin dummy buffer");
+    }
+    if (bones_.empty()) return;
+    const uint32_t bytes = uint32_t(bones_.size() * sizeof(Vec4f));
+    std::memcpy(SDL_MapGPUTransferBuffer(device_, boneTransfer_, true), bones_.data(), bytes);
+    SDL_UnmapGPUTransferBuffer(device_, boneTransfer_);
+    SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(commands);
+    SDL_GPUTransferBufferLocation source = {};
+    source.transfer_buffer = boneTransfer_;
+    SDL_GPUBufferRegion destination = {};
+    destination.buffer = boneBuffer_;
+    destination.size = bytes;
+    SDL_UploadToGPUBuffer(copy, &source, &destination, true);
+    SDL_EndGPUCopyPass(copy);
+}
+
+// Every draw through the scene vertex shader binds its two storage buffers (the dummy skin when not skinned).
+void Renderer::bindSkin(SDL_GPURenderPass* pass, SDL_GPUBuffer* skinVertices) {
+    SDL_GPUBuffer* buffers[2] = {skinVertices ? skinVertices : skinDummy_, boneBuffer_};
+    SDL_BindGPUVertexStorageBuffers(pass, 0, buffers, 2);
 }
 
 void Renderer::uploadParticles(SDL_GPUCommandBuffer* commands) {
@@ -605,6 +695,7 @@ void Renderer::recordParticles(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass
         if (pipeline != bound) {
             SDL_BindGPUGraphicsPipeline(pass, pipeline);
             SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
+            bindSkin(pass, nullptr);
             bound = pipeline;
         }
         SDL_PushGPUVertexUniformData(commands, 0, &vertexUniforms, sizeof vertexUniforms);
@@ -637,6 +728,7 @@ void Renderer::drawTerrain(const GpuMesh& mesh, const TerrainMaterial& material)
 
 void Renderer::record(SDL_GPUCommandBuffer* commands) {
     if (!colour_) return;
+    uploadBones(commands);
     if (shadowsActive_) recordShadows(commands);
     uploadParticles(commands);
     SDL_GPUColorTargetInfo colour = {};
@@ -682,8 +774,9 @@ void Renderer::record(SDL_GPUCommandBuffer* commands) {
             SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
             SDL_GPUBufferBinding indexBinding = {item.mesh->indices, 0};
             SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_32BIT);
-            const VertexUniforms vertexUniforms{viewProjection_, item.model};
+            const VertexUniforms vertexUniforms{viewProjection_, item.model, item.skinVertices ? 1u : 0u, item.boneBase, item.skinNormals ? 1u : 0u, 0};
             SDL_PushGPUVertexUniformData(commands, 0, &vertexUniforms, sizeof vertexUniforms);
+            bindSkin(pass, item.skinVertices);
             const RefractMaterial& m = item.material;
             const SDL_GPUTextureSamplerBinding samplers[4] = {{m.diffuse ? m.diffuse : white_, linearSampler_}, {m.normalMap ? m.normalMap : white_, linearSampler_},
                                                               {m.fade ? m.fade : white_, clampSampler_}, {frameCopy_, clampSampler_}};
@@ -723,8 +816,9 @@ void Renderer::recordShadows(SDL_GPUCommandBuffer* commands) {
         SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
         SDL_GPUBufferBinding indexBinding = {item.mesh->indices, 0};
         SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_32BIT);
-        const VertexUniforms vertexUniforms{shadowMatrix_, item.model};
+        const VertexUniforms vertexUniforms{shadowMatrix_, item.model, item.skinVertices ? 1u : 0u, item.boneBase, item.skinNormals ? 1u : 0u, 0};
         SDL_PushGPUVertexUniformData(commands, 0, &vertexUniforms, sizeof vertexUniforms);
+        bindSkin(pass, item.skinVertices);
         const bool alphaTest = !item.terrain && item.alphaTest;
         const SDL_GPUTextureSamplerBinding sampler = {alphaTest && item.texture ? item.texture : white_, linearSampler_};
         SDL_BindGPUFragmentSamplers(pass, 0, &sampler, 1);
@@ -750,8 +844,9 @@ void Renderer::recordItem(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pas
     SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
     SDL_GPUBufferBinding indexBinding = {item.mesh->indices, 0};
     SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_32BIT);
-    const VertexUniforms vertexUniforms{viewProjection_, item.model};
+    const VertexUniforms vertexUniforms{viewProjection_, item.model, item.skinVertices ? 1u : 0u, item.boneBase, item.skinNormals ? 1u : 0u, 0};
     SDL_PushGPUVertexUniformData(commands, 0, &vertexUniforms, sizeof vertexUniforms);
+    if (!item.terrain) bindSkin(pass, item.skinVertices);
     if (item.terrain) {
         const TerrainMaterial& m = *item.terrain;
         const SDL_GPUTextureSamplerBinding samplers[5] = {{m.layers, linearSampler_}, {m.layerIndices, pointSampler_}, {m.layerWeights, pointSampler_},

@@ -73,6 +73,13 @@ struct AnisoMaterial {
     Vec4f transform2u = Vec4f{1, 0, 0, 0}, transform2v = Vec4f{0, 1, 0, 0};
 };
 
+// GPU skinning: per vertex, up to 4 bones of the model's skeleton (index into the bone palette given by setSkin) and their
+// weights; matches shaders/scene.hlsl SkinVertex (uint4 + float4).
+struct SkinVertex {
+    uint32_t bone0 = 0, bone1 = 0, bone2 = 0, bone3 = 0;
+    float weight0 = 0, weight1 = 0, weight2 = 0, weight3 = 0;
+};
+
 struct GpuMesh {
     SDL_GPUBuffer* vertices = nullptr;
     SDL_GPUBuffer* indices = nullptr;
@@ -155,8 +162,14 @@ public:
 
     GpuMesh createMesh(const std::vector<MeshVertex>& vertices, const std::vector<uint32_t>& indices, bool lines);
     void destroyMesh(GpuMesh& mesh);
-    // Replaces a mesh's vertices (same count; the buffer is cycled, so draws already recorded keep the old data).
-    void updateMeshVertices(const GpuMesh& mesh, const std::vector<MeshVertex>& vertices);
+    // GPU skinning: a storage buffer of SkinVertex per mesh vertex; the frame's bone palettes (addBones, per frame, returns the
+    // palette's first row); setSkin applies to every draw call until clearSkin (skinNormals false: the normal stays as stored,
+    // e.g. TRAdditiveAnisoSpec pieces, whose game shader skins only the position).
+    SDL_GPUBuffer* createSkinBuffer(const std::vector<SkinVertex>& vertices);
+    void destroyBuffer(SDL_GPUBuffer*& buffer);
+    uint32_t addBones(const std::vector<Mat4>& skinMatrices);
+    void setSkin(SDL_GPUBuffer* skinVertices, uint32_t boneBase, bool skinNormals);
+    void clearSkin() { currentSkin_ = nullptr; }
 
     // Frame: begin, queue draws, then record everything into a command buffer.
     void beginFrame(const Mat4& viewProjection, const tr::Vec3& cameraPosition, const SceneLighting& lighting);
@@ -228,6 +241,9 @@ private:
         bool aniso = false;
         bool forwardLit = false;                 // lit additive (forward-phase piece)
         bool twoSided = false;
+        SDL_GPUBuffer* skinVertices = nullptr;   // GPU skinning (setSkin); null = as stored
+        uint32_t boneBase = 0;
+        bool skinNormals = true;
         bool cullBlended = false;                // translucent / additive draw with back faces culled (see drawTranslucent)
         float alphaReference = 0.5f;             // alpha test: texels below it are discarded
         SDL_GPUTexture* normalMap = nullptr;     // Pal* materials: normal map (tangent space) and gloss map
@@ -238,7 +254,7 @@ private:
         bool castsShadow = true;                 // drawn into the sun shadow map (see setShadowCasting)
     };
     SDL_GPUShader* createShader(const unsigned char* dxil, size_t dxilSize, const unsigned char* spirv, size_t spirvSize,
-                                const char* entryPoint, SDL_GPUShaderStage stage, uint32_t samplers);
+                                const char* entryPoint, SDL_GPUShaderStage stage, uint32_t samplers, uint32_t storageBuffers = 0);
     SDL_GPUGraphicsPipeline* createPipeline(SDL_GPUShader* vertexShader, SDL_GPUShader* fragmentShader, SDL_GPUPrimitiveType primitive,
                                             int blend = 0, bool cullBack = false);
     void recordItem(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const DrawItem& item, SDL_GPUGraphicsPipeline*& bound);
@@ -257,7 +273,24 @@ private:
     SDL_GPUGraphicsPipeline* refractPipeline_ = nullptr;
     SDL_GPUShader* refractFragment_ = nullptr;
     SDL_GPUTexture* frameCopy_ = nullptr;      // the colour target after opaque geometry, sampled by refraction
-    struct RefractItem { const GpuMesh* mesh; Mat4 model; RefractMaterial material; };
+    struct RefractItem {
+        const GpuMesh* mesh;
+        Mat4 model;
+        RefractMaterial material;
+        SDL_GPUBuffer* skinVertices = nullptr;
+        uint32_t boneBase = 0;
+        bool skinNormals = true;
+    };
+    void uploadBones(SDL_GPUCommandBuffer* commands);
+    void bindSkin(SDL_GPURenderPass* pass, SDL_GPUBuffer* skinVertices);
+    std::vector<Vec4f> bones_;                 // this frame's bone palettes, 3 rows per bone
+    SDL_GPUBuffer* boneBuffer_ = nullptr;
+    SDL_GPUTransferBuffer* boneTransfer_ = nullptr;
+    uint32_t boneCapacity_ = 0;                // rows
+    SDL_GPUBuffer* skinDummy_ = nullptr;       // bound for draws that are not skinned
+    SDL_GPUBuffer* currentSkin_ = nullptr;
+    uint32_t currentBoneBase_ = 0;
+    bool currentSkinNormals_ = true;
     std::vector<RefractItem> refractDraws_;
     tr::Vec3 cameraRight_{1, 0, 0}, cameraUp_{0, 1, 0}, cameraForward_{0, 0, 1};
     SDL_GPUGraphicsPipeline* additivePipeline_ = nullptr;

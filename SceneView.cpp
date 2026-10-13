@@ -132,8 +132,20 @@ Mat4 inverseBindMatrix(const tr::GeoBone& bone) {
 // skeleton (optional): pose bones from that model's skeleton, matched by name - avatar swap-set parts follow the body's
 // skeleton, and some part files carry a different hierarchy (avatar_hum_m_face_asian_v04_round: Spine under Pelvis,
 // without the Body Correction / Spine1 target bones), so posing them on their own chain put the head at hip height.
+// boneTracks (optional): per bone of geo, its track index in animation (-1: none), as boneTrackIndices gives - findTrack per
+// bone and frame was most of the per-frame cost of animated models.
+// Per bone of geo: the index of its track in animation (tr::findTrack's name match), -1 for none.
+std::vector<int> boneTrackIndices(const tr::GeoModel& geo, const tr::Animation& animation) {
+    std::vector<int> indices;
+    for (const tr::GeoBone& bone : geo.bones) {
+        const tr::AnimTrack* track = tr::findTrack(animation, bone.name);
+        indices.push_back(track ? int(track - animation.tracks.data()) : -1);
+    }
+    return indices;
+}
+
 std::vector<Mat4> skinMatrices(const tr::GeoModel& geo, const tr::Animation& animation, float time, const tr::GeoModel* skeleton = nullptr,
-                               std::vector<Mat4>* posedOut = nullptr) {
+                               std::vector<Mat4>* posedOut = nullptr, const std::vector<int>* boneTracks = nullptr) {
     std::unordered_map<std::string, Mat4> skeletonPosed;
     if (skeleton) {
         const size_t m = skeleton->bones.size();
@@ -160,7 +172,10 @@ std::vector<Mat4> skinMatrices(const tr::GeoModel& geo, const tr::Animation& ani
         const tr::GeoBone& bone = geo.bones[k];
         tr::Vec3 translation = bone.translation, scale = bone.scale;
         tr::Quat rotation = bone.rotation;
-        if (const tr::AnimTrack* track = tr::findTrack(animation, bone.name)) {
+        const tr::AnimTrack* track = nullptr;
+        if (boneTracks && k < boneTracks->size()) track = (*boneTracks)[k] >= 0 ? &animation.tracks[size_t((*boneTracks)[k])] : nullptr;
+        else track = tr::findTrack(animation, bone.name);
+        if (track) {
             const tr::AnimKey key = tr::sampleTrack(*track, time);
             if (track->hasTranslation) translation = key.translation;
             if (track->hasRotation) rotation = key.rotation;
@@ -799,7 +814,10 @@ SceneView::~SceneView() {
     renderer_.destroyMesh(arrow_);
     renderer_.destroyMesh(pole_);
     for (auto& m : models_)
-        for (ModelPiece& piece : m.second.pieces) renderer_.destroyMesh(piece.mesh);
+        for (ModelPiece& piece : m.second.pieces) {
+            renderer_.destroyMesh(piece.mesh);
+            renderer_.destroyBuffer(piece.skinBuffer);
+        }
     for (auto& t : textures_)
         if (t.second) SDL_ReleaseGPUTexture(device, t.second);
     for (auto& t : environmentCubes_)
@@ -1114,6 +1132,7 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                     objectAnimation = stem(name.substr(0, bar)) == stem(animationName);
                     model.animation = animation;
                     model.skeleton.bones = geo.bones;
+                    model.boneTracks = boneTrackIndices(model.skeleton, model.animation);
                     model.restInverse.clear();
                     for (const Mat4& m : skin) model.restInverse.push_back(affineInverse(m));
                 }
@@ -1290,15 +1309,39 @@ void SceneView::loadModel(const std::string& name, Model& model) {
             }
             if (!vertices.empty() && piece.indices.size() >= 3) {
                 ModelPiece part;
-                part.mesh = renderer_.createMesh(vertices, piece.indices, false);
                 if (objectAnimation && !palette.empty() && rigidBone < 0) {
-                    auto source = std::make_shared<ModelPiece::SkinSource>();
-                    source->vertices = piece.vertices;
-                    source->palette = palette;
-                    source->baked = vertices;
-                    source->meshNormals = aniso;
-                    part.skinSource = source;
+                    // GPU skinning: the mesh keeps the stored vertices (the frame-0 pose stays in `vertices` for picking and
+                    // bounds); each vertex names up to 4 skeleton bones (palette slots outside the skeleton get weight 0).
+                    std::vector<MeshVertex> stored = vertices;
+                    std::vector<SkinVertex> skinVertices(piece.vertices.size());
+                    for (size_t k = 0; k < piece.vertices.size() && k < stored.size(); ++k) {
+                        const tr::GeoVertex& gv = piece.vertices[k];
+                        MeshVertex& v = stored[k];
+                        v.positionX = gv.position.x; v.positionY = gv.position.y; v.positionZ = gv.position.z;
+                        v.normalX = gv.normal.x; v.normalY = gv.normal.y; v.normalZ = gv.normal.z;
+                        v.tangentX = gv.tangent.x; v.tangentY = gv.tangent.y; v.tangentZ = gv.tangent.z;
+                        v.binormalX = gv.binormal.x; v.binormalY = gv.binormal.y; v.binormalZ = gv.binormal.z;
+                        SkinVertex& sv = skinVertices[k];
+                        for (uint32_t i = 0; i < 4; ++i) {
+                            const float w = tr::blendWeight(gv, i);
+                            const uint32_t slot = tr::blendIndex(gv, i);
+                            if (w <= 0 || slot >= palette.size() || palette[slot] < 0) continue;
+                            const uint32_t boneIndex = uint32_t(palette[slot]);
+                            switch (i) {
+                                case 0: sv.bone0 = boneIndex; sv.weight0 = w; break;
+                                case 1: sv.bone1 = boneIndex; sv.weight1 = w; break;
+                                case 2: sv.bone2 = boneIndex; sv.weight2 = w; break;
+                                default: sv.bone3 = boneIndex; sv.weight3 = w; break;
+                            }
+                        }
+                    }
+                    part.mesh = renderer_.createMesh(stored, piece.indices, false);
+                    part.skinBuffer = renderer_.createSkinBuffer(skinVertices);
+                    part.skinNormals = !aniso;
+                    part.skinOwner = &model;
                     model.skinAnimated = true;
+                } else {
+                    part.mesh = renderer_.createMesh(vertices, piece.indices, false);
                 }
                 part.water = water;
                 model.hasWater = model.hasWater || water;
@@ -1648,7 +1691,7 @@ std::vector<Mat4> SceneView::animatedPieceMatrices(const Model& model, float tim
     if (!model.animated || model.animation.duration <= 0.0f) return matrices;
     // Looping is assumed (the object animation's playback mode is not decoded); the phase is the editor's clock.
     const float t = std::fmod(std::max(time, 0.0f), model.animation.duration);
-    const std::vector<Mat4> skin = skinMatrices(model.skeleton, model.animation, t);
+    const std::vector<Mat4> skin = skinMatrices(model.skeleton, model.animation, t, nullptr, nullptr, &model.boneTracks);
     matrices.resize(skin.size());
     for (size_t k = 0; k < skin.size() && k < model.restInverse.size(); ++k) matrices[k] = multiply(skin[k], model.restInverse[k]);
     return matrices;
@@ -1672,47 +1715,18 @@ bool SceneView::animatedUvTransforms(const Model& model, const ModelPiece& piece
     return true;
 }
 
-void SceneView::updateSkinnedModels() {
-    for (auto& entry : models_) {
-        Model& model = entry.second;
-        if (!model.loaded || !model.skinAnimated || model.animation.duration <= 0.0f) continue;
-        const float t = std::fmod(std::max(lightTime, 0.0f), model.animation.duration);
-        if (t == model.skinnedTime) continue;
-        model.skinnedTime = t;
-        const std::vector<Mat4> skin = skinMatrices(model.skeleton, model.animation, t);
-        for (ModelPiece& piece : model.pieces) {
-            if (!piece.skinSource) continue;
-            const ModelPiece::SkinSource& source = *piece.skinSource;
-            std::vector<MeshVertex> vertices = source.baked;
-            for (size_t k = 0; k < vertices.size() && k < source.vertices.size(); ++k) {
-                // The same linear blend as loadModel's frame-0 pose.
-                const tr::GeoVertex& gv = source.vertices[k];
-                tr::Vec3 sp{0, 0, 0}, sn{0, 0, 0}, st{0, 0, 0}, sb{0, 0, 0};
-                float total = 0;
-                for (uint32_t i = 0; i < 4; ++i) {
-                    const float w = tr::blendWeight(gv, i);
-                    const uint32_t slot = tr::blendIndex(gv, i);
-                    if (w <= 0 || slot >= source.palette.size() || source.palette[slot] < 0 || size_t(source.palette[slot]) >= skin.size()) continue;
-                    const Mat4& m = skin[size_t(source.palette[slot])];
-                    sp = add(sp, scaled(transformPoint(m, gv.position), w));
-                    const tr::Vec3 o = transformPoint(m, tr::Vec3{0, 0, 0});
-                    sn = add(sn, scaled(subtract(transformPoint(m, gv.normal), o), w));
-                    st = add(st, scaled(subtract(transformPoint(m, gv.tangent), o), w));
-                    sb = add(sb, scaled(subtract(transformPoint(m, gv.binormal), o), w));
-                    total += w;
-                }
-                if (total <= 0) continue;
-                MeshVertex& v = vertices[k];
-                const tr::Vec3 p = scaled(sp, 1.0f / total);
-                const tr::Vec3 n = source.meshNormals ? gv.normal : sn;
-                v.positionX = p.x; v.positionY = p.y; v.positionZ = p.z;
-                v.normalX = n.x; v.normalY = n.y; v.normalZ = n.z;
-                v.tangentX = st.x; v.tangentY = st.y; v.tangentZ = st.z;
-                v.binormalX = sb.x; v.binormalY = sb.y; v.binormalZ = sb.z;
-            }
-            renderer_.updateMeshVertices(piece.mesh, vertices);
-        }
+void SceneView::setPieceSkin(const ModelPiece& piece) {
+    if (!piece.skinBuffer || !piece.skinOwner) {
+        renderer_.clearSkin();
+        return;
     }
+    const Model& model = *piece.skinOwner;
+    if (model.boneFrame != frameNumber_) {
+        const float t = animateSkins && model.animation.duration > 0.0f ? std::fmod(std::max(lightTime, 0.0f), model.animation.duration) : 0.0f;
+        model.boneBase = renderer_.addBones(skinMatrices(model.skeleton, model.animation, t, nullptr, nullptr, &model.boneTracks));
+        model.boneFrame = frameNumber_;
+    }
+    renderer_.setSkin(piece.skinBuffer, model.boneBase, piece.skinNormals);
 }
 
 // ------------------------------------------------------------------------------------------
@@ -1825,7 +1839,7 @@ void SceneView::updateClutterCells() {
 // Frame
 // ------------------------------------------------------------------------------------------
 void SceneView::queueDraws(const Selection& selection) {
-    if (animateSkins) updateSkinnedModels();
+    ++frameNumber_;
     const int selectedEntity = selection.kind == SelectionKind::MapEntity ? int(selection.index) : -1;
     const float aspect = float(renderer_.width()) / float(std::max<uint32_t>(1, renderer_.height()));
     const Mat4 viewProjection = multiply(camera_.projectionMatrix(aspect), camera_.viewMatrix());
@@ -1858,7 +1872,13 @@ void SceneView::queueDraws(const Selection& selection) {
     };
     auto scaledTint = [](const Vec4f& t, float s) { return Vec4f{t.x * s, t.y * s, t.z * s, t.w}; };   // VertColor x2
     // Additive pieces; holograms (aniso) use the game's own material when textures are shown.
+    struct SkinScope {                 // GPU skinning applies to the piece being drawn only
+        Renderer& renderer;
+        ~SkinScope() { renderer.clearSkin(); }
+    };
     auto drawEffect = [&](const Model* model, const ModelPiece& piece, const Mat4& world) {   // model: for material tracks
+        SkinScope skinScope{renderer_};
+        setPieceSkin(piece);
         if (piece.aniso && showTextures) {
             AnisoMaterial m = piece.anisoMaterial;
             UvTransforms uv{m.transform0u, m.transform0v, m.transform1u, m.transform1v, m.transform2u, m.transform2v};
@@ -1893,8 +1913,10 @@ void SceneView::queueDraws(const Selection& selection) {
                 if (piece.additive && !groupHidden(piece)) drawEffect(&model, piece, pieceWorld(piece));
         if (!model.hasSolid) return;
         const Vec4f tint = modelTint(selected);
+        SkinScope skinScope{renderer_};
         for (const ModelPiece& piece : model.pieces) {
             if (piece.additive || groupHidden(piece)) continue;
+            setPieceSkin(piece);
             const Mat4 world = pieceWorld(piece);
             if (piece.refract) {
                 if (showTextures && showEffects) {
@@ -2030,6 +2052,8 @@ void SceneView::queueDraws(const Selection& selection) {
             const Vec4f tint = modelTint(selected);
             Mat4 drawWorld = s.world;          // accessories on connection points draw elsewhere
             auto drawPiece = [&](const ModelPiece& piece, const Vec4f& partHue) {
+                SkinScope skinScope{renderer_};
+                setPieceSkin(piece);
                 if (piece.additive) {
                     if (showEffects) drawEffect(nullptr, piece, drawWorld);   // avatar parts come from several models: no material tracks
                     return;
