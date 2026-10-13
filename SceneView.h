@@ -110,6 +110,9 @@ public:
     bool fitEntityToModel(size_t entityIndex);
     // World-space bounding sphere of a map entity's placement.
     bool entityBounds(size_t entityIndex, tr::Vec3& centre, float& radius) const;
+    // Diagnostic: world skin matrix (placement x skin(time)) of every skeleton bone of an animated map entity's model, by bone
+    // name - comparable with the game's gWorldMatrixArray palette (e.g. from an apitrace capture). Empty if not animated.
+    std::vector<std::pair<std::string, Mat4>> debugWorldSkinMatrices(size_t entityIndex, float time) const;
     // What focusOn looks at and from how far; false if the selection is not in the scene.
     bool focusTarget(const Selection& selection, tr::Vec3& target, float& distance) const;
 
@@ -235,6 +238,11 @@ private:
         bool flesh = false;                    // swap group "flesh": hued with the skin colour
         uint32_t swapId = 0;                   // avatar swap set (0: not swappable)
         bool aniso = false;                    // TRAdditiveAnisoSpec* effect (holograms): drawn with anisoMaterial
+        // Its facing term's normal (vs2x_AnisoDetDec, see scene.hlsl VertexUniforms): skinned pieces use palette entry 0's skin
+        // matrix (this skeleton bone; -1 for static pieces); static pieces on a bone divide by that bone's scale (the baked normals
+        // carry it).
+        int anisoNormalBone = -1;
+        float anisoStaticScale = 1.0f;
         bool twoSided = false;                 // the effect sets CULLMODE = NONE (PalDiffMap, TRDiffMapNoLight, TRLava, TRBeam)
         AnisoMaterial anisoMaterial;           // textures owned by textures_
         // Object animation (X.anm of X.geo): a skinned piece blended over several bones keeps its stored (unskinned) vertices
@@ -289,11 +297,18 @@ private:
         bool skinAnimated = false;             // some piece has a skinBuffer
         mutable uint64_t boneFrame = 0;        // frame whose bone palette was uploaded (setPieceSkin)
         mutable uint32_t boneBase = 0;
+        std::vector<Mat4> restSkin;            // skin matrices the mesh was posed with at load (frame 0 / bind pose)
+        mutable std::vector<Mat4> frameSkin;   // currentSkin's cache
+        mutable uint64_t frameSkinFrame = 0;
     };
     // Per-piece matrices of an animated model at time t (loops over the animation's duration); empty if not animated.
     std::vector<Mat4> animatedPieceMatrices(const Model& model, float time) const;
     // Before drawing a piece: GPU skinning on (its model's bone palette at lightTime, uploaded once per frame) or off.
     void setPieceSkin(const ModelPiece& piece);
+    // The model's skin matrices this frame: animated objects at lightTime (frame 0 with animateSkins off), else as loaded.
+    const std::vector<Mat4>& currentSkin(const Model& model) const;
+    // AnisoMaterial::normalMatrix for a piece drawn with this placement (entity world, without per-piece animation).
+    Mat4 anisoNormalMatrix(const Model* model, const ModelPiece& piece, const Mat4& placementWorld, const Mat4& pieceWorld) const;
     uint64_t frameNumber_ = 1;
     // A piece's texture transforms at time t from its material tracks (slots without a track keep out's values); false if none.
     bool animatedUvTransforms(const Model& model, const ModelPiece& piece, float time, UvTransforms& out) const;

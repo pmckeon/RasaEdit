@@ -1293,7 +1293,10 @@ std::string formatFloat(float f) {
 }  // namespace
 
 bool isHuedEffect(const std::string& effectName) {
-    return effectName.find("Hue") != std::string::npos;
+    // TRHair has no "Hue" in its name but is hued like the Pal*Hue effects (verified 2026-10-14, trhairsp_2.fxc): its Hue
+    // parameter has the semantic HueColor (Hue2: HueColor2), and the deferred pixel shader ps2x_BaseDeferredAlphaTestNoParallaxHue
+    // computes diffuse + Hue x diffuse.a before x vertex colour x 2 (cut-out: texkill(normal map alpha - 0.5)).
+    return effectName.find("Hue") != std::string::npos || tr::toLowerAscii(effectName).rfind("trhair", 0) == 0;
 }
 
 namespace {

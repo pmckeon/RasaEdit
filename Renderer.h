@@ -71,6 +71,8 @@ struct AnisoMaterial {
     Vec4f transform0u = Vec4f{1, 0, 0, 0}, transform0v = Vec4f{0, 1, 0, 0};
     Vec4f transform1u = Vec4f{1, 0, 0, 0}, transform1v = Vec4f{0, 1, 0, 0};
     Vec4f transform2u = Vec4f{1, 0, 0, 0}, transform2v = Vec4f{0, 1, 0, 0};
+    // The facing term's normal matrix (scene.hlsl VertexUniforms::anisoNormal): 3 x 3 applied to the vertex normal, not normalised.
+    Mat4 normalMatrix = identityMatrix();
 };
 
 // GPU skinning: per vertex, up to 4 bones of the model's skeleton (index into the bone palette given by setSkin) and their
@@ -242,6 +244,7 @@ private:
         bool forwardLit = false;                 // lit additive (forward-phase piece)
         bool twoSided = false;
         SDL_GPUBuffer* skinVertices = nullptr;   // GPU skinning (setSkin); null = as stored
+        Mat4 anisoNormal = identityMatrix();     // aniso: AnisoMaterial::normalMatrix
         uint32_t boneBase = 0;
         bool skinNormals = true;
         bool cullBlended = false;                // translucent / additive draw with back faces culled (see drawTranslucent)
@@ -256,7 +259,7 @@ private:
     SDL_GPUShader* createShader(const unsigned char* dxil, size_t dxilSize, const unsigned char* spirv, size_t spirvSize,
                                 const char* entryPoint, SDL_GPUShaderStage stage, uint32_t samplers, uint32_t storageBuffers = 0);
     SDL_GPUGraphicsPipeline* createPipeline(SDL_GPUShader* vertexShader, SDL_GPUShader* fragmentShader, SDL_GPUPrimitiveType primitive,
-                                            int blend = 0, bool cullBack = false);
+                                            int blend = 0, bool cullBack = false, bool cullFront = false);
     void recordItem(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pass, const DrawItem& item, SDL_GPUGraphicsPipeline*& bound);
 
     SDL_GPUDevice* device_;

@@ -13,7 +13,16 @@ cbuffer VertexUniforms : register(b0, space1)
 {
     row_major float4x4 viewProjection;
     row_major float4x4 model;
-    uint4 skin;               // x: 1 = skinned (GPU skinning), y: first bone row in boneRows, z: 1 = skin the normal too (tangents always)
+    uint4 skin;               // x: 1 = skinned (GPU skinning), y: first bone row in boneRows, z: 1 = skin the normal too (tangents always),
+                              // w: 1 = TRAdditiveAnisoSpec* piece: facing term and fog per vertex as vs2x_AnisoDetDec[_Skinned]
+    // vs2x_AnisoDetDec[_Skinned] (verified 2026-10-14 against an apitrace capture of the game): oT0.y = max(N . V, 0) per vertex with
+    // N = (the mesh normal x gWorldMatrix) x gInvWorldScale, NOT normalised (skinned pieces: gWorldMatrix = palette entry 0's world
+    // skin matrix, gInvWorldScale = 1 / the entity's scale, so |N| = that bone's scale, e.g. 5.228 for the hologram's body; static
+    // pieces: the node's matrix and 1 / its scale, |N| = 1), V = normalize(eye - position); oFog = exp(-(density x max(d - start,
+    // 0))^2), and the runtime state has FOGENABLE on with FOGCOLOR 0.
+    row_major float4x4 anisoNormal;   // the 3 x 3 applied to the vertex normal
+    float4 eyePosition;               // xyz
+    float4 anisoFog;                  // x start, y density, z 1 = fog on
 };
 
 // GPU skinning (Renderer::setSkin): per vertex up to 4 bones of the model's skeleton and their weights (SV_VertexID indexes it;
@@ -110,6 +119,7 @@ struct VertexOutput
     float3 tangent  : TEXCOORD5;
     float3 binormal : TEXCOORD6;
     float2 uv2      : TEXCOORD7;
+    float2 aniso    : TEXCOORD8;      // skin.w = 1: x facing (N . V, clamped at 0), y fog visibility
 };
 
 VertexOutput vsMain(VertexInput input, uint vertexId : SV_VertexID)
@@ -153,6 +163,15 @@ VertexOutput vsMain(VertexInput input, uint vertexId : SV_VertexID)
     output.world = world.xyz;
     output.uv1 = input.uv1;
     output.uv2 = input.uv2;
+    output.aniso = float2(0.0, 1.0);
+    if (skin.w != 0)
+    {
+        const float3 n = mul((float3x3)anisoNormal, normal);
+        const float3 toEye = eyePosition.xyz - world.xyz;
+        const float d = length(toEye);
+        const float f = max(d - anisoFog.x, 0.0) * anisoFog.y;
+        output.aniso = float2(max(dot(n, toEye / max(d, 1e-6)), 0.0), anisoFog.z > 0.5 ? exp(-f * f) : 1.0);
+    }
     return output;
 }
 
@@ -180,12 +199,13 @@ float3 anisoAdditive(VertexOutput input)
         const float4 decal = decalTexture.Sample(decalSampler, trTransformUv(input.uv2, 2));
         albedo = lerp(albedo, decal.rgb, decal.a);
     }
-    const float facing = max(dot(normalize(input.normal), normalize(cameraPosition.xyz - input.world)), 0.0);
-    const float ramp = lightTexture.Sample(lightSampler, float2(0.5, facing)).a;
+    // Facing from the vertex shader (per vertex, unnormalised normal - see VertexUniforms); LightTexture is sampled clamped.
+    const float ramp = lightTexture.Sample(lightSampler, float2(0.5, input.aniso.x)).a;
     const float alpha = diffuse.a * input.colour.a * tint.a;
     // The shader writes this alpha to oC0.w and its pass blends SRCALPHA / ONE, so the frame gets the colour x alpha
     // again (alpha squared overall); the editor's additive pipeline is ONE / ONE, so it is applied here.
-    return max(4.0 * alpha * albedo * (albedo * input.colour.rgb + ramp * specular.rgb), 0.0) * alpha;
+    // Fog: FOGCOLOR 0, so the colour is scaled by the per-vertex visibility before the SRCALPHA / ONE blend.
+    return max(4.0 * alpha * albedo * (albedo * input.colour.rgb + ramp * specular.rgb), 0.0) * alpha * input.aniso.y;
 }
 
 // One TR map slot applied to the albedo: 1 modifier (second diffuse, lerp by vertex alpha), 2 detail (+ map - 0.5),
@@ -205,7 +225,8 @@ float4 psMain(VertexOutput input) : SV_Target0
         return float4(0, 0, 0, options.y > 0.5 ? 0 : 1);   // debug views: additive / forward effects are not in the G-buffer
     if (options.w > 0.5)
     {
-        // No fog: the effect's passes set FOGENABLE 0 (tradditiveanisospec*sp_2.fxc, verified 2026-10-12).
+        // Fog per vertex (anisoAdditive): the passes set FOGENABLE 0, but the device state at the game's draw has it on (apitrace
+        // replay, 2026-10-14) and the vertex shader writes oFog.
         return float4(anisoAdditive(input), 1.0);
     }
     const uint trBits = (uint)trFlags.w;

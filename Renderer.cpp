@@ -19,7 +19,10 @@ struct RefractUniforms {   // shaders/refract.hlsl RefractUniforms
 struct VertexUniforms {
     Mat4 viewProjection;
     Mat4 model;
-    uint32_t skinned = 0, boneBase = 0, skinNormals = 0, unused = 0;    // scene.hlsl `skin`
+    uint32_t skinned = 0, boneBase = 0, skinNormals = 0, aniso = 0;     // scene.hlsl `skin`
+    Mat4 anisoNormal = identityMatrix();
+    Vec4f eyePosition = Vec4f{0, 0, 0, 1};
+    Vec4f anisoFog = Vec4f{0, 0, 0, 0};
 };
 
 // The lighting fields shared by both fragment shaders (shaders/lighting.hlsli), in cbuffer order.
@@ -146,8 +149,11 @@ Renderer::Renderer(SDL_GPUDevice* device) : device_(device) {
     culledTerrainPipeline_ = createPipeline(terrainVertex_, terrainFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST, 0, true);
     translucentPipeline_ = createPipeline(sceneVertex_, sceneFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST, 1);
     additivePipeline_ = createPipeline(sceneVertex_, sceneFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST, 2);
-    culledAdditivePipeline_ = createPipeline(sceneVertex_, sceneFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST, 2, true);
-    culledTranslucentPipeline_ = createPipeline(sceneVertex_, sceneFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST, 1, true);
+    // Diagnostic: RASA_FLIPBLENDCULL=1 culls the other faces of blended pieces (winding checks against in-game shots).
+    const char* flipBlend = SDL_getenv("RASA_FLIPBLENDCULL");
+    const bool flip = flipBlend && *flipBlend && *flipBlend != '0';
+    culledAdditivePipeline_ = createPipeline(sceneVertex_, sceneFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST, 2, true, flip);
+    culledTranslucentPipeline_ = createPipeline(sceneVertex_, sceneFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST, 1, true, flip);
     subtractivePipeline_ = createPipeline(sceneVertex_, sceneFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST, 3);
     refractPipeline_ = createPipeline(sceneVertex_, refractFragment_, SDL_GPU_PRIMITIVETYPE_TRIANGLELIST, 4);
     linearSampler_ = createSampler(device_, true, true);
@@ -275,7 +281,7 @@ SDL_GPUShader* Renderer::createShader(const unsigned char* dxil, size_t dxilSize
 }
 
 SDL_GPUGraphicsPipeline* Renderer::createPipeline(SDL_GPUShader* vertexShader, SDL_GPUShader* fragmentShader, SDL_GPUPrimitiveType primitive,
-                                                  int blend, bool cullBack) {
+                                                  int blend, bool cullBack, bool cullFront) {
     SDL_GPUVertexBufferDescription buffer = {};
     buffer.slot = 0;
     buffer.pitch = sizeof(MeshVertex);
@@ -329,7 +335,7 @@ SDL_GPUGraphicsPipeline* Renderer::createPipeline(SDL_GPUShader* vertexShader, S
     info.vertex_input_state.num_vertex_attributes = 8;
     info.primitive_type = primitive;
     info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
-    info.rasterizer_state.cull_mode = cullBack ? SDL_GPU_CULLMODE_BACK : SDL_GPU_CULLMODE_NONE;
+    info.rasterizer_state.cull_mode = cullFront ? SDL_GPU_CULLMODE_FRONT : cullBack ? SDL_GPU_CULLMODE_BACK : SDL_GPU_CULLMODE_NONE;
     info.rasterizer_state.front_face = SDL_GPU_FRONTFACE_CLOCKWISE;
     info.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
     info.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS_OR_EQUAL;
@@ -536,6 +542,7 @@ void Renderer::drawAnisoAdditive(const GpuMesh& mesh, const Mat4& model, const A
     item.aniso = true;
     item.cullBlended = cullBack;
     item.layers = Vec4f{0, 0, material.detail ? 1.0f : 0.0f, material.decal ? 1.0f : 0.0f};
+    item.anisoNormal = material.normalMatrix;
     item.tr.transform0u = material.transform0u; item.tr.transform0v = material.transform0v;     // tr.active stays false
     item.tr.transform1u = material.transform1u; item.tr.transform1v = material.transform1v;
     item.tr.transform2u = material.transform2u; item.tr.transform2v = material.transform2v;
@@ -844,7 +851,13 @@ void Renderer::recordItem(SDL_GPUCommandBuffer* commands, SDL_GPURenderPass* pas
     SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
     SDL_GPUBufferBinding indexBinding = {item.mesh->indices, 0};
     SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_32BIT);
-    const VertexUniforms vertexUniforms{viewProjection_, item.model, item.skinVertices ? 1u : 0u, item.boneBase, item.skinNormals ? 1u : 0u, 0};
+    VertexUniforms vertexUniforms{viewProjection_, item.model, item.skinVertices ? 1u : 0u, item.boneBase, item.skinNormals ? 1u : 0u, 0};
+    if (item.aniso) {
+        vertexUniforms.aniso = 1;
+        vertexUniforms.anisoNormal = item.anisoNormal;
+        vertexUniforms.eyePosition = cameraPosition_;
+        vertexUniforms.anisoFog = Vec4f{lighting_.fogStart, lighting_.fogDensity, lighting_.fog ? 1.0f : 0.0f, 0};
+    }
     SDL_PushGPUVertexUniformData(commands, 0, &vertexUniforms, sizeof vertexUniforms);
     if (!item.terrain) bindSkin(pass, item.skinVertices);
     if (item.terrain) {

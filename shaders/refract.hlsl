@@ -34,6 +34,7 @@ struct VertexOutput           // = scene.hlsl's VertexOutput
     float3 tangent  : TEXCOORD5;
     float3 binormal : TEXCOORD6;
     float2 uv2      : TEXCOORD7;
+    float2 aniso    : TEXCOORD8;
 };
 
 float3 toView(float3 v) { return float3(dot(v, cameraRight.xyz), dot(v, cameraUp.xyz), dot(v, cameraForward.xyz)); }

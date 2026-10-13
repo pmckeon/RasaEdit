@@ -1145,6 +1145,7 @@ void SceneView::loadModel(const std::string& name, Model& model) {
         // inverse binds carry the sign's x1.5 scale).
         const bool anySkinned = std::any_of(geo.pieces.begin(), geo.pieces.end(), [](const tr::GeoPiece& p) { return p.skinned; });
         if (skin.empty() && anySkinned && !geo.bones.empty()) skin = skinMatrices(geo, tr::Animation{}, 0.0f);
+        model.restSkin = skin;
         size_t effectPieces = 0;
         // Only full detail is drawn: lower LODs (USDA "LOD" >= 1) and swap set 99 (a low-LOD stand-in) sit on top
         // of the LOD 0 geometry. A model made only of such pieces is drawn whole.
@@ -1369,6 +1370,10 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 part.hueUnweighted = effect.rfind("paldiffalpha", 0) == 0 && part.hued;
                 part.hairCutout = hair;
                 part.animBone = rigidBone;
+                if (aniso) {
+                    if (!palette.empty() && palette.front() >= 0) part.anisoNormalBone = palette.front();
+                    else if (bone && bone->scale.x > 0) part.anisoStaticScale = 1.0f / bone->scale.x;    // uniform bone scales
+                }
                 if (refraction) {
                     // TRRefract (refract.hlsl): diffuse on UV set 0 x TexCoordTransform0, normal map on UV set 1 x
                     // TexCoordTransform1 (both MATRIX_COLUMNS in its vertex shader), ModifierTexture = the edge fade ramp,
@@ -1715,6 +1720,38 @@ bool SceneView::animatedUvTransforms(const Model& model, const ModelPiece& piece
     return true;
 }
 
+const std::vector<Mat4>& SceneView::currentSkin(const Model& model) const {
+    if (model.animation.duration <= 0.0f || model.skeleton.bones.empty()) return model.restSkin;
+    if (model.frameSkinFrame != frameNumber_) {
+        const float t = animateSkins ? std::fmod(std::max(lightTime, 0.0f), model.animation.duration) : 0.0f;
+        model.frameSkin = skinMatrices(model.skeleton, model.animation, t, nullptr, nullptr, &model.boneTracks);
+        model.frameSkinFrame = frameNumber_;
+    }
+    return model.frameSkin;
+}
+
+Mat4 SceneView::anisoNormalMatrix(const Model* model, const ModelPiece& piece, const Mat4& placementWorld, const Mat4& pieceWorld) const {
+    auto scaleOf = [](const Mat4& m) { return std::sqrt(m.row0.x * m.row0.x + m.row1.x * m.row1.x + m.row2.x * m.row2.x); };
+    auto scaled3 = [](Mat4 m, float s) {
+        m.row0 = Vec4f{m.row0.x * s, m.row0.y * s, m.row0.z * s, 0};
+        m.row1 = Vec4f{m.row1.x * s, m.row1.y * s, m.row1.z * s, 0};
+        m.row2 = Vec4f{m.row2.x * s, m.row2.y * s, m.row2.z * s, 0};
+        m.row3 = Vec4f{0, 0, 0, 1};
+        return m;
+    };
+    if (model && piece.anisoNormalBone >= 0) {
+        // Skinned: (placement x skin[palette 0]) / the entity's scale - the game's c94 x c106.
+        const std::vector<Mat4>& skin = currentSkin(*model);
+        if (size_t(piece.anisoNormalBone) < skin.size()) {
+            const float s = scaleOf(placementWorld);
+            return scaled3(multiply(placementWorld, skin[size_t(piece.anisoNormalBone)]), s > 0 ? 1.0f / s : 1.0f);
+        }
+    }
+    // Static (or unknown palette): the piece's world over its own scale, x 1 / the bone scale baked into the normals - unit length.
+    const float s = scaleOf(pieceWorld);
+    return scaled3(pieceWorld, (s > 0 ? 1.0f / s : 1.0f) * piece.anisoStaticScale);
+}
+
 void SceneView::setPieceSkin(const ModelPiece& piece) {
     if (!piece.skinBuffer || !piece.skinOwner) {
         renderer_.clearSkin();
@@ -1722,8 +1759,7 @@ void SceneView::setPieceSkin(const ModelPiece& piece) {
     }
     const Model& model = *piece.skinOwner;
     if (model.boneFrame != frameNumber_) {
-        const float t = animateSkins && model.animation.duration > 0.0f ? std::fmod(std::max(lightTime, 0.0f), model.animation.duration) : 0.0f;
-        model.boneBase = renderer_.addBones(skinMatrices(model.skeleton, model.animation, t, nullptr, nullptr, &model.boneTracks));
+        model.boneBase = renderer_.addBones(currentSkin(model));
         model.boneFrame = frameNumber_;
     }
     renderer_.setSkin(piece.skinBuffer, model.boneBase, piece.skinNormals);
@@ -1876,11 +1912,12 @@ void SceneView::queueDraws(const Selection& selection) {
         Renderer& renderer;
         ~SkinScope() { renderer.clearSkin(); }
     };
-    auto drawEffect = [&](const Model* model, const ModelPiece& piece, const Mat4& world) {   // model: for material tracks
+    auto drawEffect = [&](const Model* model, const ModelPiece& piece, const Mat4& world, const Mat4& placementWorld) {   // model: material tracks
         SkinScope skinScope{renderer_};
         setPieceSkin(piece);
         if (piece.aniso && showTextures) {
             AnisoMaterial m = piece.anisoMaterial;
+            m.normalMatrix = anisoNormalMatrix(model ? model : piece.skinOwner, piece, placementWorld, world);
             UvTransforms uv{m.transform0u, m.transform0v, m.transform1u, m.transform1v, m.transform2u, m.transform2v};
             if (model && animatedUvTransforms(*model, piece, lightTime, uv)) {
                 m.transform0u = uv.u0; m.transform0v = uv.v0; m.transform1u = uv.u1; m.transform1v = uv.v1;
@@ -1910,7 +1947,7 @@ void SceneView::queueDraws(const Selection& selection) {
         };
         if (showEffects)       // additive pieces: glows, holograms, light cones
             for (const ModelPiece& piece : model.pieces)
-                if (piece.additive && !groupHidden(piece)) drawEffect(&model, piece, pieceWorld(piece));
+                if (piece.additive && !groupHidden(piece)) drawEffect(&model, piece, pieceWorld(piece), placementWorld);
         if (!model.hasSolid) return;
         const Vec4f tint = modelTint(selected);
         SkinScope skinScope{renderer_};
@@ -2055,7 +2092,7 @@ void SceneView::queueDraws(const Selection& selection) {
                 SkinScope skinScope{renderer_};
                 setPieceSkin(piece);
                 if (piece.additive) {
-                    if (showEffects) drawEffect(nullptr, piece, drawWorld);   // avatar parts come from several models: no material tracks
+                    if (showEffects) drawEffect(nullptr, piece, drawWorld, drawWorld);   // avatar parts come from several models: no material tracks
                     return;
                 }
                 if (piece.water) {
@@ -2129,7 +2166,13 @@ void SceneView::queueDraws(const Selection& selection) {
                 if (!contactFrame(s.model, a.connectionPoint, 1, socket, ignored)) continue;
                 if (!contactFrame(a.model, a.connectionPoint, 2, plug, ignored)) plug = identityMatrix();
                 drawWorld = multiply(s.world, multiply(rigid(socket), affineInverse(rigid(plug))));
-                for (const ModelPiece& piece : a.model->pieces) drawPiece(piece, a.hue);
+                // The appearance colour is not a hue here (traced 2026-10-14): AddAccessory's RGBA reaches FinalizeAddAccessory
+                // (4th argument) -> FUN_0081d640, which, unless it is the default (0, 0, 0, 1) at 0x00d088a8, sets it on every
+                // piece's parameters of semantic "Diffuse" and "Ambient" (FUN_0081d6f0 -> FUN_005bdc60 = GetParameterBySemantic)
+                // - MatDiffuse / MatAmbient, which the Pal deferred G-buffer shaders do not read. So the pieces keep their
+                // material's stored Hue (McAllister's pistol colour 0x00000001 made it black before; in game it is grey metal).
+                // MatDiffuse.a of TR-effect accessories (alpha in some TR shaders) is not reproduced.
+                for (const ModelPiece& piece : a.model->pieces) drawPiece(piece, piece.materialHue);
             }
             drawWorld = s.world;
         } else {
@@ -2449,6 +2492,18 @@ bool SceneView::fitEntityToModel(size_t entityIndex) {
     const float scale = length(subtract(transformPoint(p.world, tr::Vec3{1, 0, 0}), transformPoint(p.world, tr::Vec3{0, 0, 0})));
     p.radius = std::max(0.05f, length(subtract(b.max, b.min)) * 0.5f * scale);
     return true;
+}
+
+std::vector<std::pair<std::string, Mat4>> SceneView::debugWorldSkinMatrices(size_t entityIndex, float time) const {
+    std::vector<std::pair<std::string, Mat4>> out;
+    if (entityIndex >= placements_.size()) return out;
+    const Placement& p = placements_[entityIndex];
+    if (!p.model || !p.model->loaded || p.model->skeleton.bones.empty()) return out;
+    const Model& m = *p.model;
+    const float t = m.animation.duration > 0.0f ? std::fmod(std::max(time, 0.0f), m.animation.duration) : 0.0f;
+    const std::vector<Mat4> skin = skinMatrices(m.skeleton, m.animation, t, nullptr, nullptr, &m.boneTracks);
+    for (size_t k = 0; k < skin.size(); ++k) out.emplace_back(m.skeleton.bones[k].name, multiply(p.world, skin[k]));
+    return out;
 }
 
 bool SceneView::entityBounds(size_t entityIndex, tr::Vec3& centre, float& radius) const {

@@ -104,11 +104,16 @@ int main(int argc, char** argv) {
         // RASA_GEOINFO=<model.geo>: per piece its vertex elements, vertex colour range (ARGB bytes) and material parameters.
         if (const char* geoName = envValue("RASA_GEOINFO")) {
             const tr::GeoModel geo = tr::readGeo(assets.read(geoName));
-            for (const tr::GeoBone& b : geo.bones)
-                std::printf("bone %s parent %d: t (%.3f %.3f %.3f) r (%.3f %.3f %.3f %.3f) s (%.4f %.4f %.4f)%s ibT (%.3f %.3f %.3f) ibX (%.4f %.4f %.4f)\n",
+            for (const tr::GeoBone& b : geo.bones) {
+                // det of the inverse bind's 3 x 3 (rows X, Y, Z): < 0 = the stored matrix mirrors
+                const tr::Vec3 &x = b.inverseBindX, &y = b.inverseBindY, &z = b.inverseBindZ;
+                const float det = x.x * (y.y * z.z - y.z * z.y) - x.y * (y.x * z.z - y.z * z.x) + x.z * (y.x * z.y - y.y * z.x);
+                std::printf("bone %s parent %d: t (%.3f %.3f %.3f) r (%.3f %.3f %.3f %.3f) s (%.4f %.4f %.4f)%s ibT (%.3f %.3f %.3f) ibX (%.4f %.4f %.4f) "
+                            "ibY (%.4f %.4f %.4f) ibZ (%.4f %.4f %.4f) det %.4f\n",
                             b.name.c_str(), b.parent, b.translation.x, b.translation.y, b.translation.z, b.rotation.x, b.rotation.y,
                             b.rotation.z, b.rotation.w, b.scale.x, b.scale.y, b.scale.z, b.hasInverseBind ? " inverse bind" : "",
-                            b.inverseBindT.x, b.inverseBindT.y, b.inverseBindT.z, b.inverseBindX.x, b.inverseBindX.y, b.inverseBindX.z);
+                            b.inverseBindT.x, b.inverseBindT.y, b.inverseBindT.z, x.x, x.y, x.z, y.x, y.y, y.z, z.x, z.y, z.z, det);
+            }
             for (const tr::GeoContactPoint& c : geo.contactPoints) {
                 std::printf("contact point %u bone %d at (%.3f %.3f %.3f):", c.id, c.bone, c.position.x, c.position.y, c.position.z);
                 for (const tr::GeoParameter& kv : c.values) std::printf(" %s=%s", kv.key.c_str(), kv.value.c_str());
@@ -693,6 +698,25 @@ int main(int argc, char** argv) {
         if (const char* sel = envValue("RASA_SELECT")) highlighted = Selection{SelectionKind::MapEntity, size_t(std::atoi(sel))};
         // RASA_SKINTIMING=1: time 20 frames of queueDraws with the light clock advancing (object animations re-skinned each
         // frame) against the same with skin playback off.
+        // RASA_SKINDUMP=<entity index>: per skinned piece of the entity's model, its palette (GSKN bone list) as world skin
+        // matrices (3 rows of 4, like the game's gWorldMatrixArray) at RASA_LIGHTTIME - for comparison with an apitrace capture.
+        if (const char* dumpEntity = envValue("RASA_SKINDUMP")) {
+            const size_t index = size_t(std::atoi(dumpEntity));
+            const auto matrices = scene.debugWorldSkinMatrices(index, scene.lightTime);
+            if (index < map.map.entities.size() && !matrices.empty()) {
+                const tr::GeoModel geo = tr::readGeo(assets.read(data.classMeshName(map.map.entities[index].classId)));
+                for (const tr::GeoPiece& piece : geo.pieces) {
+                    if (!piece.skinned) continue;
+                    std::printf("skin dump: piece %s (%zu vertices), %zu palette bones\n", piece.pieceName.c_str(), piece.vertices.size(), piece.skinBones.size());
+                    for (size_t b = 0; b < piece.skinBones.size(); ++b)
+                        for (const auto& [name, m] : matrices)
+                            if (name == piece.skinBones[b])
+                                std::printf("  %2zu %-24s %8.3f %8.3f %8.3f %8.3f | %8.3f %8.3f %8.3f %8.3f | %8.3f %8.3f %8.3f %8.3f\n", b, name.c_str(),
+                                            m.row0.x, m.row0.y, m.row0.z, m.row0.w, m.row1.x, m.row1.y, m.row1.z, m.row1.w, m.row2.x, m.row2.y, m.row2.z,
+                                            m.row2.w);
+                }
+            }
+        }
         if (envValue("RASA_SKINTIMING")) {
             for (int pass = 0; pass < 3; ++pass) {        // on, off, on: the first pass also pays one-time costs
                 scene.animateSkins = pass != 1;
