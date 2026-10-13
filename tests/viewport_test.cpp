@@ -104,6 +104,16 @@ int main(int argc, char** argv) {
         // RASA_GEOINFO=<model.geo>: per piece its vertex elements, vertex colour range (ARGB bytes) and material parameters.
         if (const char* geoName = envValue("RASA_GEOINFO")) {
             const tr::GeoModel geo = tr::readGeo(assets.read(geoName));
+            for (const tr::GeoBone& b : geo.bones)
+                std::printf("bone %s parent %d: t (%.3f %.3f %.3f) r (%.3f %.3f %.3f %.3f) s (%.4f %.4f %.4f)%s ibT (%.3f %.3f %.3f) ibX (%.4f %.4f %.4f)\n",
+                            b.name.c_str(), b.parent, b.translation.x, b.translation.y, b.translation.z, b.rotation.x, b.rotation.y,
+                            b.rotation.z, b.rotation.w, b.scale.x, b.scale.y, b.scale.z, b.hasInverseBind ? " inverse bind" : "",
+                            b.inverseBindT.x, b.inverseBindT.y, b.inverseBindT.z, b.inverseBindX.x, b.inverseBindX.y, b.inverseBindX.z);
+            for (const tr::GeoContactPoint& c : geo.contactPoints) {
+                std::printf("contact point %u bone %d at (%.3f %.3f %.3f):", c.id, c.bone, c.position.x, c.position.y, c.position.z);
+                for (const tr::GeoParameter& kv : c.values) std::printf(" %s=%s", kv.key.c_str(), kv.value.c_str());
+                std::printf("\n");
+            }
             for (size_t k = 0; k < geo.pieces.size(); ++k) {
                 const tr::GeoPiece& piece = geo.pieces[k];
                 uint32_t lo[4] = {255, 255, 255, 255}, hi[4] = {0, 0, 0, 0};

@@ -2099,14 +2099,31 @@ void SceneView::queueDraws(const Selection& selection) {
                     for (const ModelPiece& piece : accessory->pieces) drawPiece(piece, Vec4f{0, 0, 0, 0});
             // Avatar accessories: the accessory's plug (HPP_<name>, usage 2) is put on the body's socket (HPS_<name>, usage 1)
             // of the same connection point (TRasa::EntityBody::FinalizeAddAccessory FUN_00502060 links the two through a
-            // gfxConnection; world = socket x inverse(plug) is the usual meaning - the composition itself is NOT traced).
+            // gfxConnection (FUN_00625300; evaluated by FUN_005e2b80, phyCPConnection). Traced 2026-10-13: the evaluator copies the
+            // accessory node (FUN_004d7be0), sets its scale to 1 (FLD1 + FUN_00437d20 at 005e2d20) and gives it the inverted
+            // plug rotation (D3DXQuaternionInverse, FUN_004cbcf0) to carry the plug offset; it then writes only position
+            // (FUN_00437c70) and rotation (FUN_004cbcf0) to the accessory node, whose scale FUN_0081d820 sets to the body node's
+            // (+0xB8..0xC0, vtable +0x10 mode 3). So the frames compose without bone scale; the scale is the entity's (in s.world).
+            // hp_hum_pistol_physical_holster needs this: its plug is on its only bone, scale 0.0117 (the mesh is stored 26 m wide),
+            // and inverting the scaled frame drew it 85x too large (user report 2026-10-13). The position arithmetic in between
+            // (x87 code) is not read term by term: the editor uses the frames' positions with their bone scales applied.
+            auto rigid = [](Mat4 m) {
+                for (int c = 0; c < 3; ++c) {
+                    float* x = c == 0 ? &m.row0.x : c == 1 ? &m.row0.y : &m.row0.z;
+                    float* y = c == 0 ? &m.row1.x : c == 1 ? &m.row1.y : &m.row1.z;
+                    float* z = c == 0 ? &m.row2.x : c == 1 ? &m.row2.y : &m.row2.z;
+                    const float n = std::sqrt(*x * *x + *y * *y + *z * *z);
+                    if (n > 1e-8f) { *x /= n; *y /= n; *z /= n; }
+                }
+                return m;
+            };
             for (const ServerPlacement::BodyAccessory& a : s.bodyAccessories) {
                 if (!a.model || !a.model->loaded) continue;
                 Mat4 socket, plug;
                 tr::Quat ignored;
                 if (!contactFrame(s.model, a.connectionPoint, 1, socket, ignored)) continue;
                 if (!contactFrame(a.model, a.connectionPoint, 2, plug, ignored)) plug = identityMatrix();
-                drawWorld = multiply(s.world, multiply(socket, affineInverse(plug)));
+                drawWorld = multiply(s.world, multiply(rigid(socket), affineInverse(rigid(plug))));
                 for (const ModelPiece& piece : a.model->pieces) drawPiece(piece, a.hue);
             }
             drawWorld = s.world;
