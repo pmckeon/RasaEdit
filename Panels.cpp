@@ -37,6 +37,7 @@ void drawMarkerLegend() {
     row(markerColour::vendor, "Spawn pool: vendor");
     row(markerColour::teleporter, "Teleporter / waypoint / hospital");
     row(markerColour::object, "Object (logos, shrine, ...)");
+    row(markerColour::arrival, "Spawn arrival (dropship pad / Bane teleporter), line to its pool");
     row(markerColour::mapLink, "Map link");
     row(markerColour::mapLinkDisabled, "Map link (disabled)");
     row(markerColour::missionArea, "Mission area");
@@ -333,6 +334,14 @@ void OverviewPanel::draw(EditorContext& ctx, const char* title, const OverviewLa
                 const ImVec2 p = toScreen(server.objects[k].position.x, server.objects[k].position.z);
                 draw->AddQuadFilled(ImVec2(p.x, p.y - 5), ImVec2(p.x + 5, p.y), ImVec2(p.x, p.y + 5), ImVec2(p.x - 5, p.y), toU32(markerColour::object));
                 consider(p, Selection{SelectionKind::Object, k});
+            }
+            for (size_t k = 0; k < server.arrivals.size(); ++k) {
+                const SpawnArrival& a = server.arrivals[k];
+                const ImVec2 p = toScreen(a.position.x, a.position.z);
+                for (const SpawnPool& pool : server.spawnPools)
+                    if (pool.id == a.poolId) draw->AddLine(p, toScreen(pool.position.x, pool.position.z), toU32(markerColour::arrival) & 0xA0FFFFFF, 1.0f);
+                draw->AddTriangleFilled(ImVec2(p.x, p.y - 5), ImVec2(p.x + 5, p.y + 4), ImVec2(p.x - 5, p.y + 4), toU32(markerColour::arrival));
+                consider(p, Selection{SelectionKind::Arrival, k});
             }
             for (size_t k = 0; k < server.mapLinks.size(); ++k) {
                 const MapLink& l = server.mapLinks[k];

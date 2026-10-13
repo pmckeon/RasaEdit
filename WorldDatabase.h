@@ -60,7 +60,11 @@ SpawnSlot& spawnSlot(SpawnPool& pool, int index);
 const char* spawnModeName(int32_t mode);
 const char* spawnAnimationName(int32_t animType);
 
-struct SpawnArrival {                    // spawnpool_arrival: where a pool's dropship lands
+// spawnpool_arrival (Rasa.NET SpawnPoolArrivalEntry): where a pool's creatures arrive - kind 1 a landing pad or dropship
+// bay the Bane dropship comes down on, kind 2 a Bane teleporter (entity_id = the map's own entity id of it, switched on
+// while they come through); the server picks one per spawn and the creatures walk from there to the pool.
+const char* arrivalKindName(int32_t kind);
+struct SpawnArrival {
     int64_t id = 0;
     int64_t poolId = 0;
     int32_t kind = 0;
@@ -80,6 +84,41 @@ struct Creature {
     int32_t nameId = 0;
     int32_t runSpeed = 0;
     int32_t walkSpeed = 0;
+    // creature.action1..action8: creature_action ids (0 = none).
+    int32_t action1 = 0, action2 = 0, action3 = 0, action4 = 0, action5 = 0, action6 = 0, action7 = 0, action8 = 0;
+};
+int32_t creatureAction(const Creature& creature, int index);   // index 0-7
+int32_t& creatureAction(Creature& creature, int index);
+// creature.faction is Rasa.NET's TargetCategory: 0 hostile, 1 friendly, 2 object, 3 neutral, 4 decoration, 5 decoration
+// proxy, 6 ignore (other values count as hostile, Structures/Creature.cs).
+const char* creatureFactionName(int32_t faction);
+// Equipment slots (Rasa.NET Data/EquipmentData.cs): 1 Helmet, 2 Shoes, 3 Gloves, 13 Weapon, 14 Hair, 15 Torso, 16 Legs,
+// 17 Face, 18 Wing, 19 Eyewear, 20 Beard, 21 Mask, ... "" if unnamed.
+const char* equipmentSlotName(int32_t slot);
+
+// creature_stat (id = creature id): the attributes the server gives the creature (CreatureManager: Body, Mind, Spirit,
+// Health, Armor); creatures without a row get defaults.
+struct CreatureStat {
+    int32_t body = 0;
+    int32_t mind = 0;
+    int32_t spirit = 0;
+    int32_t health = 0;
+    int32_t armor = 0;
+};
+
+// creature_action (read-only here): an attack a creature can use.
+struct CreatureAction {
+    int32_t id = 0;
+    std::string description;
+    int32_t actionId = 0;
+    int32_t actionArgId = 0;
+    float rangeMin = 0;
+    float rangeMax = 0;
+    int32_t cooldown = 0;
+    int32_t windup = 0;
+    int32_t minDamage = 0;
+    int32_t maxDamage = 0;
+    int32_t damageType = 0;
 };
 
 // creature_appearance (id = creature id): one equipped item class per equipment slot (Rasa.NET EquipmentData:
@@ -158,6 +197,15 @@ struct PlacedObject {
     std::string name;                    // name or comment column
 };
 
+// One creature as the editor edits it: its creature row, its creature_stat row (if any) and its appearance slots.
+struct CreatureDefinition {
+    Creature creature;
+    bool hasStat = false;
+    CreatureStat stat;
+    std::vector<AppearanceSlot> appearance;          // sorted by slot
+};
+bool sameCreatureDefinition(const CreatureDefinition& a, const CreatureDefinition& b);
+
 // Everything placed on one map context.
 struct WorldContent {
     int32_t mapContextId = -1;
@@ -202,11 +250,19 @@ public:
     // Returns false (with nothing written) and sets error on failure.
     bool save(const WorldContent& saved, const WorldContent& edited, SaveSummary& summary, std::string& error);
     const std::vector<Creature>& creatureList() const { return creatureList_; }   // sorted by id
+    const CreatureStat* creatureStat(int32_t creatureId) const;                     // nullptr if the creature has no row
+    const std::vector<CreatureAction>& creatureActions() const { return actions_; }  // sorted by id
+    std::vector<CreatureDefinition> creatureDefinitions() const;                    // every creature, sorted by id
+    // Writes the creature definitions that differ (creature, creature_stat, creature_appearance) in one transaction; new
+    // creatures are those whose id is not in `saved`. Creatures are never deleted. Reloads the creature tables on success.
+    bool saveCreatures(const std::vector<CreatureDefinition>& saved, const std::vector<CreatureDefinition>& edited, SaveSummary& summary,
+                       std::string& error);
 
 private:
     bool hasTable(const std::string& table) const;
     bool requireColumns(const std::string& table, std::initializer_list<const char*> columns);
     void loadGlobals();
+    void loadCreatures();                            // creature, creature_appearance, creature_stat, creature_action
 
     void execute(const std::string& sql);
 
@@ -219,6 +275,8 @@ private:
     std::vector<MapInfo> maps_;
     std::unordered_map<int32_t, Creature> creatures_;
     std::unordered_map<int32_t, std::vector<AppearanceSlot>> appearances_;   // creature id -> slots
+    std::unordered_map<int32_t, CreatureStat> stats_;                        // creature id -> creature_stat
+    std::vector<CreatureAction> actions_;
     std::unordered_set<int32_t> npcClasses_;
     std::unordered_set<int32_t> vendorClasses_;
 };

@@ -310,6 +310,85 @@ int main(int argc, char** argv) {
             content = database->loadMap(database->contextIdForMap(map.name));
             scene.setServerContent(&content, database.get(), [&](int32_t id) { return data.classMeshName(id); },
                                    [&](const Creature& c) { return resolveAvatar(data, *database, c); });
+            // RASA_SAVETEST=1 (use a COPY of the database): edit the arrival points - move the first, add one to its pool, delete
+            // the last - save, reload and check the rows; then restore and save again.
+            if (envValue("RASA_SAVETEST") && content.arrivals.size() >= 2) {
+                const WorldContent original = content;
+                WorldContent edited = content;
+                edited.arrivals.front().position.x += 1.5f;
+                edited.arrivals.front().comment += " (moved)";
+                SpawnArrival added = edited.arrivals.front();
+                added.id = 0;
+                added.kind = 2;
+                added.entityId = 1234567;
+                added.comment = "save test";
+                edited.arrivals.push_back(added);
+                const int64_t deletedId = edited.arrivals[edited.arrivals.size() - 2].id;
+                edited.arrivals.erase(edited.arrivals.end() - 2);
+                WorldDatabase::SaveSummary summary;
+                std::string error;
+                const bool saved = database->save(original, edited, summary, error);
+                const WorldContent reloaded = database->loadMap(content.mapContextId);
+                bool moved = false, addedFound = false, deletedGone = true;
+                for (const SpawnArrival& r : reloaded.arrivals) {
+                    if (r.id == original.arrivals.front().id) moved = std::fabs(r.position.x - edited.arrivals.front().position.x) < 1e-3f &&
+                                                                    r.comment == edited.arrivals.front().comment;
+                    if (r.comment == "save test" && r.kind == 2 && r.entityId == 1234567 && r.poolId == added.poolId) addedFound = true;
+                    if (r.id == deletedId) deletedGone = false;
+                }
+                std::printf("save test: saved %d (%d added, %d changed, %d deleted%s%s), moved %d, added %d, deleted %d, %zu -> %zu arrivals\n", saved,
+                            summary.inserted, summary.updated, summary.deleted, error.empty() ? "" : ": ", error.c_str(), moved, addedFound,
+                            deletedGone, original.arrivals.size(), reloaded.arrivals.size());
+                // Undo: delete the added row, restore the moved and deleted ones.
+                WorldContent restore = reloaded;
+                restore.arrivals.erase(std::remove_if(restore.arrivals.begin(), restore.arrivals.end(),
+                                                      [](const SpawnArrival& r) { return r.comment == "save test"; }),
+                                       restore.arrivals.end());
+                for (SpawnArrival& r : restore.arrivals)
+                    if (r.id == original.arrivals.front().id) r = original.arrivals.front();
+                for (const SpawnArrival& r : original.arrivals)
+                    if (r.id == deletedId) { SpawnArrival back = r; back.id = 0; restore.arrivals.push_back(back); }
+                const bool restored = database->save(reloaded, restore, summary, error);
+                std::printf("save test restore: %d (%d added, %d changed, %d deleted)\n", restored, summary.inserted, summary.updated, summary.deleted);
+                content = database->loadMap(content.mapContextId);
+                scene.setServerContent(&content, database.get(), [&](int32_t id) { return data.classMeshName(id); },
+                                       [&](const Creature& c) { return resolveAvatar(data, *database, c); });
+            }
+            // RASA_SAVETEST also round-trips the creature definitions: change the first creature with stats and appearance (level,
+            // stat row removed, a slot recoloured), add a new creature, save, reload and check (the copy keeps the changes).
+            if (envValue("RASA_SAVETEST")) {
+                const std::vector<CreatureDefinition> before = database->creatureDefinitions();
+                std::vector<CreatureDefinition> edited = before;
+                CreatureDefinition* target = nullptr;
+                for (CreatureDefinition& d : edited)
+                    if (d.hasStat && !d.appearance.empty()) { target = &d; break; }
+                if (target) {
+                    const int32_t id = target->creature.id;
+                    target->creature.level += 1;
+                    target->creature.action8 = database->creatureActions().empty() ? 0 : database->creatureActions().front().id;
+                    target->hasStat = false;
+                    target->appearance.front().colour = 0xff112233;
+                    const int32_t expectLevel = target->creature.level, expectAction8 = target->creature.action8;
+                    CreatureDefinition added = *target;
+                    added.creature.id = edited.back().creature.id + 1;
+                    added.creature.comment = "save test creature";
+                    added.hasStat = true;
+                    added.stat = CreatureStat{1, 2, 3, 4, 5};
+                    edited.push_back(added);
+                    WorldDatabase::SaveSummary summary;
+                    std::string error;
+                    const bool saved = database->saveCreatures(before, edited, summary, error);
+                    const Creature* c = database->creature(id);
+                    const Creature* n = database->creature(added.creature.id);
+                    const CreatureStat* ns = database->creatureStat(added.creature.id);
+                    const bool ok = c && c->level == expectLevel && c->action8 == expectAction8 && !database->creatureStat(id) &&
+                                    !database->appearance(id).empty() && database->appearance(id).front().colour == 0xff112233u && n &&
+                                    n->comment == "save test creature" && ns && ns->armor == 5 &&
+                                    database->appearance(added.creature.id).size() == added.appearance.size();
+                    std::printf("creature save test: saved %d (%d added, %d changed, %d deleted%s%s), checks %s\n", saved, summary.inserted,
+                                summary.updated, summary.deleted, error.empty() ? "" : ": ", error.c_str(), ok ? "passed" : "FAILED");
+                }
+            }
             // Avatar assembly of the first few spawned creatures that wear swap-set items.
             int listed = 0;
             for (const SpawnPool& pool : content.spawnPools) {

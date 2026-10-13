@@ -22,8 +22,13 @@ public:
     void drawEditMenu() override;
     void drawPanels() override;
     void renderViewport(SDL_GPUCommandBuffer* commands) override { viewport_.render(ctx_, commands, selection_); }
-    bool hasUnsavedChanges() const override { return !cleanReachable_ || undoStack_.size() != cleanUndoDepth_; }
-    bool saveChanges() override { return saveServer(); }
+    bool hasUnsavedChanges() const override { return !cleanReachable_ || undoStack_.size() != cleanUndoDepth_ || creaturesChanged(); }
+    bool saveChanges() override {
+        bool ok = true;
+        if (!cleanReachable_ || undoStack_.size() != cleanUndoDepth_) ok = saveServer();
+        if (creaturesChanged()) ok = saveCreatures() && ok;
+        return ok;
+    }
     void onGameOpened() override { loadServerContent(); }
     void onMapLoaded() override;
 
@@ -58,6 +63,14 @@ private:
     void duplicateSelected();
     void addServerObject(SelectionKind kind, ObjectKind objectKind);
     bool creatureCombo(const char* id, int32_t& creatureId, bool allowNone);
+    // Creatures panel: creature definitions (creature, creature_stat, creature_appearance), database-wide, with its own
+    // Save / Revert (no undo).
+    void drawCreaturePanel();
+    void drawCreatureEditor(CreatureDefinition& d, bool isNew);
+    void reloadCreatureDefinitions();
+    bool creaturesChanged() const;
+    bool saveCreatures();
+    std::string creatureLabel(const CreatureDefinition& d) const;
 
     Selection selection_;
     std::unique_ptr<WorldDatabase> database_;
@@ -71,6 +84,11 @@ private:
     bool snapToGround_ = true;
     char creatureFilter_[64] = "";
     char serverFilter_[128] = "";
+    std::vector<CreatureDefinition> creatureDefs_;
+    std::vector<CreatureDefinition> creatureDefsSaved_;
+    int32_t creatureSelected_ = 0;                    // creature id shown in the editor (0: none)
+    char creatureListFilter_[64] = "";
+    bool creatureMapOnly_ = false;
     MapsPanel maps_;
     OverviewPanel overview_;
     ViewportPanel viewport_{true};

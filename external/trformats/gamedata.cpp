@@ -770,6 +770,11 @@ bool GameData::radarInfo(int32_t contextId, int32_t regionId, RadarInfo& info) {
     return info.extentX > 0 && info.extentZ > 0;
 }
 
+std::string GameData::creatureName(int32_t nameId) {
+    const py::Object* name = py::dictGet(global("generated.client.language.english.creaturenamelanguage", "lookup"), nameId);
+    return name && py::isString(name) ? py::asString(name) : "";
+}
+
 std::vector<SwapsetPart> GameData::itemSwapsetParts(int32_t itemClassId, int32_t baseMeshId) {
     std::vector<SwapsetPart> parts;
     const py::Object* list = py::dictGetTuple(global("generated.client.equipmentdata", "equipableClassMeshSwapset"), {itemClassId, baseMeshId});

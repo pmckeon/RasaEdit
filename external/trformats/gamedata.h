@@ -175,6 +175,9 @@ public:
 
     // Avatar swap sets (generated.client.equipmentdata). baseMeshId is the body's mesh string id
     // (classMeshId of e.g. NPC_Human_Swapset_Male = 4257 avatar_hum_m_nude_caucasian_v01.geo).
+    // A creature's in-game name: generated.client.language.english.creaturenamelanguage lookup[nameId] (the client's
+    // creaturenamelanguage module; Rasa.NET sends creature.name_id in CreatureInfoPacket). "" if none.
+    std::string creatureName(int32_t nameId);
     std::vector<SwapsetPart> itemSwapsetParts(int32_t itemClassId, int32_t baseMeshId);
     // equipmentdata.equipableClassAccessoryConnectionPointWeaponOverride[(itemClass, weaponPosition)] (1 stowed, 2 drawn) if
     // present, else equipableClassAccessoryConnectionPoint[itemClass]; each (mesh string id, connection point id).

@@ -3,6 +3,8 @@
 #include "imgui_internal.h"   // DockBuilder
 
 #include <algorithm>
+#include <cstring>
+#include <set>
 #include <cstdio>
 
 ServerWorkspace::ServerWorkspace(EditorContext& ctx) : Workspace(ctx) {
@@ -23,6 +25,7 @@ void ServerWorkspace::buildDefaultLayout(ImGuiID dockspace) {
     ImGui::DockBuilderDockWindow("Viewport###Server.Viewport", centre);      // first docked = the visible tab
     ImGui::DockBuilderDockWindow("Overview###Server.Overview", centre);
     ImGui::DockBuilderDockWindow("Inspector###Server.Inspector", right);
+    ImGui::DockBuilderDockWindow("Creatures###Server.Creatures", right);
     ImGui::DockBuilderDockWindow("Map###Server.Map", rightBottom);
     ImGui::DockBuilderFinish(dockspace);
 }
@@ -46,6 +49,7 @@ void ServerWorkspace::drawPanels() {
     maps_.draw(ctx_, "Maps###Server.Maps");
     drawServerPanel();
     drawInspectorPanel();
+    drawCreaturePanel();
     drawMapInfoPanel(ctx_, "Map###Server.Map");
     OverviewLayers layers;
     layers.selection = &selection_;
@@ -96,6 +100,7 @@ void ServerWorkspace::openDatabase(const std::string& path) {
         serverContent_ = WorldContent{};
         if (selection_.kind != SelectionKind::MapEntity) selection_ = Selection{};
         database_ = std::move(database);
+        reloadCreatureDefinitions();
         ctx_.setSetting("database", path);
         loadServerContent();
         ctx_.setStatus("Opened server database " + path + (database_->warnings().empty() ? "" : "  (with schema warnings, see the Server panel)"),
@@ -150,6 +155,7 @@ bool ServerWorkspace::selectionPosition(const Selection& s, tr::Vec3& position) 
         case SelectionKind::Region: if (i < serverContent_.regions.size()) { position = serverContent_.regions[i].area.position; return true; } break;
         case SelectionKind::MissionArea: if (i < serverContent_.missionAreas.size()) { position = serverContent_.missionAreas[i].area.position; return true; } break;
         case SelectionKind::Object: if (i < serverContent_.objects.size()) { position = serverContent_.objects[i].position; return true; } break;
+        case SelectionKind::Arrival: if (i < serverContent_.arrivals.size()) { position = serverContent_.arrivals[i].position; return true; } break;
         default: break;
     }
     return false;
@@ -197,6 +203,13 @@ std::string ServerWorkspace::serverObjectLabel(const Selection& s) const {
             std::snprintf(text, sizeof text, "%s %lld: %s", objectKindName(serverContent_.objects[i].kind), static_cast<long long>(serverContent_.objects[i].id),
                           serverContent_.objects[i].name.c_str());
             return text;
+        case SelectionKind::Arrival: {
+            if (i >= serverContent_.arrivals.size()) break;
+            const SpawnArrival& a = serverContent_.arrivals[i];
+            std::snprintf(text, sizeof text, "Arrival %lld (%s) for spawn %lld: %s", static_cast<long long>(a.id), arrivalKindName(a.kind),
+                          static_cast<long long>(a.poolId), a.comment.c_str());
+            return text;
+        }
         default: break;
     }
     return "";
@@ -230,6 +243,12 @@ void ServerWorkspace::drawServerPanel() {
             if (ImGui::MenuItem("Spawn pool")) addServerObject(SelectionKind::SpawnPool, ObjectKind::Footlocker);
             if (ImGui::MenuItem("Teleporter")) addServerObject(SelectionKind::Teleporter, ObjectKind::Footlocker);
             if (ImGui::MenuItem("Map link")) addServerObject(SelectionKind::MapLink, ObjectKind::Footlocker);
+            {
+                const bool poolSaved = selection_.kind == SelectionKind::SpawnPool && selection_.index < serverContent_.spawnPools.size() &&
+                                       serverContent_.spawnPools[selection_.index].id > 0;
+                if (ImGui::MenuItem("Spawn arrival (for the selected spawn pool)", nullptr, false, poolSaved))
+                    addServerObject(SelectionKind::Arrival, ObjectKind::Footlocker);
+            }
             if (ImGui::MenuItem("Footlocker")) addServerObject(SelectionKind::Object, ObjectKind::Footlocker);
             if (ImGui::MenuItem("Kraftwerk")) addServerObject(SelectionKind::Object, ObjectKind::Kraftwerk);
             if (ImGui::MenuItem("Logos stone")) addServerObject(SelectionKind::Object, ObjectKind::Logos);
@@ -272,6 +291,7 @@ void ServerWorkspace::drawServerPanel() {
     };
     if (ImGui::BeginChild("serverlist")) {
         list("Spawn pools", SelectionKind::SpawnPool, serverContent_.spawnPools.size());
+        list("Spawn arrivals", SelectionKind::Arrival, serverContent_.arrivals.size());
         list("Teleporters", SelectionKind::Teleporter, serverContent_.teleporters.size());
         list("Objects", SelectionKind::Object, serverContent_.objects.size());
         list("Map links", SelectionKind::MapLink, serverContent_.mapLinks.size());
@@ -315,7 +335,15 @@ void ServerWorkspace::drawInspectorContent() {
             for (int k = 0; k < 6; ++k) creatureLine(labels[k], spawnSlot(p, k));
             int arrivals = 0;
             for (const SpawnArrival& a : serverContent_.arrivals) if (a.poolId == p.id) ++arrivals;
-            if (arrivals) ImGui::Text("%d dropship arrival point(s)", arrivals);
+            if (arrivals) ImGui::Text("%d arrival point(s)", arrivals);
+            break;
+        }
+        case SelectionKind::Arrival: {
+            if (i >= serverContent_.arrivals.size()) break;
+            const SpawnArrival& a = serverContent_.arrivals[i];
+            placement(a.position, a.rotation);
+            ImGui::Text("Kind %d (%s), spawn pool %lld", a.kind, arrivalKindName(a.kind), static_cast<long long>(a.poolId));
+            if (a.kind == 2) ImGui::Text("Teleporter entity %lld", static_cast<long long>(a.entityId));
             break;
         }
         case SelectionKind::Teleporter: {
@@ -396,6 +424,7 @@ void ServerWorkspace::validateSelection() {
         case SelectionKind::Region: count = serverContent_.regions.size(); break;
         case SelectionKind::MissionArea: count = serverContent_.missionAreas.size(); break;
         case SelectionKind::Object: count = serverContent_.objects.size(); break;
+        case SelectionKind::Arrival: count = serverContent_.arrivals.size(); break;
         default: return;
     }
     if (selection_.index >= count) selection_ = Selection{};
@@ -460,6 +489,7 @@ tr::Vec3* ServerWorkspace::selectedPosition() {
         case SelectionKind::Region: return i < serverContent_.regions.size() ? &serverContent_.regions[i].area.position : nullptr;
         case SelectionKind::MissionArea: return i < serverContent_.missionAreas.size() ? &serverContent_.missionAreas[i].area.position : nullptr;
         case SelectionKind::Object: return i < serverContent_.objects.size() ? &serverContent_.objects[i].position : nullptr;
+        case SelectionKind::Arrival: return i < serverContent_.arrivals.size() ? &serverContent_.arrivals[i].position : nullptr;
         default: return nullptr;
     }
 }
@@ -471,6 +501,7 @@ float* ServerWorkspace::selectedRotation() {
         case SelectionKind::Teleporter: return i < serverContent_.teleporters.size() ? &serverContent_.teleporters[i].rotation : nullptr;
         case SelectionKind::Object:
             return i < serverContent_.objects.size() && serverContent_.objects[i].kind != ObjectKind::Logos ? &serverContent_.objects[i].rotation : nullptr;
+        case SelectionKind::Arrival: return i < serverContent_.arrivals.size() ? &serverContent_.arrivals[i].rotation : nullptr;
         default: return nullptr;
     }
 }
@@ -485,10 +516,21 @@ void ServerWorkspace::deleteSelected() {
             int arrivals = 0;
             for (const SpawnArrival& a : serverContent_.arrivals) if (a.poolId == serverContent_.spawnPools[i].id) ++arrivals;
             beginEdit();
+            const int64_t poolId = serverContent_.spawnPools[i].id;
             serverContent_.spawnPools.erase(serverContent_.spawnPools.begin() + std::ptrdiff_t(i));
-            what = "spawn pool" + (arrivals ? " (and its " + std::to_string(arrivals) + " arrival point(s) when saved)" : std::string());
+            if (poolId > 0)                                          // the database deletes them with the pool
+                serverContent_.arrivals.erase(std::remove_if(serverContent_.arrivals.begin(), serverContent_.arrivals.end(),
+                                                             [&](const SpawnArrival& a) { return a.poolId == poolId; }),
+                                              serverContent_.arrivals.end());
+            what = "spawn pool" + (arrivals ? " and its " + std::to_string(arrivals) + " arrival point(s)" : std::string());
             break;
         }
+        case SelectionKind::Arrival:
+            if (i >= serverContent_.arrivals.size()) return;
+            beginEdit();
+            serverContent_.arrivals.erase(serverContent_.arrivals.begin() + std::ptrdiff_t(i));
+            what = "arrival point";
+            break;
         case SelectionKind::Teleporter:
             if (i >= serverContent_.teleporters.size()) return;
             beginEdit();
@@ -540,6 +582,16 @@ void ServerWorkspace::duplicateSelected() {
             selection_ = Selection{SelectionKind::SpawnPool, serverContent_.spawnPools.size() - 1};
             break;
         }
+        case SelectionKind::Arrival: {
+            if (i >= serverContent_.arrivals.size()) return;
+            SpawnArrival copy = serverContent_.arrivals[i];
+            copy.id = 0;
+            copy.position = shifted(copy.position);
+            beginEdit();
+            serverContent_.arrivals.push_back(copy);
+            selection_ = Selection{SelectionKind::Arrival, serverContent_.arrivals.size() - 1};
+            break;
+        }
         case SelectionKind::Teleporter: {
             if (i >= serverContent_.teleporters.size()) return;
             Teleporter copy = serverContent_.teleporters[i];
@@ -586,6 +638,26 @@ void ServerWorkspace::addServerObject(SelectionKind kind, ObjectKind objectKind)
     tr::Vec3 rayOrigin, rayDirection, point;
     ctx_.scene->viewRay(0.0f, 0.0f, rayOrigin, rayDirection);
     if (!ctx_.scene->groundPoint(rayOrigin, rayDirection, rayOrigin.y - 10.0f, point)) point = add(rayOrigin, scaled(rayDirection, 20.0f));
+    if (kind == SelectionKind::Arrival) {
+        // For the selected spawn pool, which must already be saved (the row needs its id).
+        if (selection_.kind != SelectionKind::SpawnPool || selection_.index >= serverContent_.spawnPools.size() ||
+            serverContent_.spawnPools[selection_.index].id <= 0) {
+            ctx_.setStatus("Select a saved spawn pool first: an arrival point needs its pool's database id.", true);
+            return;
+        }
+        const SpawnPool& pool = serverContent_.spawnPools[selection_.index];
+        beginEdit();
+        SpawnArrival a;
+        a.poolId = pool.id;
+        a.kind = 1;
+        a.position = point;
+        a.comment = "New arrival point";
+        serverContent_.arrivals.push_back(a);
+        selection_ = Selection{SelectionKind::Arrival, serverContent_.arrivals.size() - 1};
+        contentChanged();
+        ctx_.setStatus("Added an arrival point at the centre of the view (not saved yet).", false);
+        return;
+    }
     beginEdit();
     switch (kind) {
         case SelectionKind::SpawnPool: {
@@ -815,6 +887,58 @@ void ServerWorkspace::drawServerObjectEditor() {
                 }
                 ImGui::PopID();
             }
+            ImGui::SeparatorText("Arrival points");
+            int arrivals = 0;
+            for (size_t k = 0; k < serverContent_.arrivals.size(); ++k) {
+                if (serverContent_.arrivals[k].poolId != p.id || p.id <= 0) continue;
+                ++arrivals;
+                ImGui::PushID(int(1000 + k));
+                const std::string label = serverObjectLabel(Selection{SelectionKind::Arrival, k});
+                if (ImGui::Selectable(label.c_str(), false)) selection_ = Selection{SelectionKind::Arrival, k};
+                ImGui::PopID();
+            }
+            if (!arrivals) ImGui::TextDisabled("none: the creatures appear in the pool (or by its dropship setting)");
+            if (p.id <= 0) ImGui::TextDisabled("Save the pool before adding arrival points.");
+            else if (ImGui::SmallButton("Add arrival point")) addServerObject(SelectionKind::Arrival, ObjectKind::Footlocker);
+            break;
+        }
+        case SelectionKind::Arrival: {
+            if (i >= serverContent_.arrivals.size()) break;
+            SpawnArrival& a = serverContent_.arrivals[i];
+            ImGui::TextDisabled("id %lld", static_cast<long long>(a.id));
+            position("Position", a.position);
+            angle("Facing", a.rotation);
+            int32_t kindIndex = a.kind == 2 ? 1 : 0;
+            choice("Kind", kindIndex, {"dropship pad (1)", "Bane teleporter (2)"});
+            a.kind = kindIndex == 1 ? 2 : 1;
+            // The pool: any saved pool on this map.
+            char poolPreview[64];
+            std::snprintf(poolPreview, sizeof poolPreview, "spawn %lld", static_cast<long long>(a.poolId));
+            ImGui::SetNextItemWidth(fieldWidth);
+            if (ImGui::BeginCombo("Spawn pool", poolPreview, ImGuiComboFlags_HeightLarge)) {
+                for (size_t k = 0; k < serverContent_.spawnPools.size(); ++k) {
+                    const SpawnPool& pool = serverContent_.spawnPools[k];
+                    if (pool.id <= 0) continue;
+                    const std::string label = serverObjectLabel(Selection{SelectionKind::SpawnPool, k});
+                    if (ImGui::Selectable(label.c_str(), pool.id == a.poolId)) {
+                        noteEdit();
+                        a.poolId = pool.id;
+                        contentChanged();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            if (a.kind == 2) {
+                long long entity = a.entityId;
+                ImGui::SetNextItemWidth(fieldWidth);
+                if (ImGui::InputScalar("Teleporter entity id", ImGuiDataType_S64, &entity)) {
+                    noteEdit();
+                    a.entityId = entity;
+                    contentChanged();
+                }
+                ImGui::TextDisabled("The map's own entity id of the Bane teleporter switched on for the arrival.");
+            }
+            text("Comment", a.comment);
             break;
         }
         case SelectionKind::Teleporter: {
@@ -899,6 +1023,271 @@ void ServerWorkspace::drawServerObjectEditor() {
     if (ImGui::Button("Show in overview")) overview_.requestFocus();
     ImGui::SameLine();
     if (ImGui::Button("Show in viewport")) viewport_.focusOn(ctx_, selection_);
+}
+
+// ------------------------------------------------------------------------------------------
+// Creatures
+// ------------------------------------------------------------------------------------------
+void ServerWorkspace::reloadCreatureDefinitions() {
+    creatureDefs_ = database_ ? database_->creatureDefinitions() : std::vector<CreatureDefinition>{};
+    creatureDefsSaved_ = creatureDefs_;
+}
+
+bool ServerWorkspace::creaturesChanged() const {
+    if (creatureDefs_.size() != creatureDefsSaved_.size()) return true;
+    for (size_t k = 0; k < creatureDefs_.size(); ++k)
+        if (!sameCreatureDefinition(creatureDefs_[k], creatureDefsSaved_[k])) return true;
+    return false;
+}
+
+bool ServerWorkspace::saveCreatures() {
+    if (!database_ || database_->readOnly()) return false;
+    WorldDatabase::SaveSummary summary;
+    std::string error;
+    if (!database_->saveCreatures(creatureDefsSaved_, creatureDefs_, summary, error)) {
+        ctx_.setStatus("Saving creatures failed, nothing was written: " + error, true);
+        return false;
+    }
+    reloadCreatureDefinitions();
+    if (ctx_.scene) ctx_.scene->refreshServerContent();               // avatars follow the new appearance
+    ctx_.setStatus("Creatures saved: " + std::to_string(summary.inserted) + " added, " + std::to_string(summary.updated) + " changed, " +
+                       std::to_string(summary.deleted) + " deleted. Restart the server to apply.",
+                   false);
+    return true;
+}
+
+std::string ServerWorkspace::creatureLabel(const CreatureDefinition& d) const {
+    const Creature& c = d.creature;
+    std::string name;
+    if (ctx_.gameData && c.nameId > 0) {
+        try { name = ctx_.gameData->creatureName(c.nameId); } catch (const std::exception&) {}
+    }
+    char text[256];
+    std::snprintf(text, sizeof text, "%d  %s%s%s  (lvl %d, %s)", c.id, c.comment.c_str(), name.empty() || name == c.comment ? "" : "  \"",
+                  name.empty() || name == c.comment ? "" : (name + "\"").c_str(), c.level, creatureFactionName(c.faction));
+    return text;
+}
+
+void ServerWorkspace::drawCreaturePanel() {
+    if (!ImGui::Begin("Creatures###Server.Creatures")) { ImGui::End(); return; }
+    if (!database_) {
+        ImGui::TextDisabled("Open a server database first.");
+        ImGui::End();
+        return;
+    }
+    const bool writable = !database_->readOnly();
+    const bool changed = creaturesChanged();
+    if (writable) {
+        if (ImGui::Button("New")) {
+            CreatureDefinition d;
+            for (const CreatureDefinition& existing : creatureDefs_)
+                if (existing.creature.id == creatureSelected_) d = existing;          // start from the selected creature
+            int32_t next = 1;
+            for (const CreatureDefinition& existing : creatureDefs_) next = std::max(next, existing.creature.id + 1);
+            d.creature.id = next;
+            d.creature.comment = d.creature.comment.empty() ? "New creature" : d.creature.comment + " (copy)";
+            creatureDefs_.push_back(d);
+            creatureSelected_ = next;
+        }
+        ImGui::SetItemTooltip("Adds a creature (a copy of the selected one) with the next free id; set its id before saving if needed.");
+        ImGui::SameLine();
+        if (!changed) ImGui::BeginDisabled();
+        if (ImGui::Button("Save creatures")) saveCreatures();
+        ImGui::SameLine();
+        if (ImGui::Button("Revert")) {
+            creatureDefs_ = creatureDefsSaved_;
+            ctx_.setStatus("Creature edits reverted.", false);
+        }
+        if (!changed) ImGui::EndDisabled();
+    } else {
+        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.4f, 1.0f), "Read-only database.");
+    }
+    ImGui::SameLine();
+    ImGui::Checkbox("On this map", &creatureMapOnly_);
+    ImGui::SetItemTooltip("Only creatures used by this map's spawn pools.");
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    ImGui::InputTextWithHint("##creaturelistfilter", "filter by id, comment or name", creatureListFilter_, sizeof creatureListFilter_);
+    const std::string needle = tr::toLowerAscii(creatureListFilter_);
+    std::set<int32_t> onMap;
+    for (const SpawnPool& p : serverContent_.spawnPools)
+        for (int k = 0; k < 6; ++k)
+            if (spawnSlot(p, k).creatureId > 0) onMap.insert(spawnSlot(p, k).creatureId);
+    if (ImGui::BeginChild("creaturelist", ImVec2(0, ImGui::GetContentRegionAvail().y * 0.35f), ImGuiChildFlags_Borders)) {
+        ImGuiListClipper clipper;
+        std::vector<size_t> shown;
+        for (size_t k = 0; k < creatureDefs_.size(); ++k) {
+            if (creatureMapOnly_ && !onMap.count(creatureDefs_[k].creature.id)) continue;
+            if (!needle.empty() && tr::toLowerAscii(creatureLabel(creatureDefs_[k])).find(needle) == std::string::npos) continue;
+            shown.push_back(k);
+        }
+        clipper.Begin(int(shown.size()));
+        while (clipper.Step())
+            for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
+                const CreatureDefinition& d = creatureDefs_[shown[size_t(row)]];
+                ImGui::PushID(row);
+                bool modified = true;
+                for (const CreatureDefinition& s : creatureDefsSaved_)
+                    if (s.creature.id == d.creature.id) modified = !sameCreatureDefinition(s, d);
+                const std::string label = (modified ? "* " : "") + creatureLabel(d);
+                if (ImGui::Selectable(label.c_str(), d.creature.id == creatureSelected_)) creatureSelected_ = d.creature.id;
+                ImGui::PopID();
+            }
+    }
+    ImGui::EndChild();
+    CreatureDefinition* selected = nullptr;
+    for (CreatureDefinition& d : creatureDefs_)
+        if (d.creature.id == creatureSelected_) selected = &d;
+    if (!selected) {
+        ImGui::TextDisabled("Select a creature.");
+    } else {
+        bool isNew = true;
+        for (const CreatureDefinition& s : creatureDefsSaved_)
+            if (s.creature.id == selected->creature.id) isNew = false;
+        if (ImGui::BeginChild("creatureeditor")) {
+            if (!writable) ImGui::BeginDisabled();
+            drawCreatureEditor(*selected, isNew);
+            if (!writable) ImGui::EndDisabled();
+        }
+        ImGui::EndChild();
+    }
+    ImGui::End();
+}
+
+void ServerWorkspace::drawCreatureEditor(CreatureDefinition& d, bool isNew) {
+    Creature& c = d.creature;
+    const float fieldWidth = ImGui::GetFontSize() * 12;
+    auto integer = [&](const char* label, int32_t& value) {
+        int v = value;
+        ImGui::SetNextItemWidth(fieldWidth);
+        if (ImGui::InputInt(label, &v)) value = v;
+    };
+    if (isNew) {
+        int32_t id = c.id;
+        integer("Id (new)", id);
+        if (id != c.id && id > 0) {
+            bool taken = false;
+            for (const CreatureDefinition& other : creatureDefs_) taken = taken || (&other != &d && other.creature.id == id);
+            if (!taken) {
+                c.id = id;
+                creatureSelected_ = id;
+            }
+        }
+    } else {
+        ImGui::TextDisabled("id %d", c.id);
+    }
+    {
+        char buffer[64];
+        std::snprintf(buffer, sizeof buffer, "%s", c.comment.c_str());
+        ImGui::SetNextItemWidth(fieldWidth * 1.5f);
+        if (ImGui::InputText("Comment", buffer, 51)) c.comment = buffer;          // varchar(50)
+    }
+    integer("Name id", c.nameId);
+    ImGui::SameLine();
+    {
+        std::string name;
+        if (ctx_.gameData && c.nameId > 0) {
+            try { name = ctx_.gameData->creatureName(c.nameId); } catch (const std::exception&) {}
+        }
+        ImGui::TextDisabled("%s", c.nameId <= 0 ? "(none: the server names it)" : name.empty() ? "(not in creaturenamelanguage)" : name.c_str());
+    }
+    integer("Class", c.classId);
+    ImGui::SameLine();
+    {
+        const ClassInfo& info = ctx_.classInfo(c.classId);
+        ImGui::TextDisabled("%s", info.known ? info.name.c_str() : "(unknown class)");
+        if (info.known && !info.mesh.empty()) ImGui::SetItemTooltip("%s", info.mesh.c_str());
+    }
+    {
+        int faction = std::clamp(c.faction, 0, 6);
+        ImGui::SetNextItemWidth(fieldWidth);
+        if (ImGui::Combo("Faction", &faction, "hostile\0friendly\0object\0neutral\0decoration\0decoration proxy\0ignore\0")) c.faction = faction;
+    }
+    integer("Level", c.level);
+    integer("Max HP", c.maxHp);
+    integer("Run speed", c.runSpeed);
+    integer("Walk speed", c.walkSpeed);
+    ImGui::SeparatorText("Actions (creature_action)");
+    const std::vector<CreatureAction>& actions = database_->creatureActions();
+    for (int k = 0; k < 8; ++k) {
+        int32_t& action = creatureAction(c, k);
+        char preview[160] = "(none)";
+        for (const CreatureAction& a : actions)
+            if (a.id == action) std::snprintf(preview, sizeof preview, "%d  %s", a.id, a.description.c_str());
+        if (action != 0 && std::strcmp(preview, "(none)") == 0) std::snprintf(preview, sizeof preview, "%d (not in creature_action)", action);
+        char label[16];
+        std::snprintf(label, sizeof label, "Action %d", k + 1);
+        ImGui::SetNextItemWidth(fieldWidth * 1.6f);
+        if (ImGui::BeginCombo(label, preview, ImGuiComboFlags_HeightLarge)) {
+            if (ImGui::Selectable("(none)", action == 0)) action = 0;
+            for (const CreatureAction& a : actions) {
+                char item[200];
+                std::snprintf(item, sizeof item, "%d  %s  (damage %d-%d, range %.1f-%.1f m, cooldown %d ms)", a.id, a.description.c_str(), a.minDamage,
+                              a.maxDamage, a.rangeMin, a.rangeMax, a.cooldown);
+                if (ImGui::Selectable(item, a.id == action)) action = a.id;
+            }
+            ImGui::EndCombo();
+        }
+    }
+    ImGui::SeparatorText("Attributes (creature_stat)");
+    ImGui::Checkbox("Has a creature_stat row", &d.hasStat);
+    if (d.hasStat) {
+        integer("Body", d.stat.body);
+        integer("Mind", d.stat.mind);
+        integer("Spirit", d.stat.spirit);
+        integer("Health", d.stat.health);
+        integer("Armor", d.stat.armor);
+    } else {
+        ImGui::TextDisabled("The server uses its defaults.");
+    }
+    ImGui::SeparatorText("Appearance (creature_appearance)");
+    int remove = -1;
+    for (size_t k = 0; k < d.appearance.size(); ++k) {
+        AppearanceSlot& slot = d.appearance[k];
+        ImGui::PushID(int(k));
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 4);
+        int slotId = slot.slotId;
+        if (ImGui::InputInt("##slot", &slotId, 0)) slot.slotId = slotId;
+        ImGui::SameLine();
+        ImGui::TextDisabled("%-8s", equipmentSlotName(slot.slotId));
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 5);
+        int classId = slot.classId;
+        if (ImGui::InputInt("##class", &classId, 0)) slot.classId = classId;
+        ImGui::SetItemTooltip("%s", ctx_.classInfo(slot.classId).name.c_str());
+        ImGui::SameLine();
+        // ABGR, red in the low byte.
+        float colour[4] = {float(slot.colour & 0xFF) / 255.0f, float((slot.colour >> 8) & 0xFF) / 255.0f, float((slot.colour >> 16) & 0xFF) / 255.0f,
+                           float((slot.colour >> 24) & 0xFF) / 255.0f};
+        if (ImGui::ColorEdit4("##colour", colour, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar)) {
+            auto byte = [](float v) { return uint32_t(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f); };
+            slot.colour = byte(colour[0]) | (byte(colour[1]) << 8) | (byte(colour[2]) << 16) | (byte(colour[3]) << 24);
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("%08x", slot.colour);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Remove")) remove = int(k);
+        ImGui::PopID();
+    }
+    if (remove >= 0) d.appearance.erase(d.appearance.begin() + remove);
+    if (ImGui::SmallButton("Add slot")) d.appearance.push_back(AppearanceSlot{15, 0, 0});
+    std::sort(d.appearance.begin(), d.appearance.end(), [](const AppearanceSlot& a, const AppearanceSlot& b) { return a.slotId < b.slotId; });
+    ImGui::TextDisabled("The viewport shows saved appearances (avatars are built from the database).");
+    ImGui::SeparatorText("Used on this map");
+    int uses = 0;
+    for (size_t k = 0; k < serverContent_.spawnPools.size(); ++k) {
+        const SpawnPool& p = serverContent_.spawnPools[k];
+        bool uses_ = false;
+        for (int s = 0; s < 6; ++s) uses_ = uses_ || spawnSlot(p, s).creatureId == c.id;
+        if (!uses_) continue;
+        ++uses;
+        ImGui::PushID(int(10000 + k));
+        if (ImGui::Selectable(serverObjectLabel(Selection{SelectionKind::SpawnPool, k}).c_str())) {
+            selection_ = Selection{SelectionKind::SpawnPool, k};
+            viewport_.focusOn(ctx_, selection_);
+        }
+        ImGui::PopID();
+    }
+    if (!uses) ImGui::TextDisabled("No spawn pool on this map uses it.");
 }
 
 void ServerWorkspace::handleShortcuts() {

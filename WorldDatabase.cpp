@@ -55,6 +55,14 @@ const SpawnSlot& spawnSlot(const SpawnPool& pool, int index) {
 
 SpawnSlot& spawnSlot(SpawnPool& pool, int index) { return const_cast<SpawnSlot&>(spawnSlot(static_cast<const SpawnPool&>(pool), index)); }
 
+const char* arrivalKindName(int32_t kind) {
+    switch (kind) {
+        case 1: return "dropship pad";
+        case 2: return "Bane teleporter";
+        default: return "unknown kind";
+    }
+}
+
 const char* spawnModeName(int32_t mode) {
     switch (mode) {
         case 0: return "automatic";
@@ -143,11 +151,12 @@ std::vector<std::pair<std::string, int64_t>> WorldDatabase::tableCounts() const 
     return counts;
 }
 
-void WorldDatabase::loadGlobals() {
-    if (requireColumns("map_info", {"map_context_id", "map_name", "map_version", "base_region"})) {
-        Statement s(db_, "SELECT map_context_id, map_name, map_version, base_region FROM map_info ORDER BY map_name");
-        while (s.step()) maps_.push_back(MapInfo{s.int32(0), s.text(1), s.int32(2), s.int32(3)});
-    }
+void WorldDatabase::loadCreatures() {
+    creatureList_.clear();
+    creatures_.clear();
+    appearances_.clear();
+    stats_.clear();
+    actions_.clear();
     if (requireColumns("creature", {"id", "comment", "class_id", "faction", "level", "max_hp", "name_id", "run_speed", "walk_speed"})) {
         Statement s(db_, "SELECT id, comment, class_id, faction, level, max_hp, name_id, run_speed, walk_speed FROM creature");
         while (s.step()) {
@@ -170,6 +179,35 @@ void WorldDatabase::loadGlobals() {
         Statement s(db_, "SELECT id, slot_id, class_id, color FROM creature_appearance ORDER BY id, slot_id");
         while (s.step()) appearances_[s.int32(0)].push_back(AppearanceSlot{s.int32(1), s.int32(2), uint32_t(s.integer(3))});
     }
+    if (requireColumns("creature", {"action1", "action2", "action3", "action4", "action5", "action6", "action7", "action8"})) {
+        Statement s(db_, "SELECT id, action1, action2, action3, action4, action5, action6, action7, action8 FROM creature");
+        while (s.step()) {
+            const auto it = creatures_.find(s.int32(0));
+            if (it == creatures_.end()) continue;
+            for (int k = 0; k < 8; ++k) creatureAction(it->second, k) = s.int32(1 + k);
+        }
+        for (Creature& c : creatureList_) c = creatures_[c.id];
+    }
+    if (requireColumns("creature_stat", {"id", "body", "mind", "spirit", "health", "armor"})) {
+        Statement s(db_, "SELECT id, body, mind, spirit, health, armor FROM creature_stat");
+        while (s.step()) stats_[s.int32(0)] = CreatureStat{s.int32(1), s.int32(2), s.int32(3), s.int32(4), s.int32(5)};
+    }
+    if (requireColumns("creature_action", {"id", "description", "action_id", "action_arg_id", "range_min", "range_max", "cooldown", "windup",
+                                           "min_damage", "max_damage", "damage_type"})) {
+        Statement s(db_, "SELECT id, description, action_id, action_arg_id, range_min, range_max, cooldown, windup, min_damage, max_damage, damage_type "
+                         "FROM creature_action ORDER BY id");
+        while (s.step())
+            actions_.push_back(CreatureAction{s.int32(0), s.text(1), s.int32(2), s.int32(3), s.real(4), s.real(5), s.int32(6), s.int32(7), s.int32(8),
+                                              s.int32(9), s.int32(10)});
+    }
+}
+
+void WorldDatabase::loadGlobals() {
+    if (requireColumns("map_info", {"map_context_id", "map_name", "map_version", "base_region"})) {
+        Statement s(db_, "SELECT map_context_id, map_name, map_version, base_region FROM map_info ORDER BY map_name");
+        while (s.step()) maps_.push_back(MapInfo{s.int32(0), s.text(1), s.int32(2), s.int32(3)});
+    }
+    loadCreatures();
     if (requireColumns("entityclass", {"id", "aug_list"})) {
         Statement s(db_, "SELECT id, aug_list FROM entityclass");
         while (s.step()) {
@@ -195,6 +233,205 @@ int32_t WorldDatabase::contextIdForMap(const std::string& mapName) const {
     for (const MapInfo& m : maps_)
         if (lower(m.name) == wanted) return m.mapContextId;
     return -1;
+}
+
+int32_t creatureAction(const Creature& c, int index) {
+    switch (index) {
+        case 0: return c.action1;
+        case 1: return c.action2;
+        case 2: return c.action3;
+        case 3: return c.action4;
+        case 4: return c.action5;
+        case 5: return c.action6;
+        case 6: return c.action7;
+        default: return c.action8;
+    }
+}
+
+int32_t& creatureAction(Creature& c, int index) {
+    switch (index) {
+        case 0: return c.action1;
+        case 1: return c.action2;
+        case 2: return c.action3;
+        case 3: return c.action4;
+        case 4: return c.action5;
+        case 5: return c.action6;
+        case 6: return c.action7;
+        default: return c.action8;
+    }
+}
+
+const char* creatureFactionName(int32_t faction) {
+    switch (faction) {
+        case 0: return "hostile";
+        case 1: return "friendly";
+        case 2: return "object";
+        case 3: return "neutral";
+        case 4: return "decoration";
+        case 5: return "decoration proxy";
+        case 6: return "ignore";
+        default: return "(hostile)";
+    }
+}
+
+const char* equipmentSlotName(int32_t slot) {
+    switch (slot) {
+        case 1: return "Helmet";
+        case 2: return "Shoes";
+        case 3: return "Gloves";
+        case 13: return "Weapon";
+        case 14: return "Hair";
+        case 15: return "Torso";
+        case 16: return "Legs";
+        case 17: return "Face";
+        case 18: return "Wing";
+        case 19: return "Eyewear";
+        case 20: return "Beard";
+        case 21: return "Mask";
+        default: return "";
+    }
+}
+
+bool sameCreatureDefinition(const CreatureDefinition& a, const CreatureDefinition& b) {
+    const Creature& x = a.creature;
+    const Creature& y = b.creature;
+    if (x.id != y.id || x.comment != y.comment || x.classId != y.classId || x.faction != y.faction || x.level != y.level || x.maxHp != y.maxHp ||
+        x.nameId != y.nameId || x.runSpeed != y.runSpeed || x.walkSpeed != y.walkSpeed)
+        return false;
+    for (int k = 0; k < 8; ++k)
+        if (creatureAction(x, k) != creatureAction(y, k)) return false;
+    if (a.hasStat != b.hasStat) return false;
+    if (a.hasStat && (a.stat.body != b.stat.body || a.stat.mind != b.stat.mind || a.stat.spirit != b.stat.spirit || a.stat.health != b.stat.health ||
+                      a.stat.armor != b.stat.armor))
+        return false;
+    if (a.appearance.size() != b.appearance.size()) return false;
+    for (size_t k = 0; k < a.appearance.size(); ++k)
+        if (a.appearance[k].slotId != b.appearance[k].slotId || a.appearance[k].classId != b.appearance[k].classId ||
+            a.appearance[k].colour != b.appearance[k].colour)
+            return false;
+    return true;
+}
+
+const CreatureStat* WorldDatabase::creatureStat(int32_t creatureId) const {
+    const auto it = stats_.find(creatureId);
+    return it == stats_.end() ? nullptr : &it->second;
+}
+
+std::vector<CreatureDefinition> WorldDatabase::creatureDefinitions() const {
+    std::vector<CreatureDefinition> out;
+    out.reserve(creatureList_.size());
+    for (const Creature& c : creatureList_) {
+        CreatureDefinition d;
+        d.creature = c;
+        if (const CreatureStat* stat = creatureStat(c.id)) {
+            d.hasStat = true;
+            d.stat = *stat;
+        }
+        d.appearance = appearance(c.id);
+        out.push_back(std::move(d));
+    }
+    return out;
+}
+
+bool WorldDatabase::saveCreatures(const std::vector<CreatureDefinition>& saved, const std::vector<CreatureDefinition>& edited, SaveSummary& summary,
+                                  std::string& error) {
+    summary = SaveSummary{};
+    if (readOnly_) {
+        error = "the database was opened read-only";
+        return false;
+    }
+    try {
+        execute("BEGIN IMMEDIATE");
+    } catch (const std::exception& e) {
+        error = std::string("cannot start a transaction (is the server writing to the database?): ") + e.what();
+        return false;
+    }
+    try {
+        std::unordered_map<int32_t, const CreatureDefinition*> before;
+        for (const CreatureDefinition& d : saved) before[d.creature.id] = &d;
+        std::set<int32_t> ids;
+        for (const CreatureDefinition& d : edited) {
+            const Creature& c = d.creature;
+            if (c.id <= 0) throw std::runtime_error("creature id " + std::to_string(c.id) + " is not valid");
+            if (!ids.insert(c.id).second) throw std::runtime_error("creature id " + std::to_string(c.id) + " is used twice");
+            const auto found = before.find(c.id);
+            const CreatureDefinition* b = found == before.end() ? nullptr : found->second;
+            if (b && sameCreatureDefinition(*b, d)) continue;
+            const bool creatureChanged = !b || c.comment != b->creature.comment || c.classId != b->creature.classId ||
+                                         c.faction != b->creature.faction || c.level != b->creature.level || c.maxHp != b->creature.maxHp ||
+                                         c.nameId != b->creature.nameId || c.runSpeed != b->creature.runSpeed || c.walkSpeed != b->creature.walkSpeed ||
+                                         [&] {
+                                             for (int k = 0; k < 8; ++k)
+                                                 if (creatureAction(c, k) != creatureAction(b->creature, k)) return true;
+                                             return false;
+                                         }();
+            if (creatureChanged) {
+                Statement s(db_, b ? "UPDATE creature SET comment = ?2, class_id = ?3, faction = ?4, level = ?5, max_hp = ?6, name_id = ?7, run_speed = ?8, "
+                                     "walk_speed = ?9, action1 = ?10, action2 = ?11, action3 = ?12, action4 = ?13, action5 = ?14, action6 = ?15, "
+                                     "action7 = ?16, action8 = ?17 WHERE id = ?1"
+                                   : "INSERT INTO creature (id, comment, class_id, faction, level, max_hp, name_id, run_speed, walk_speed, action1, action2, "
+                                     "action3, action4, action5, action6, action7, action8) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, "
+                                     "?13, ?14, ?15, ?16, ?17)");
+                s.bindInt(1, c.id);
+                s.bindText(2, c.comment);
+                s.bindInt(3, c.classId);
+                s.bindInt(4, c.faction);
+                s.bindInt(5, c.level);
+                s.bindInt(6, c.maxHp);
+                s.bindInt(7, c.nameId);
+                s.bindInt(8, c.runSpeed);
+                s.bindInt(9, c.walkSpeed);
+                for (int k = 0; k < 8; ++k) s.bindInt(10 + k, creatureAction(c, k));
+                s.run(db_);
+                ++(b ? summary.updated : summary.inserted);
+            }
+            const bool hadStat = b && b->hasStat;
+            if (d.hasStat && (!hadStat || d.stat.body != b->stat.body || d.stat.mind != b->stat.mind || d.stat.spirit != b->stat.spirit ||
+                              d.stat.health != b->stat.health || d.stat.armor != b->stat.armor)) {
+                Statement s(db_, hadStat ? "UPDATE creature_stat SET body = ?2, mind = ?3, spirit = ?4, health = ?5, armor = ?6 WHERE id = ?1"
+                                         : "INSERT INTO creature_stat (id, body, mind, spirit, health, armor) VALUES (?1, ?2, ?3, ?4, ?5, ?6)");
+                s.bindInt(1, c.id);
+                s.bindInt(2, d.stat.body);
+                s.bindInt(3, d.stat.mind);
+                s.bindInt(4, d.stat.spirit);
+                s.bindInt(5, d.stat.health);
+                s.bindInt(6, d.stat.armor);
+                s.run(db_);
+                ++(hadStat ? summary.updated : summary.inserted);
+            } else if (!d.hasStat && hadStat) {
+                Statement s(db_, "DELETE FROM creature_stat WHERE id = ?1");
+                s.bindInt(1, c.id);
+                s.run(db_);
+                ++summary.deleted;
+            }
+            bool appearanceChanged = !b || b->appearance.size() != d.appearance.size();
+            for (size_t k = 0; !appearanceChanged && k < d.appearance.size(); ++k)
+                appearanceChanged = d.appearance[k].slotId != b->appearance[k].slotId || d.appearance[k].classId != b->appearance[k].classId ||
+                                    d.appearance[k].colour != b->appearance[k].colour;
+            if (appearanceChanged) {                     // the rows have no key of their own: replace the creature's set
+                Statement del(db_, "DELETE FROM creature_appearance WHERE id = ?1");
+                del.bindInt(1, c.id);
+                del.run(db_);
+                for (const AppearanceSlot& slot : d.appearance) {
+                    Statement s(db_, "INSERT INTO creature_appearance (id, slot_id, Class_id, color) VALUES (?1, ?2, ?3, ?4)");
+                    s.bindInt(1, c.id);
+                    s.bindInt(2, slot.slotId);
+                    s.bindInt(3, slot.classId);
+                    s.bindInt(4, int64_t(slot.colour));
+                    s.run(db_);
+                }
+                ++summary.updated;
+            }
+        }
+        execute("COMMIT");
+    } catch (const std::exception& e) {
+        error = e.what();
+        try { execute("ROLLBACK"); } catch (const std::exception&) {}
+        summary = SaveSummary{};
+        return false;
+    }
+    loadCreatures();
+    return true;
 }
 
 const Creature* WorldDatabase::creature(int32_t id) const {
@@ -348,6 +585,11 @@ bool same(const SpawnPool& a, const SpawnPool& b) {
     return a.mode == b.mode && a.animType == b.animType && a.respawnTime == b.respawnTime && sameVec(a.position, b.position) &&
            a.rotation == b.rotation && a.radius == b.radius;
 }
+bool same(const SpawnArrival& a, const SpawnArrival& b) {
+    return a.poolId == b.poolId && a.kind == b.kind && sameVec(a.position, b.position) && a.rotation == b.rotation && a.entityId == b.entityId &&
+           a.comment == b.comment;
+}
+
 bool same(const Teleporter& a, const Teleporter& b) {
     return a.classId == b.classId && a.type == b.type && a.description == b.description && sameVec(a.position, b.position) && a.rotation == b.rotation;
 }
@@ -467,6 +709,34 @@ bool WorldDatabase::save(const WorldContent& saved, const WorldContent& edited, 
                 s.run(db_);
                 ++summary.updated;
             }
+        }
+
+        // Spawn arrival points (those of deleted pools are already gone).
+        for (int64_t id : deletedIds(saved.arrivals, edited.arrivals)) {
+            Statement s(db_, "DELETE FROM spawnpool_arrival WHERE id = ?1");
+            s.bindInt(1, id);
+            s.run(db_);
+            ++summary.deleted;
+        }
+        for (const SpawnArrival& a : edited.arrivals) {
+            const SpawnArrival* before = a.id ? findById(saved.arrivals, a.id) : nullptr;
+            if (a.id != 0 && (!before || same(*before, a))) continue;
+            if (a.poolId <= 0) continue;                                    // only pools that have a database id
+            Statement s(db_, a.id == 0 ? "INSERT INTO spawnpool_arrival (pool_id, kind, pos_x, pos_y, pos_z, rotation, entity_id, comment) "
+                                         "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+                                       : "UPDATE spawnpool_arrival SET pool_id = ?1, kind = ?2, pos_x = ?3, pos_y = ?4, pos_z = ?5, rotation = ?6, "
+                                         "entity_id = ?7, comment = ?8 WHERE id = ?9");
+            s.bindInt(1, a.poolId);
+            s.bindInt(2, a.kind);
+            s.bindReal(3, a.position.x);
+            s.bindReal(4, a.position.y);
+            s.bindReal(5, a.position.z);
+            s.bindReal(6, a.rotation);
+            s.bindInt(7, a.entityId);
+            s.bindText(8, a.comment);
+            if (a.id != 0) s.bindInt(9, a.id);
+            s.run(db_);
+            ++(a.id == 0 ? summary.inserted : summary.updated);
         }
 
         // Teleporters.

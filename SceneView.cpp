@@ -2096,6 +2096,14 @@ void SceneView::queueDraws(const Selection& selection) {
             ring.row2 = {0, 0, s.ringRadius, s.position.z};
             renderer_.draw(unitCircle_, ring, colour, false);
         }
+        if (s.linked) {                                 // pole_ (0..1 along +y) stretched from the marker to its target
+            const tr::Vec3 d = subtract(s.linkTarget, s.position);
+            Mat4 line = identityMatrix();
+            line.row0 = {1, d.x, 0, s.position.x};
+            line.row1 = {0, d.y, 0, s.position.y + 0.3f};
+            line.row2 = {0, d.z, 1, s.position.z};
+            renderer_.draw(pole_, line, colour, false);
+        }
         if (s.facing) {
             Mat4 arrow = s.world;                       // yaw placement scaled to 3 m, raised slightly
             arrow.row0 = {arrow.row0.x * 3, arrow.row0.y * 3, arrow.row0.z * 3, arrow.row0.w};
@@ -2533,6 +2541,22 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
         s.world = yawPlacement(l.position, 0);
         s.colour = l.enabled ? markerColour::mapLink : markerColour::mapLinkDisabled;
         s.ringRadius = std::max(l.radius, 1.0f);
+        serverPlacements_.push_back(s);
+    }
+    for (size_t k = 0; k < content->arrivals.size(); ++k) {
+        const SpawnArrival& a = content->arrivals[k];
+        ServerPlacement s;
+        s.selection = Selection{SelectionKind::Arrival, k};
+        s.position = a.position;
+        s.world = yawPlacement(a.position, a.rotation);
+        s.colour = markerColour::arrival;
+        s.ringRadius = 1.0f;
+        s.facing = true;
+        for (const SpawnPool& pool : content->spawnPools)
+            if (pool.id == a.poolId) {
+                s.linked = true;
+                s.linkTarget = pool.position;
+            }
         serverPlacements_.push_back(s);
     }
     for (size_t k = 0; k < content->regions.size(); ++k) {
