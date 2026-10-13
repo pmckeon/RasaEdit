@@ -74,6 +74,28 @@ struct SpawnArrival {
     std::string comment;
 };
 
+// spawnpool_patrol (Rasa.NET upstream SpawnPoolPatrolEntry, walked by Managers.Patrols): a pool's creature walks the steps
+// from the lowest step number up, in straight lines (heights included, not on the navmesh: the positions are floor heights),
+// and from the last back to the first. At a step it turns to `facing` (yaw radians, same convention as spawnpool.rotation)
+// when it has one, stands `pauseMs`, then walks on. A pool without rows has no patrol; one creature to a beat; a creature
+// without a walk speed has none; a pool with a patrol has no pose. Key (pool_id, step).
+struct PatrolStep {
+    int64_t poolId = 0;
+    int32_t step = 0;
+    tr::Vec3 position;
+    bool hasFacing = false;              // facing NULL: keeps facing the way it came
+    float facing = 0;
+    int32_t pauseMs = 0;
+};
+// spawnpool_pose (Rasa.NET upstream SpawnPoolPoseEntry / Data.NpcPose): how a pool's creatures stand at their post; a pool
+// without a row has no pose. 0 None, 1 Standing, 2 WeaponOut, 3 Crouched, 4 CrouchedWeaponOut, 5 Leaning, 6 Sitting,
+// 7 LyingDown, 8 AtConsole, 9 HandTool (5-9: the client's ambient animations, humans only; 8 / 9 female skeleton only).
+const char* npcPoseName(int32_t pose);
+struct PoolPose {
+    int64_t poolId = 0;
+    int32_t pose = 0;
+};
+
 struct Creature {
     int32_t id = 0;
     std::string comment;                 // usually a readable name, e.g. "Council Elder Moawi"
@@ -184,8 +206,34 @@ struct MissionArea {
 };
 
 // Other placed objects with an entity class: Logos stones, control points, footlockers, Kraftwerks.
-enum class ObjectKind : uint8_t { Logos, ControlPoint, Footlocker, Kraftwerk };
+// AmbientNpc, WorldUsable and WorldDestructible are Rasa.NET upstream tables (ambient_npc, world_usable, world_destructible;
+// absent on older worlds): server-placed objects no .map places. Their yaw is sent as the other objects' is
+// (WorldLocationDescriptorPacket: Quaternion.CreateFromYawPitchRoll(rotation, 0, 0)).
+enum class ObjectKind : uint8_t { Logos, ControlPoint, Footlocker, Kraftwerk, AmbientNpc, WorldUsable, WorldDestructible };
 const char* objectKindName(ObjectKind kind);
+
+// world_usable columns (Rasa.NET WorldUsableEntry; 0 in a number column = the kind's default).
+struct UsableSettings {
+    int64_t state = 0;                   // the usable state it starts in (UseObjectState); 0 = its kind's
+    int64_t usable = 0;                  // 1: a player may use it
+    int64_t itemTemplateId = 0;          // an item dispenser's item (itemtemplate.id)
+    int64_t itemClassId = 0;             // the item an acceptor takes / a bomb is armed with (entity class)
+    int64_t itemCount = 0;               // given or taken; 0 = one
+    int64_t resetSeconds = 0;            // until it is back as it was (0 for a door or a switch: stays as left)
+    int64_t intervalMinSeconds = 0;      // a random explosion's shortest wait, or a bomb's fuse
+    int64_t intervalMaxSeconds = 0;      // a random explosion's longest wait
+    int64_t damageMin = 0;               // a blast's least damage to each player it reaches
+    int64_t damageMax = 0;
+    float radius = 0;                    // how far a blast reaches (m)
+    int64_t actionArg = 0;               // OBJ_DAMAGE arg: 1 small explosion, 2 large, 3 lightning, 4 mine, 5 bomb, 6 geyser, 7 hornito
+};
+// world_destructible columns (Rasa.NET WorldDestructibleEntry; 0 = the class's own default).
+struct DestructibleSettings {
+    int64_t hitPoints = 0;
+    int64_t creatureId = 0;              // a creature spawner's creature (creature.id)
+    int64_t creatureCount = 0;           // how many come out at a time
+    int64_t side = 0;                    // a force field's side: 0 the class's default (Bane's), 1 AFS, 2 Bane
+};
 
 struct PlacedObject {
     ObjectKind kind = ObjectKind::Logos;
@@ -195,6 +243,22 @@ struct PlacedObject {
     tr::Vec3 position;
     float rotation = 0;
     std::string name;                    // name or comment column
+    UsableSettings usable;               // WorldUsable only
+    DestructibleSettings destructible;   // WorldDestructible only
+};
+
+// wormhole_lock (Rasa.NET upstream WormholeLockEntry, Managers.Wormholes): a condition on travelling between world wormholes
+// (teleporter rows of type 3). A row matches a trip from fromTeleporterId to toTeleporterId (0 = any wormhole); every
+// matching row must be met. kind 1: the player has taken mission `value` at least once; kind 2: level `value` (not enforced
+// yet by the server: logged, the trip is open). Not tied to one map: every row is loaded with each map.
+struct WormholeLock {
+    int64_t id = 0;
+    int64_t fromTeleporterId = 0;
+    int64_t toTeleporterId = 0;
+    int64_t kind = 1;
+    int64_t value = 0;
+    bool hasComment = false;             // comment NULL
+    std::string comment;
 };
 
 // One creature as the editor edits it: its creature row, its creature_stat row (if any) and its appearance slots.
@@ -213,6 +277,9 @@ struct CreatureDefinition {
     std::string npcPackageComment;
     bool hasGreeting = false;
     int32_t greetingId = 0;
+    // npc_greeting.important (Rasa.NET upstream 2026-11): the line shows the speech bubble over the NPC until the character
+    // has read it (NpcGreetings.IsUnread). Kept as false / not written on worlds without the column.
+    bool greetingImportant = false;
     bool hasActorName = false;
     std::string actorName;
     bool hasVendor = false;
@@ -233,11 +300,14 @@ struct WorldContent {
     int32_t mapContextId = -1;
     std::vector<SpawnPool> spawnPools;
     std::vector<SpawnArrival> arrivals;  // of those pools
+    std::vector<PatrolStep> patrolSteps; // of those pools, sorted by pool then step (empty on worlds without the table)
+    std::vector<PoolPose> poses;         // of those pools
     std::vector<Teleporter> teleporters;
     std::vector<MapLink> mapLinks;
     std::vector<MapRegion> regions;
     std::vector<MissionArea> missionAreas;
     std::vector<PlacedObject> objects;
+    std::vector<WormholeLock> wormholeLocks;   // all rows (empty on worlds without the table)
 };
 
 // A database value as SQLite stores it (dynamic typing kept), for tables edited generically (missions).
@@ -314,8 +384,11 @@ public:
     bool saveCreatures(const std::vector<CreatureDefinition>& saved, const std::vector<CreatureDefinition>& edited, SaveSummary& summary,
                        std::string& error);
 
-private:
+    // Schema checks (the Rasa.NET world schema grows with upstream development; newer tables / columns are optional).
     bool hasTable(const std::string& table) const;
+    bool hasColumn(const std::string& table, const std::string& column) const;
+
+private:
     bool requireColumns(const std::string& table, std::initializer_list<const char*> columns);
     void loadGlobals();
     void loadCreatures();                            // creature, creature_appearance, creature_stat, creature_action
@@ -334,6 +407,7 @@ private:
     std::unordered_map<int32_t, CreatureStat> stats_;                        // creature id -> creature_stat
     std::unordered_map<int32_t, std::pair<int32_t, std::string>> npcPackages_;   // creature id -> (package id, comment)
     std::unordered_map<int32_t, int32_t> greetings_;
+    std::unordered_map<int32_t, bool> greetingImportant_;                   // creature id -> npc_greeting.important
     std::unordered_map<int32_t, std::string> actorNames_;
     std::unordered_map<int32_t, int32_t> vendors_;                           // creature id -> vendor package id
     std::unordered_map<int32_t, int32_t> vendorPrices_;

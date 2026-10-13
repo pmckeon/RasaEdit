@@ -74,6 +74,10 @@ private:
     void revertServer();
     void duplicateSelected();
     void addServerObject(SelectionKind kind, ObjectKind objectKind);
+    // Patrol steps: a new step of a saved pool after `afterStep` (-1: at the end; later steps are renumbered up by one), and
+    // keeping content.patrolSteps sorted by pool then step with the selection on (pool, step).
+    void insertPatrolStep(int64_t poolId, int32_t afterStep, const tr::Vec3& position);
+    void sortPatrolSteps(int64_t selectPool, int32_t selectStep);
     bool creatureCombo(const char* id, int32_t& creatureId, bool allowNone);
     // Creatures panel: creature definitions (creature, creature_stat, creature_appearance), database-wide, with its own
     // Save / Revert (no undo).

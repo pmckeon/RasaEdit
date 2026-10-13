@@ -164,6 +164,12 @@ bool ServerWorkspace::selectionPosition(const Selection& s, tr::Vec3& position) 
         case SelectionKind::MissionArea: if (i < serverContent_.missionAreas.size()) { position = serverContent_.missionAreas[i].area.position; return true; } break;
         case SelectionKind::Object: if (i < serverContent_.objects.size()) { position = serverContent_.objects[i].position; return true; } break;
         case SelectionKind::Arrival: if (i < serverContent_.arrivals.size()) { position = serverContent_.arrivals[i].position; return true; } break;
+        case SelectionKind::PatrolStep: if (i < serverContent_.patrolSteps.size()) { position = serverContent_.patrolSteps[i].position; return true; } break;
+        case SelectionKind::WormholeLock:
+            if (i < serverContent_.wormholeLocks.size())
+                for (const Teleporter& t : serverContent_.teleporters)
+                    if (t.id == serverContent_.wormholeLocks[i].fromTeleporterId) { position = t.position; return true; }
+            break;
         default: break;
     }
     return false;
@@ -218,6 +224,22 @@ std::string ServerWorkspace::serverObjectLabel(const Selection& s) const {
                           static_cast<long long>(a.poolId), a.comment.c_str());
             return text;
         }
+        case SelectionKind::PatrolStep: {
+            if (i >= serverContent_.patrolSteps.size()) break;
+            const PatrolStep& p = serverContent_.patrolSteps[i];
+            std::snprintf(text, sizeof text, "Patrol of spawn %lld, step %d%s%s", static_cast<long long>(p.poolId), p.step,
+                          p.hasFacing ? ", turns" : "", p.pauseMs > 0 ? ", pauses" : "");
+            return text;
+        }
+        case SelectionKind::WormholeLock: {
+            if (i >= serverContent_.wormholeLocks.size()) break;
+            const WormholeLock& w = serverContent_.wormholeLocks[i];
+            auto end = [](int64_t id) { return id == 0 ? std::string("any") : std::to_string(id); };
+            std::snprintf(text, sizeof text, "Wormhole lock %lld: %s -> %s, %s %lld%s%s", static_cast<long long>(w.id), end(w.fromTeleporterId).c_str(),
+                          end(w.toTeleporterId).c_str(), w.kind == 1 ? "mission" : w.kind == 2 ? "level" : "kind?", static_cast<long long>(w.value),
+                          w.hasComment && !w.comment.empty() ? ": " : "", w.hasComment ? w.comment.c_str() : "");
+            return text;
+        }
         default: break;
     }
     return "";
@@ -256,8 +278,20 @@ void ServerWorkspace::drawServerPanel() {
                                        serverContent_.spawnPools[selection_.index].id > 0;
                 if (ImGui::MenuItem("Spawn arrival (for the selected spawn pool)", nullptr, false, poolSaved))
                     addServerObject(SelectionKind::Arrival, ObjectKind::Footlocker);
+                const bool patrolStep = selection_.kind == SelectionKind::PatrolStep && selection_.index < serverContent_.patrolSteps.size();
+                if (database_ && database_->hasTable("spawnpool_patrol") &&
+                    ImGui::MenuItem("Patrol step (for the selected spawn pool or after the selected step)", nullptr, false, poolSaved || patrolStep))
+                    addServerObject(SelectionKind::PatrolStep, ObjectKind::Footlocker);
             }
             if (ImGui::MenuItem("Footlocker")) addServerObject(SelectionKind::Object, ObjectKind::Footlocker);
+            if (database_ && database_->hasTable("ambient_npc") && ImGui::MenuItem("Ambient NPC"))
+                addServerObject(SelectionKind::Object, ObjectKind::AmbientNpc);
+            if (database_ && database_->hasTable("world_usable") && ImGui::MenuItem("World usable"))
+                addServerObject(SelectionKind::Object, ObjectKind::WorldUsable);
+            if (database_ && database_->hasTable("world_destructible") && ImGui::MenuItem("World destructible"))
+                addServerObject(SelectionKind::Object, ObjectKind::WorldDestructible);
+            if (database_ && database_->hasTable("wormhole_lock") && ImGui::MenuItem("Wormhole lock"))
+                addServerObject(SelectionKind::WormholeLock, ObjectKind::Footlocker);
             if (ImGui::MenuItem("Kraftwerk")) addServerObject(SelectionKind::Object, ObjectKind::Kraftwerk);
             if (ImGui::MenuItem("Logos stone")) addServerObject(SelectionKind::Object, ObjectKind::Logos);
             ImGui::EndPopup();
@@ -300,6 +334,8 @@ void ServerWorkspace::drawServerPanel() {
     if (ImGui::BeginChild("serverlist")) {
         list("Spawn pools", SelectionKind::SpawnPool, serverContent_.spawnPools.size());
         list("Spawn arrivals", SelectionKind::Arrival, serverContent_.arrivals.size());
+        list("Patrol steps", SelectionKind::PatrolStep, serverContent_.patrolSteps.size());
+        list("Wormhole locks (all maps)", SelectionKind::WormholeLock, serverContent_.wormholeLocks.size());
         list("Teleporters", SelectionKind::Teleporter, serverContent_.teleporters.size());
         list("Objects", SelectionKind::Object, serverContent_.objects.size());
         list("Map links", SelectionKind::MapLink, serverContent_.mapLinks.size());
@@ -344,6 +380,19 @@ void ServerWorkspace::drawInspectorContent() {
             int arrivals = 0;
             for (const SpawnArrival& a : serverContent_.arrivals) if (a.poolId == p.id) ++arrivals;
             if (arrivals) ImGui::Text("%d arrival point(s)", arrivals);
+            int steps = 0;
+            for (const PatrolStep& s : serverContent_.patrolSteps) if (s.poolId == p.id) ++steps;
+            if (steps) ImGui::Text("Patrol of %d step(s)", steps);
+            for (const PoolPose& pose : serverContent_.poses)
+                if (pose.poolId == p.id) ImGui::Text("Pose %d (%s)", pose.pose, npcPoseName(pose.pose));
+            break;
+        }
+        case SelectionKind::PatrolStep: {
+            if (i >= serverContent_.patrolSteps.size()) break;
+            const PatrolStep& s = serverContent_.patrolSteps[i];
+            placement(s.position, s.hasFacing ? s.facing : 0.0f);
+            ImGui::Text("Spawn pool %lld, step %d", static_cast<long long>(s.poolId), s.step);
+            ImGui::Text("%s, pause %d ms", s.hasFacing ? "turns to the facing above" : "keeps facing the way it came", s.pauseMs);
             break;
         }
         case SelectionKind::Arrival: {
@@ -368,6 +417,8 @@ void ServerWorkspace::drawInspectorContent() {
             ImGui::Text("Class %d %s", o.classId, ctx_.classInfo(o.classId).name.c_str());
             break;
         }
+        case SelectionKind::WormholeLock:
+            break;                                     // the label says it all
         case SelectionKind::MapLink: {
             if (i >= serverContent_.mapLinks.size()) break;
             const MapLink& l = serverContent_.mapLinks[i];
@@ -433,6 +484,8 @@ void ServerWorkspace::validateSelection() {
         case SelectionKind::MissionArea: count = serverContent_.missionAreas.size(); break;
         case SelectionKind::Object: count = serverContent_.objects.size(); break;
         case SelectionKind::Arrival: count = serverContent_.arrivals.size(); break;
+        case SelectionKind::PatrolStep: count = serverContent_.patrolSteps.size(); break;
+        case SelectionKind::WormholeLock: count = serverContent_.wormholeLocks.size(); break;
         default: return;
     }
     if (selection_.index >= count) selection_ = Selection{};
@@ -498,6 +551,7 @@ tr::Vec3* ServerWorkspace::selectedPosition() {
         case SelectionKind::MissionArea: return i < serverContent_.missionAreas.size() ? &serverContent_.missionAreas[i].area.position : nullptr;
         case SelectionKind::Object: return i < serverContent_.objects.size() ? &serverContent_.objects[i].position : nullptr;
         case SelectionKind::Arrival: return i < serverContent_.arrivals.size() ? &serverContent_.arrivals[i].position : nullptr;
+        case SelectionKind::PatrolStep: return i < serverContent_.patrolSteps.size() ? &serverContent_.patrolSteps[i].position : nullptr;
         default: return nullptr;
     }
 }
@@ -510,6 +564,8 @@ float* ServerWorkspace::selectedRotation() {
         case SelectionKind::Object:
             return i < serverContent_.objects.size() && serverContent_.objects[i].kind != ObjectKind::Logos ? &serverContent_.objects[i].rotation : nullptr;
         case SelectionKind::Arrival: return i < serverContent_.arrivals.size() ? &serverContent_.arrivals[i].rotation : nullptr;
+        case SelectionKind::PatrolStep:            // only a step that turns the creature has a facing
+            return i < serverContent_.patrolSteps.size() && serverContent_.patrolSteps[i].hasFacing ? &serverContent_.patrolSteps[i].facing : nullptr;
         default: return nullptr;
     }
 }
@@ -526,10 +582,17 @@ void ServerWorkspace::deleteSelected() {
             beginEdit();
             const int64_t poolId = serverContent_.spawnPools[i].id;
             serverContent_.spawnPools.erase(serverContent_.spawnPools.begin() + std::ptrdiff_t(i));
-            if (poolId > 0)                                          // the database deletes them with the pool
+            if (poolId > 0) {                                        // the database deletes them with the pool
                 serverContent_.arrivals.erase(std::remove_if(serverContent_.arrivals.begin(), serverContent_.arrivals.end(),
                                                              [&](const SpawnArrival& a) { return a.poolId == poolId; }),
                                               serverContent_.arrivals.end());
+                serverContent_.patrolSteps.erase(std::remove_if(serverContent_.patrolSteps.begin(), serverContent_.patrolSteps.end(),
+                                                                [&](const PatrolStep& s) { return s.poolId == poolId; }),
+                                                 serverContent_.patrolSteps.end());
+                serverContent_.poses.erase(std::remove_if(serverContent_.poses.begin(), serverContent_.poses.end(),
+                                                          [&](const PoolPose& p) { return p.poolId == poolId; }),
+                                           serverContent_.poses.end());
+            }
             what = "spawn pool" + (arrivals ? " and its " + std::to_string(arrivals) + " arrival point(s)" : std::string());
             break;
         }
@@ -538,6 +601,18 @@ void ServerWorkspace::deleteSelected() {
             beginEdit();
             serverContent_.arrivals.erase(serverContent_.arrivals.begin() + std::ptrdiff_t(i));
             what = "arrival point";
+            break;
+        case SelectionKind::PatrolStep:
+            if (i >= serverContent_.patrolSteps.size()) return;
+            beginEdit();
+            serverContent_.patrolSteps.erase(serverContent_.patrolSteps.begin() + std::ptrdiff_t(i));
+            what = "patrol step";
+            break;
+        case SelectionKind::WormholeLock:
+            if (i >= serverContent_.wormholeLocks.size()) return;
+            beginEdit();
+            serverContent_.wormholeLocks.erase(serverContent_.wormholeLocks.begin() + std::ptrdiff_t(i));
+            what = "wormhole lock";
             break;
         case SelectionKind::Teleporter:
             if (i >= serverContent_.teleporters.size()) return;
@@ -600,6 +675,22 @@ void ServerWorkspace::duplicateSelected() {
             selection_ = Selection{SelectionKind::Arrival, serverContent_.arrivals.size() - 1};
             break;
         }
+        case SelectionKind::WormholeLock: {
+            if (i >= serverContent_.wormholeLocks.size()) return;
+            WormholeLock copy = serverContent_.wormholeLocks[i];
+            copy.id = 0;
+            beginEdit();
+            serverContent_.wormholeLocks.push_back(copy);
+            selection_ = Selection{SelectionKind::WormholeLock, serverContent_.wormholeLocks.size() - 1};
+            break;
+        }
+        case SelectionKind::PatrolStep: {
+            if (i >= serverContent_.patrolSteps.size()) return;
+            const PatrolStep source = serverContent_.patrolSteps[i];
+            beginEdit();
+            insertPatrolStep(source.poolId, source.step, shifted(source.position));
+            break;
+        }
         case SelectionKind::Teleporter: {
             if (i >= serverContent_.teleporters.size()) return;
             Teleporter copy = serverContent_.teleporters[i];
@@ -641,11 +732,72 @@ void ServerWorkspace::duplicateSelected() {
     ctx_.setStatus("Duplicated (not saved yet).", false);
 }
 
+void ServerWorkspace::insertPatrolStep(int64_t poolId, int32_t afterStep, const tr::Vec3& position) {
+    int32_t last = 0;
+    for (const PatrolStep& s : serverContent_.patrolSteps)
+        if (s.poolId == poolId) last = std::max(last, s.step);
+    PatrolStep step;
+    step.poolId = poolId;
+    step.position = position;
+    if (afterStep < 0) {
+        step.step = last + 1;
+    } else {
+        for (PatrolStep& s : serverContent_.patrolSteps)
+            if (s.poolId == poolId && s.step > afterStep) ++s.step;
+        step.step = afterStep + 1;
+    }
+    serverContent_.patrolSteps.push_back(step);
+    sortPatrolSteps(poolId, step.step);
+}
+
+void ServerWorkspace::sortPatrolSteps(int64_t selectPool, int32_t selectStep) {
+    auto& steps = serverContent_.patrolSteps;
+    std::stable_sort(steps.begin(), steps.end(),
+                     [](const PatrolStep& a, const PatrolStep& b) { return a.poolId != b.poolId ? a.poolId < b.poolId : a.step < b.step; });
+    for (size_t k = 0; k < steps.size(); ++k)
+        if (steps[k].poolId == selectPool && steps[k].step == selectStep) selection_ = Selection{SelectionKind::PatrolStep, k};
+}
+
 void ServerWorkspace::addServerObject(SelectionKind kind, ObjectKind objectKind) {
     if (!canEditServer() || !ctx_.scene) return;
     tr::Vec3 rayOrigin, rayDirection, point;
     ctx_.scene->viewRay(0.0f, 0.0f, rayOrigin, rayDirection);
     if (!ctx_.scene->groundPoint(rayOrigin, rayDirection, rayOrigin.y - 10.0f, point)) point = add(rayOrigin, scaled(rayDirection, 20.0f));
+    if (kind == SelectionKind::WormholeLock) {
+        // From the selected teleporter when it is one, else from any wormhole; to any; mission kind.
+        WormholeLock w;
+        if (selection_.kind == SelectionKind::Teleporter && selection_.index < serverContent_.teleporters.size())
+            w.fromTeleporterId = serverContent_.teleporters[selection_.index].id;
+        w.hasComment = true;
+        w.comment = "New wormhole lock";
+        beginEdit();
+        serverContent_.wormholeLocks.push_back(w);
+        selection_ = Selection{SelectionKind::WormholeLock, serverContent_.wormholeLocks.size() - 1};
+        contentChanged();
+        ctx_.setStatus("Added a wormhole lock (not saved yet).", false);
+        return;
+    }
+    if (kind == SelectionKind::PatrolStep) {
+        // After the selected step, or at the end of the selected (saved) pool's patrol.
+        int64_t poolId = 0;
+        int32_t after = -1;
+        if (selection_.kind == SelectionKind::PatrolStep && selection_.index < serverContent_.patrolSteps.size()) {
+            poolId = serverContent_.patrolSteps[selection_.index].poolId;
+            after = serverContent_.patrolSteps[selection_.index].step;
+        } else if (selection_.kind == SelectionKind::SpawnPool && selection_.index < serverContent_.spawnPools.size()) {
+            poolId = serverContent_.spawnPools[selection_.index].id;
+        }
+        if (poolId <= 0) {
+            ctx_.setStatus("Select a saved spawn pool or one of its patrol steps first: a patrol step needs its pool's database id.", true);
+            return;
+        }
+        if (snapToGround_) point.y = ctx_.scene->groundHeight(point.x, point.z, point.y);
+        beginEdit();
+        insertPatrolStep(poolId, after, point);
+        contentChanged();
+        ctx_.setStatus("Added a patrol step at the centre of the view (not saved yet).", false);
+        return;
+    }
     if (kind == SelectionKind::Arrival) {
         // For the selected spawn pool, which must already be saved (the row needs its id).
         if (selection_.kind != SelectionKind::SpawnPool || selection_.index >= serverContent_.spawnPools.size() ||
@@ -908,6 +1060,96 @@ void ServerWorkspace::drawServerObjectEditor() {
             if (!arrivals) ImGui::TextDisabled("none: the creatures appear in the pool (or by its dropship setting)");
             if (p.id <= 0) ImGui::TextDisabled("Save the pool before adding arrival points.");
             else if (ImGui::SmallButton("Add arrival point")) addServerObject(SelectionKind::Arrival, ObjectKind::Footlocker);
+            // Patrol and pose (Rasa.NET upstream spawnpool_patrol / spawnpool_pose; absent on older worlds).
+            const bool patrolTable = database_ && database_->hasTable("spawnpool_patrol");
+            const bool poseTable = database_ && database_->hasTable("spawnpool_pose");
+            int steps = 0;
+            if (patrolTable) {
+                ImGui::SeparatorText("Patrol");
+                for (size_t k = 0; k < serverContent_.patrolSteps.size(); ++k) {
+                    if (serverContent_.patrolSteps[k].poolId != p.id || p.id <= 0) continue;
+                    ++steps;
+                    ImGui::PushID(int(2000 + k));
+                    const std::string label = serverObjectLabel(Selection{SelectionKind::PatrolStep, k});
+                    if (ImGui::Selectable(label.c_str(), false)) selection_ = Selection{SelectionKind::PatrolStep, k};
+                    ImGui::PopID();
+                }
+                if (!steps) ImGui::TextDisabled("none: the creatures keep to the pool");
+                else ImGui::TextDisabled("Walked in step order, then back to the first; one creature to a beat, and it needs a walk speed.");
+                if (p.id <= 0) ImGui::TextDisabled("Save the pool before adding patrol steps.");
+                else if (ImGui::SmallButton("Add patrol step")) addServerObject(SelectionKind::PatrolStep, ObjectKind::Footlocker);
+            }
+            if (poseTable) {
+                ImGui::SeparatorText("Pose");
+                PoolPose* pose = nullptr;
+                for (PoolPose& candidate : serverContent_.poses)
+                    if (candidate.poolId == p.id) pose = &candidate;
+                if (p.id <= 0) {
+                    ImGui::TextDisabled("Save the pool before giving it a pose.");
+                } else {
+                    // Index 0 = no row; 1..10 = pose 0..9 (0 "none" is a valid stored value, kept if present).
+                    int current = pose ? pose->pose + 1 : 0;
+                    std::string items = "(no row)";
+                    items += '\0';
+                    for (int v = 0; v <= 9; ++v) items += std::to_string(v) + " " + npcPoseName(v) + '\0';
+                    ImGui::SetNextItemWidth(fieldWidth);
+                    if (ImGui::Combo("Pose", &current, items.c_str())) {
+                        noteEdit();
+                        if (current == 0) {
+                            serverContent_.poses.erase(std::remove_if(serverContent_.poses.begin(), serverContent_.poses.end(),
+                                                                      [&](const PoolPose& c) { return c.poolId == p.id; }),
+                                                       serverContent_.poses.end());
+                        } else if (pose) {
+                            pose->pose = current - 1;
+                        } else {
+                            serverContent_.poses.push_back(PoolPose{p.id, current - 1});
+                        }
+                        contentChanged();
+                    }
+                    ImGui::TextDisabled("5-9 are the client's ambient animations, humans only (8 and 9: female skeleton only).");
+                    if (steps && current > 0) ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "A pool with a patrol has no pose (Rasa.NET NpcPoses).");
+                }
+            }
+            break;
+        }
+        case SelectionKind::PatrolStep: {
+            if (i >= serverContent_.patrolSteps.size()) break;
+            PatrolStep& s = serverContent_.patrolSteps[i];
+            ImGui::TextDisabled("spawn pool %lld, step %d", static_cast<long long>(s.poolId), s.step);
+            position("Position", s.position);
+            ImGui::TextDisabled("A floor height: the creature walks straight between steps, heights and all (not on the navmesh).");
+            flag("Turns to a facing", s.hasFacing);
+            if (s.hasFacing) angle("Facing", s.facing);
+            integer("Pause (ms)", s.pauseMs);
+            if (s.pauseMs < 0) s.pauseMs = 0;
+            // Order: swap step numbers with the neighbour in the same pool.
+            const int64_t pool = s.poolId;
+            const int32_t number = s.step;
+            const bool hasEarlier = i > 0 && serverContent_.patrolSteps[i - 1].poolId == pool;
+            const bool hasLater = i + 1 < serverContent_.patrolSteps.size() && serverContent_.patrolSteps[i + 1].poolId == pool;
+            ImGui::BeginDisabled(!hasEarlier);
+            const bool earlier = ImGui::SmallButton("Earlier");
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            ImGui::BeginDisabled(!hasLater);
+            const bool later = ImGui::SmallButton("Later");
+            ImGui::EndDisabled();
+            if (earlier || later) {
+                beginEdit();
+                PatrolStep& other = serverContent_.patrolSteps[earlier ? i - 1 : i + 1];
+                const int32_t otherNumber = other.step;
+                other.step = number;
+                serverContent_.patrolSteps[i].step = otherNumber;
+                sortPatrolSteps(pool, otherNumber);
+                contentChanged();
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Add step after")) addServerObject(SelectionKind::PatrolStep, ObjectKind::Footlocker);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Spawn pool")) {
+                for (size_t k = 0; k < serverContent_.spawnPools.size(); ++k)
+                    if (serverContent_.spawnPools[k].id == pool) selection_ = Selection{SelectionKind::SpawnPool, k};
+            }
             break;
         }
         case SelectionKind::Arrival: {
@@ -968,6 +1210,100 @@ void ServerWorkspace::drawServerObjectEditor() {
             if (o.kind != ObjectKind::Logos) angle("Facing", o.rotation);
             classField("Class", o.classId);
             text(o.kind == ObjectKind::Logos || o.kind == ObjectKind::ControlPoint ? "Name" : "Comment", o.name);
+            // Number columns of the Rasa.NET upstream tables (0 = the kind's / class's default).
+            auto whole = [&](const char* label, int64_t& value) {
+                long long v = value;
+                ImGui::SetNextItemWidth(fieldWidth);
+                if (ImGui::InputScalar(label, ImGuiDataType_S64, &v)) {
+                    noteEdit();
+                    value = std::max<long long>(v, 0);
+                    contentChanged();
+                }
+            };
+            if (o.kind == ObjectKind::AmbientNpc)
+                ImGui::TextDisabled("A class with the STATELESSSWITCH augmentation (UsableStatelessNPC*): its own looping animations, nothing to use.");
+            if (o.kind == ObjectKind::WorldUsable) {
+                ImGui::SeparatorText("Usable (0 = the kind's default)");
+                UsableSettings& u = o.usable;
+                whole("Start state (UseObjectState)", u.state);
+                bool usable = u.usable != 0;
+                if (ImGui::Checkbox("Usable by players", &usable)) {
+                    noteEdit();
+                    u.usable = usable ? 1 : 0;
+                    contentChanged();
+                }
+                whole("Dispensed item (itemtemplate.id)", u.itemTemplateId);
+                whole("Accepted / bomb item class", u.itemClassId);
+                whole("Item count", u.itemCount);
+                whole("Reset (s)", u.resetSeconds);
+                whole("Interval min (s) / bomb fuse", u.intervalMinSeconds);
+                whole("Interval max (s)", u.intervalMaxSeconds);
+                whole("Damage min", u.damageMin);
+                whole("Damage max", u.damageMax);
+                number("Blast radius (m)", u.radius, 0.1f, 0.0f, 500.0f);
+                int arg = int(u.actionArg);
+                ImGui::SetNextItemWidth(fieldWidth);
+                if (ImGui::Combo("Blast (OBJ_DAMAGE arg)", &arg, "0 default\0" "1 small explosion\0" "2 large explosion\0" "3 lightning\0" "4 mine\0"
+                                                                   "5 bomb\0" "6 geyser\0" "7 hornito\0")) {
+                    noteEdit();
+                    u.actionArg = arg;
+                    contentChanged();
+                }
+            }
+            if (o.kind == ObjectKind::WorldDestructible) {
+                ImGui::SeparatorText("Destructible (0 = the class's default)");
+                DestructibleSettings& d = o.destructible;
+                whole("Hit points", d.hitPoints);
+                whole("Spawned creature (creature.id)", d.creatureId);
+                whole("Creatures at a time", d.creatureCount);
+                int side = int(d.side);
+                ImGui::SetNextItemWidth(fieldWidth);
+                if (ImGui::Combo("Force field side", &side, "0 class default (Bane's)\0" "1 AFS: lets players through\0" "2 Bane: stops players\0")) {
+                    noteEdit();
+                    d.side = side;
+                    contentChanged();
+                }
+            }
+            break;
+        }
+        case SelectionKind::WormholeLock: {
+            if (i >= serverContent_.wormholeLocks.size()) break;
+            WormholeLock& w = serverContent_.wormholeLocks[i];
+            ImGui::TextDisabled("id %lld - every lock that matches a trip must be met (Rasa.NET Wormholes)", static_cast<long long>(w.id));
+            auto teleporter = [&](const char* label, int64_t& id) {
+                long long v = id;
+                ImGui::SetNextItemWidth(fieldWidth);
+                if (ImGui::InputScalar(label, ImGuiDataType_S64, &v)) {
+                    noteEdit();
+                    id = std::max<long long>(v, 0);
+                    contentChanged();
+                }
+                ImGui::SameLine();
+                std::string where = id == 0 ? "any wormhole" : "a teleporter on another map";
+                for (const Teleporter& t : serverContent_.teleporters)
+                    if (t.id == id) where = t.description + (t.type == 3 ? "" : " (not a wormhole: type " + std::to_string(t.type) + ")");
+                ImGui::TextDisabled("%s", where.c_str());
+            };
+            teleporter("From teleporter id", w.fromTeleporterId);
+            teleporter("To teleporter id", w.toTeleporterId);
+            int kindIndex = w.kind == 2 ? 1 : 0;
+            ImGui::SetNextItemWidth(fieldWidth);
+            if (ImGui::Combo("Kind", &kindIndex, "1 mission accepted\0" "2 required level (not enforced yet)\0")) {
+                noteEdit();
+                w.kind = kindIndex == 1 ? 2 : 1;
+                contentChanged();
+            }
+            {
+                long long v = w.value;
+                ImGui::SetNextItemWidth(fieldWidth);
+                if (ImGui::InputScalar(w.kind == 2 ? "Level" : "Mission id", ImGuiDataType_S64, &v)) {
+                    noteEdit();
+                    w.value = std::max<long long>(v, 0);
+                    contentChanged();
+                }
+            }
+            flag("Has a comment", w.hasComment);
+            if (w.hasComment) text("Comment", w.comment);
             break;
         }
         case SelectionKind::MapLink: {
@@ -1332,6 +1668,11 @@ void ServerWorkspace::drawCreatureEditor(CreatureDefinition& d, bool isNew) {
                 try { line = ctx_.gameData->npcGreeting(d.greetingId); } catch (const std::exception&) {}
             }
             ImGui::TextWrapped("%s", line.empty() ? "(no such line in npcgreetinglanguage)" : ("\"" + line + "\"").c_str());
+            if (database_ && database_->hasColumn("npc_greeting", "important")) {
+                ImGui::Checkbox("Important", &d.greetingImportant);
+                ImGui::SetItemTooltip("npc_greeting.important: a speech bubble over the NPC until the character has read this line\n"
+                                      "(Rasa.NET NpcGreetings.IsUnread).");
+            }
         } else {
             ImGui::TextDisabled("Says the server's default, \"Greetings.\"");
         }

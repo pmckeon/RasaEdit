@@ -365,6 +365,129 @@ int main(int argc, char** argv) {
                 scene.setServerContent(&content, database.get(), [&](int32_t id) { return data.classMeshName(id); },
                                        [&](const Creature& c) { return resolveAvatar(data, *database, c); });
             }
+            // RASA_SAVETEST with patrols / poses (Rasa.NET upstream tables; Bootcamp pool 400009): insert a step after the first
+            // (the later steps renumber up), move the first, drop the facing of the last, change the first pose and delete
+            // another; save, reload, compare the patrol and pose lists exactly, then restore the original rows.
+            if (envValue("RASA_SAVETEST") && !content.patrolSteps.empty()) {
+                const WorldContent original = content;
+                WorldContent edited = content;
+                const int64_t pool = edited.patrolSteps.front().poolId;
+                const int32_t first = edited.patrolSteps.front().step;
+                for (PatrolStep& s : edited.patrolSteps)
+                    if (s.poolId == pool && s.step > first) ++s.step;
+                PatrolStep inserted = edited.patrolSteps.front();
+                inserted.step = first + 1;
+                inserted.position.z += 2.0f;
+                inserted.hasFacing = false;
+                inserted.pauseMs = 1234;
+                edited.patrolSteps.insert(edited.patrolSteps.begin() + 1, inserted);
+                edited.patrolSteps.front().position.x += 0.75f;
+                edited.patrolSteps.back().hasFacing = false;
+                if (!edited.poses.empty()) edited.poses.front().pose = 6;
+                if (edited.poses.size() >= 2) edited.poses.pop_back();
+                WorldDatabase::SaveSummary summary;
+                std::string error;
+                const bool saved = database->save(original, edited, summary, error);
+                const WorldContent reloaded = database->loadMap(content.mapContextId);
+                auto samePatrols = [](const std::vector<PatrolStep>& a, const std::vector<PatrolStep>& b) {
+                    if (a.size() != b.size()) return false;
+                    for (size_t k = 0; k < a.size(); ++k)
+                        if (a[k].poolId != b[k].poolId || a[k].step != b[k].step || std::fabs(a[k].position.x - b[k].position.x) > 1e-3f ||
+                            std::fabs(a[k].position.z - b[k].position.z) > 1e-3f || a[k].hasFacing != b[k].hasFacing ||
+                            (a[k].hasFacing && std::fabs(a[k].facing - b[k].facing) > 1e-4f) || a[k].pauseMs != b[k].pauseMs)
+                            return false;
+                    return true;
+                };
+                auto samePoses = [](const std::vector<PoolPose>& a, const std::vector<PoolPose>& b) {
+                    if (a.size() != b.size()) return false;
+                    for (size_t k = 0; k < a.size(); ++k)
+                        if (a[k].poolId != b[k].poolId || a[k].pose != b[k].pose) return false;
+                    return true;
+                };
+                std::printf("patrol save test: saved %d (%d added, %d changed, %d deleted%s%s), patrol %s (%zu -> %zu steps), poses %s (%zu -> %zu)\n",
+                            saved, summary.inserted, summary.updated, summary.deleted, error.empty() ? "" : ": ", error.c_str(),
+                            samePatrols(edited.patrolSteps, reloaded.patrolSteps) ? "matches" : "DIFFERS", original.patrolSteps.size(),
+                            reloaded.patrolSteps.size(), samePoses(edited.poses, reloaded.poses) ? "match" : "DIFFER", original.poses.size(),
+                            reloaded.poses.size());
+                const bool restored = database->save(reloaded, original, summary, error);
+                const WorldContent back = database->loadMap(content.mapContextId);
+                std::printf("patrol save test restore: %d (%d added, %d changed, %d deleted), %s\n", restored, summary.inserted, summary.updated,
+                            summary.deleted, samePatrols(original.patrolSteps, back.patrolSteps) && samePoses(original.poses, back.poses) ? "original back" : "NOT RESTORED");
+                content = back;
+                scene.setServerContent(&content, database.get(), [&](int32_t id) { return data.classMeshName(id); },
+                                       [&](const Creature& c) { return resolveAvatar(data, *database, c); });
+            }
+            // RASA_SAVETEST with the upstream object tables: move the first ambient NPC, add a world usable and a world destructible
+            // with every column set, change the first wormhole lock and add one; save, reload and compare, then restore.
+            if (envValue("RASA_SAVETEST") && database->hasTable("world_usable") && database->hasTable("wormhole_lock")) {
+                const WorldContent original = content;
+                WorldContent edited = content;
+                for (PlacedObject& o : edited.objects)
+                    if (o.kind == ObjectKind::AmbientNpc) { o.position.x += 0.5f; o.rotation += 0.25f; o.name += " (moved)"; break; }
+                PlacedObject usable;
+                usable.kind = ObjectKind::WorldUsable;
+                usable.classId = 3895;
+                usable.position = tr::Vec3{1, 2, 3};
+                usable.rotation = 0.5f;
+                usable.name = "save test usable";
+                usable.usable = UsableSettings{1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 2.5f, 3};
+                edited.objects.push_back(usable);
+                PlacedObject destructible;
+                destructible.kind = ObjectKind::WorldDestructible;
+                destructible.classId = 3896;
+                destructible.position = tr::Vec3{4, 5, 6};
+                destructible.name = "save test destructible";
+                destructible.destructible = DestructibleSettings{100, 22, 3, 1};
+                edited.objects.push_back(destructible);
+                if (!edited.wormholeLocks.empty()) edited.wormholeLocks.front().value += 1;
+                WormholeLock lock;
+                lock.fromTeleporterId = 0;
+                lock.toTeleporterId = 4242;
+                lock.kind = 2;
+                lock.value = 30;
+                edited.wormholeLocks.push_back(lock);           // comment NULL
+                WorldDatabase::SaveSummary summary;
+                std::string error;
+                const bool saved = database->save(original, edited, summary, error);
+                const WorldContent reloaded = database->loadMap(content.mapContextId);
+                bool ambientOk = true, usableOk = false, destructibleOk = false, lockOk = false, lockEdited = edited.wormholeLocks.size() < 2;
+                for (const PlacedObject& o : edited.objects)
+                    if (o.kind == ObjectKind::AmbientNpc && o.id != 0) {
+                        bool found = false;
+                        for (const PlacedObject& r : reloaded.objects)
+                            if (r.kind == o.kind && r.id == o.id)
+                                found = std::fabs(r.position.x - o.position.x) < 1e-3f && std::fabs(r.rotation - o.rotation) < 1e-4f && r.name == o.name;
+                        ambientOk = ambientOk && found;
+                    }
+                for (const PlacedObject& r : reloaded.objects) {
+                    if (r.kind == ObjectKind::WorldUsable && r.name == "save test usable") {
+                        const UsableSettings& u = r.usable;
+                        usableOk = r.classId == 3895 && u.state == 1 && u.usable == 1 && u.itemTemplateId == 2 && u.itemClassId == 3 && u.itemCount == 4 &&
+                                   u.resetSeconds == 5 && u.intervalMinSeconds == 6 && u.intervalMaxSeconds == 7 && u.damageMin == 8 && u.damageMax == 9 &&
+                                   std::fabs(u.radius - 2.5f) < 1e-4f && u.actionArg == 3;
+                    }
+                    if (r.kind == ObjectKind::WorldDestructible && r.name == "save test destructible")
+                        destructibleOk = r.classId == 3896 && r.destructible.hitPoints == 100 && r.destructible.creatureId == 22 &&
+                                         r.destructible.creatureCount == 3 && r.destructible.side == 1;
+                }
+                for (const WormholeLock& r : reloaded.wormholeLocks) {
+                    if (r.toTeleporterId == 4242 && r.kind == 2 && r.value == 30 && !r.hasComment) lockOk = true;
+                    if (!edited.wormholeLocks.empty() && r.id == edited.wormholeLocks.front().id) lockEdited = r.value == edited.wormholeLocks.front().value;
+                }
+                std::printf("object save test: saved %d (%d added, %d changed, %d deleted%s%s), ambient %s, usable %s, destructible %s, lock added %s, "
+                            "lock changed %s\n", saved, summary.inserted, summary.updated, summary.deleted, error.empty() ? "" : ": ", error.c_str(),
+                            ambientOk ? "ok" : "FAILED", usableOk ? "ok" : "FAILED", destructibleOk ? "ok" : "FAILED", lockOk ? "ok" : "FAILED",
+                            lockEdited ? "ok" : "FAILED");
+                // Restore: the original lists (new rows deleted by id, edited rows written back).
+                const bool restored = database->save(reloaded, original, summary, error);
+                const WorldContent back = database->loadMap(content.mapContextId);
+                std::printf("object save test restore: %d (%d added, %d changed, %d deleted), %zu objects / %zu locks (originally %zu / %zu)\n", restored,
+                            summary.inserted, summary.updated, summary.deleted, back.objects.size(), back.wormholeLocks.size(), original.objects.size(),
+                            original.wormholeLocks.size());
+                content = back;
+                scene.setServerContent(&content, database.get(), [&](int32_t id) { return data.classMeshName(id); },
+                                       [&](const Creature& c) { return resolveAvatar(data, *database, c); });
+            }
             // RASA_SAVETEST also round-trips the creature definitions: change the first creature with stats and appearance (level,
             // stat row removed, a slot recoloured), add a new creature, save, reload and check (the copy keeps the changes).
             if (envValue("RASA_SAVETEST")) {
@@ -426,6 +549,29 @@ int main(int argc, char** argv) {
                                 sameRows(objectives2, objectives3) ? "match" : "DIFFER", sameRows(triggers2, triggers3) ? "match" : "DIFFER",
                                 objectives.key.size());
                 }
+                // Foreign keys (PRAGMA foreign_keys = ON in WorldDatabase): deleting a mission that still has a mission_area row
+                // (ON DELETE RESTRICT) must fail and leave the mission in place.
+                {
+                    const DbTable missions = database->loadTable("mission_content_definition");
+                    const DbTable areas = database->loadTable("mission_area");
+                    if (!areas.rows.empty()) {
+                        const int64_t mission = areas.rows.front()[size_t(areas.column("mission_id"))].asInt();
+                        const std::string revision = areas.rows.front()[size_t(areas.column("content_revision"))].t;
+                        DbTable missions2 = missions;
+                        const int idColumn = missions2.column("mission_id"), revisionColumn = missions2.column("content_revision");
+                        missions2.rows.erase(std::remove_if(missions2.rows.begin(), missions2.rows.end(),
+                                                            [&](const std::vector<DbValue>& r) {
+                                                                return r[size_t(idColumn)].asInt() == mission && r[size_t(revisionColumn)].t == revision;
+                                                            }),
+                                             missions2.rows.end());
+                        WorldDatabase::SaveSummary summary;
+                        std::string error;
+                        const bool saved = database->saveTables({{&missions, &missions2}}, summary, error);
+                        const DbTable missions3 = database->loadTable("mission_content_definition");
+                        std::printf("foreign key test: deleting mission %lld/%s with an area %s (%s); missions %zu -> %zu\n", static_cast<long long>(mission),
+                                    revision.c_str(), saved ? "SAVED (not enforced)" : "refused", error.c_str(), missions.rows.size(), missions3.rows.size());
+                    }
+                }
                 // NPC / vendor rows: a vendor gets a flat price, loses its first stock item and gains one, a greeting and a package.
                 std::vector<CreatureDefinition> before2 = database->creatureDefinitions();
                 std::vector<CreatureDefinition> edited2 = before2;
@@ -439,6 +585,7 @@ int main(int argc, char** argv) {
                     d.vendorPrice = 77;
                     d.hasGreeting = true;
                     d.greetingId = 120;
+                    d.greetingImportant = database->hasColumn("npc_greeting", "important");
                     d.hasNpcPackage = true;
                     d.npcPackageId = 113;
                     d.npcPackageComment = "save test package";
@@ -449,6 +596,7 @@ int main(int argc, char** argv) {
                     for (const CreatureDefinition& r : database->creatureDefinitions())
                         if (r.creature.id == id)
                             ok = r.hasVendorPrice && r.vendorPrice == 77 && r.vendorItems == stock && r.hasGreeting && r.greetingId == 120 &&
+                                 r.greetingImportant == database->hasColumn("npc_greeting", "important") &&
                                  r.hasNpcPackage && r.npcPackageId == 113 && r.npcPackageComment == "save test package";
                     std::printf("vendor save test (creature %d): saved %d (%d added, %d changed, %d deleted%s%s), checks %s; greeting 120 = \"%s\"\n", id,
                                 saved, summary.inserted, summary.updated, summary.deleted, error.empty() ? "" : ": ", error.c_str(),

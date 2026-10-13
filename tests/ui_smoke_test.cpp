@@ -117,7 +117,18 @@ int main() {
         check(editor.active_ == editor.server_.get(), "starts in the Server workspace (from settings)");
         check(dockspaceExists("ServerDockSpace"), "server layout built");
         check(server.database_ && !server.database_->readOnly(), "server database open read-write");
-        check(server.serverContent_.spawnPools.size() == 251, "251 spawn pools loaded for Concordia");
+        {
+            // Every spawnpool row of Concordia (1220), counted from the table itself (the upstream world keeps growing: 251 in
+            // the 2026-10-08 world, 263 after the 2026-10-13 update).
+            size_t rows = 0;
+            if (server.database_) {
+                const DbTable pools = server.database_->loadTable("spawnpool");
+                const int map = pools.column("map_context_id");
+                for (const auto& r : pools.rows) rows += r[size_t(map)].asInt() == 1220 ? 1 : 0;
+            }
+            std::printf("      Concordia spawn pools: %zu loaded, %zu rows\n", server.serverContent_.spawnPools.size(), rows);
+            check(rows > 0 && server.serverContent_.spawnPools.size() == rows, "every Concordia spawn pool loaded");
+        }
         if (const char* names[] = {"Viewport###Server.Viewport", "Overview###Server.Overview"}; true)
             for (const char* n : names) {
                 ImGuiWindow* w = ImGui::FindWindowByName(n);

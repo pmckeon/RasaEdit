@@ -600,13 +600,41 @@ void MissionEditor::draw(EditorContext& ctx, WorldDatabase& database, int32_t ma
         if (writable) {
             if (ImGui::SmallButton("Delete mission...")) ImGui::OpenPopup("deletemission");
             if (ImGui::BeginPopup("deletemission")) {
-                ImGui::Text("Delete this mission and every row under it (not saved until Save missions)?");
-                if (ImGui::Button("Delete")) {
-                    removes_.push_back(PendingRemove{root.spec->table, *selected});
-                    ImGui::CloseCurrentPopup();
+                // mission_area and mission_scene_binding refer to the mission with ON DELETE RESTRICT (rasaworld.db schema) and
+                // are not written here (areas are edited in Server objects), so the mission cannot go while it has any.
+                // mission_evidence is ON DELETE CASCADE: the database removes it with the mission.
+                std::string blockers;
+                for (const char* name : {"mission_area", "mission_scene_binding"}) {
+                    const Table* child = table(name);
+                    if (!child) continue;
+                    size_t count = 0;
+                    std::set<int64_t> maps;
+                    const int mapColumn = child->edited.column("map_context_id");
+                    for (const auto& r : child->edited.rows)
+                        if (rowUnder(*child, r, root.edited, *selected)) {
+                            ++count;
+                            if (mapColumn >= 0) maps.insert(r[size_t(mapColumn)].asInt());
+                        }
+                    if (!count) continue;
+                    blockers += "\n  " + std::to_string(count) + " " + name + " row(s)";
+                    if (!maps.empty()) {
+                        blockers += " on map";
+                        for (int64_t m : maps) blockers += " " + std::to_string(m);
+                    }
                 }
-                ImGui::SameLine();
-                if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+                if (!blockers.empty()) {
+                    ImGui::TextWrapped("This mission cannot be deleted: the database keeps these rows from losing their mission:%s\n"
+                                       "Delete the areas in Server objects (on each map) and save first.", blockers.c_str());
+                    if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
+                } else {
+                    ImGui::Text("Delete this mission and every row under it (not saved until Save missions)?");
+                    if (ImGui::Button("Delete")) {
+                        removes_.push_back(PendingRemove{root.spec->table, *selected});
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+                }
                 ImGui::EndPopup();
             }
         }

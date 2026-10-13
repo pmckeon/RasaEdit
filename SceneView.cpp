@@ -2105,8 +2105,13 @@ void SceneView::queueDraws(const Selection& selection) {
             // (FUN_00437c70) and rotation (FUN_004cbcf0) to the accessory node, whose scale FUN_0081d820 sets to the body node's
             // (+0xB8..0xC0, vtable +0x10 mode 3). So the frames compose without bone scale; the scale is the entity's (in s.world).
             // hp_hum_pistol_physical_holster needs this: its plug is on its only bone, scale 0.0117 (the mesh is stored 26 m wide),
-            // and inverting the scaled frame drew it 85x too large (user report 2026-10-13). The position arithmetic in between
-            // (x87 code) is not read term by term: the editor uses the frames' positions with their bone scales applied.
+            // and inverting the scaled frame drew it 85x too large (user report 2026-10-13). Full arithmetic (read 2026-10-13):
+            // A = body bone world (vtable +8) composed with the socket's local rotation / position (FUN_0044ee60: position through
+            // A's scaled matrix, rotations multiplied); B = accessory bone world, made relative to the accessory root (offset
+            // rotated by the inverse root rotation with scale 1) and composed with the plug's local rotation / position; E =
+            // inverse(rotation B), position = inverse(rotation B)(-B.pos), scale 1; result position = A.pos + rotation A (E.pos)
+            // (FUN_0044f000: D3DXMatrixTransformation's scaled matrix, then x 1/scale (FUN_0044ed70) - rotation only), rotation =
+            // E then A. That is s.world x rigid(socket) x inverse(rigid(plug)) here, exactly for uniform scales.
             auto rigid = [](Mat4 m) {
                 for (int c = 0; c < 3; ++c) {
                     float* x = c == 0 ? &m.row0.x : c == 1 ? &m.row0.y : &m.row0.z;
@@ -2589,7 +2594,7 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
         s.position = o.position;
         s.world = yawPlacement(o.position, o.rotation);
         s.model = modelFor(meshForClass(o.classId));
-        s.colour = markerColour::object;
+        s.colour = markerColour::ofObject(o.kind);
         s.ringRadius = 1.5f;
         s.facing = o.kind != ObjectKind::Logos;
         serverPlacements_.push_back(s);
@@ -2618,6 +2623,28 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
                 s.linked = true;
                 s.linkTarget = pool.position;
             }
+        serverPlacements_.push_back(s);
+    }
+    // Patrol steps: a line from each to the next of its pool, and from the last back to the first (the circuit Rasa.NET's
+    // Patrols walks); a facing arrow where the step turns the creature.
+    for (size_t k = 0; k < content->patrolSteps.size(); ++k) {
+        const PatrolStep& p = content->patrolSteps[k];
+        ServerPlacement s;
+        s.selection = Selection{SelectionKind::PatrolStep, k};
+        s.position = p.position;
+        s.world = yawPlacement(p.position, p.hasFacing ? p.facing : 0.0f);
+        s.colour = markerColour::patrol;
+        s.ringRadius = 0.5f;
+        s.facing = p.hasFacing;
+        size_t next = k + 1;
+        if (next >= content->patrolSteps.size() || content->patrolSteps[next].poolId != p.poolId) {
+            next = k;                                         // the last step: back to the pool's first
+            while (next > 0 && content->patrolSteps[next - 1].poolId == p.poolId) --next;
+        }
+        if (next != k) {
+            s.linked = true;
+            s.linkTarget = content->patrolSteps[next].position;
+        }
         serverPlacements_.push_back(s);
     }
     for (size_t k = 0; k < content->regions.size(); ++k) {

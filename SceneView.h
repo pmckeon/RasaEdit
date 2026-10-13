@@ -35,7 +35,7 @@ struct ViewCamera {
 };
 
 // What is selected: a map entity (.map file) or a server object (World database).
-enum class SelectionKind : uint8_t { None, MapEntity, SpawnPool, Teleporter, MapLink, Region, MissionArea, Object, Arrival };
+enum class SelectionKind : uint8_t { None, MapEntity, SpawnPool, Teleporter, MapLink, Region, MissionArea, Object, Arrival, PatrolStep, WormholeLock };
 
 struct Selection {
     SelectionKind kind = SelectionKind::None;
@@ -343,7 +343,7 @@ private:
         Vec4f skinHue;                  // w: 1 = hue flesh pieces
         Vec4f colour;
         float ringRadius = 0;           // spawn radius / trigger radius (0: none)
-        bool linked = false;            // draw a line to linkTarget (an arrival point's spawn pool)
+        bool linked = false;            // draw a line to linkTarget (an arrival point's spawn pool, a patrol step's next step)
         tr::Vec3 linkTarget;
         bool facing = false;            // draw a facing arrow
         bool area = false;              // region or mission area outline

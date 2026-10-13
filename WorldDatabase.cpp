@@ -61,6 +61,22 @@ const SpawnSlot& spawnSlot(const SpawnPool& pool, int index) {
 
 SpawnSlot& spawnSlot(SpawnPool& pool, int index) { return const_cast<SpawnSlot&>(spawnSlot(static_cast<const SpawnPool&>(pool), index)); }
 
+const char* npcPoseName(int32_t pose) {
+    switch (pose) {
+        case 0: return "none";
+        case 1: return "standing";
+        case 2: return "weapon out";
+        case 3: return "crouched";
+        case 4: return "crouched, weapon out";
+        case 5: return "leaning";
+        case 6: return "sitting";
+        case 7: return "lying down";
+        case 8: return "at a console";
+        case 9: return "hand tool";
+        default: return "unknown";
+    }
+}
+
 const char* arrivalKindName(int32_t kind) {
     switch (kind) {
         case 1: return "dropship pad";
@@ -92,6 +108,9 @@ const char* objectKindName(ObjectKind kind) {
         case ObjectKind::Logos: return "Logos";
         case ObjectKind::ControlPoint: return "Control point";
         case ObjectKind::Footlocker: return "Footlocker";
+        case ObjectKind::AmbientNpc: return "Ambient NPC";
+        case ObjectKind::WorldUsable: return "World usable";
+        case ObjectKind::WorldDestructible: return "World destructible";
         default: return "Kraftwerk";
     }
 }
@@ -110,6 +129,10 @@ WorldDatabase::WorldDatabase(const std::string& path) : path_(path) {
         warnings_.push_back("the file is not writable; opened read-only");
     }
     sqlite3_busy_timeout(db_, 2000);                 // the server may be using the file
+    // Enforce the schema's foreign keys on the editor's saves (SQLite leaves them off per connection by default): a save
+    // that would orphan rows (e.g. mission_area -> mission_content_definition, ON DELETE RESTRICT) fails and is rolled back
+    // instead of writing, and ON DELETE CASCADE rows (mission_evidence) go with their parent.
+    sqlite3_exec(db_, "PRAGMA foreign_keys = ON", nullptr, nullptr, nullptr);
     {
         Statement tables(db_, "SELECT name FROM sqlite_master WHERE type = 'table'");
         while (tables.step()) {
@@ -129,6 +152,11 @@ WorldDatabase::~WorldDatabase() {
 }
 
 bool WorldDatabase::hasTable(const std::string& table) const { return columns_.count(lower(table)) != 0; }
+
+bool WorldDatabase::hasColumn(const std::string& table, const std::string& column) const {
+    const auto it = columns_.find(lower(table));
+    return it != columns_.end() && it->second.count(lower(column)) != 0;
+}
 
 bool WorldDatabase::requireColumns(const std::string& table, std::initializer_list<const char*> columns) {
     const auto it = columns_.find(lower(table));
@@ -165,6 +193,7 @@ void WorldDatabase::loadCreatures() {
     actions_.clear();
     npcPackages_.clear();
     greetings_.clear();
+    greetingImportant_.clear();
     actorNames_.clear();
     vendors_.clear();
     vendorPrices_.clear();
@@ -175,8 +204,12 @@ void WorldDatabase::loadCreatures() {
         while (s.step()) npcPackages_[s.int32(0)] = {s.int32(1), s.text(2)};
     }
     if (requireColumns("npc_greeting", {"id", "greeting_id"})) {
-        Statement s(db_, "SELECT id, greeting_id FROM npc_greeting");
-        while (s.step()) greetings_[s.int32(0)] = s.int32(1);
+        const bool important = hasColumn("npc_greeting", "important");
+        Statement s(db_, important ? "SELECT id, greeting_id, important FROM npc_greeting" : "SELECT id, greeting_id FROM npc_greeting");
+        while (s.step()) {
+            greetings_[s.int32(0)] = s.int32(1);
+            if (important) greetingImportant_[s.int32(0)] = s.int32(2) != 0;
+        }
     }
     if (requireColumns("creature_actor_name", {"id", "actor_name"})) {
         Statement s(db_, "SELECT id, actor_name FROM creature_actor_name");
@@ -347,7 +380,7 @@ bool sameCreatureDefinition(const CreatureDefinition& a, const CreatureDefinitio
         return false;
     if (a.hasNpcPackage != b.hasNpcPackage || (a.hasNpcPackage && (a.npcPackageId != b.npcPackageId || a.npcPackageComment != b.npcPackageComment)))
         return false;
-    if (a.hasGreeting != b.hasGreeting || (a.hasGreeting && a.greetingId != b.greetingId)) return false;
+    if (a.hasGreeting != b.hasGreeting || (a.hasGreeting && (a.greetingId != b.greetingId || a.greetingImportant != b.greetingImportant))) return false;
     if (a.hasActorName != b.hasActorName || (a.hasActorName && a.actorName != b.actorName)) return false;
     if (a.hasVendor != b.hasVendor || (a.hasVendor && a.vendorPackageId != b.vendorPackageId)) return false;
     if (a.hasVendorPrice != b.hasVendorPrice || (a.hasVendorPrice && a.vendorPrice != b.vendorPrice)) return false;
@@ -553,6 +586,7 @@ std::vector<CreatureDefinition> WorldDatabase::creatureDefinitions() const {
             d.npcPackageComment = it->second.second;
         }
         if (const auto it = greetings_.find(c.id); it != greetings_.end()) { d.hasGreeting = true; d.greetingId = it->second; }
+        if (const auto it = greetingImportant_.find(c.id); it != greetingImportant_.end()) d.greetingImportant = it->second;
         if (const auto it = actorNames_.find(c.id); it != actorNames_.end()) { d.hasActorName = true; d.actorName = it->second; }
         if (const auto it = vendors_.find(c.id); it != vendors_.end()) { d.hasVendor = true; d.vendorPackageId = it->second; }
         if (const auto it = vendorPrices_.find(c.id); it != vendorPrices_.end()) { d.hasVendorPrice = true; d.vendorPrice = it->second; }
@@ -679,11 +713,19 @@ bool WorldDatabase::saveCreatures(const std::vector<CreatureDefinition>& saved, 
                        s.bindInt(2, d.npcPackageId);
                        s.bindText(3, d.npcPackageComment);
                    });
-            oneRow("npc_greeting", b && b->hasGreeting, d.hasGreeting, b && b->greetingId == d.greetingId,
-                   "INSERT INTO npc_greeting (id, greeting_id) VALUES (?1, ?2)", "UPDATE npc_greeting SET greeting_id = ?2 WHERE id = ?1",
+            // npc_greeting.important only where the world has the column (Rasa.NET upstream, migration
+            // 20261129000000_Add_npc_greeting_important: NOT NULL DEFAULT 0).
+            const bool importantColumn = hasColumn("npc_greeting", "important");
+            oneRow("npc_greeting", b && b->hasGreeting, d.hasGreeting,
+                   b && b->greetingId == d.greetingId && (!importantColumn || b->greetingImportant == d.greetingImportant),
+                   importantColumn ? "INSERT INTO npc_greeting (id, greeting_id, important) VALUES (?1, ?2, ?3)"
+                                   : "INSERT INTO npc_greeting (id, greeting_id) VALUES (?1, ?2)",
+                   importantColumn ? "UPDATE npc_greeting SET greeting_id = ?2, important = ?3 WHERE id = ?1"
+                                   : "UPDATE npc_greeting SET greeting_id = ?2 WHERE id = ?1",
                    [&](Statement& s) {
                        s.bindInt(1, c.id);
                        s.bindInt(2, d.greetingId);
+                       if (importantColumn) s.bindInt(3, d.greetingImportant ? 1 : 0);
                    });
             oneRow("creature_actor_name", b && b->hasActorName, d.hasActorName, b && b->actorName == d.actorName,
                    "INSERT INTO creature_actor_name (id, actor_name) VALUES (?1, ?2)", "UPDATE creature_actor_name SET actor_name = ?2 WHERE id = ?1",
@@ -775,6 +817,28 @@ WorldContent WorldDatabase::loadMap(int32_t mapContextId) {
         while (s.step())
             content.arrivals.push_back(SpawnArrival{s.integer(0), s.integer(1), s.int32(2), s.vec3(3), s.real(6), s.integer(7), s.text(8)});
     }
+    // Patrols and poses (Rasa.NET upstream; older worlds have neither table).
+    if (!content.spawnPools.empty() && hasTable("spawnpool_patrol") &&
+        requireColumns("spawnpool_patrol", {"pool_id", "step", "pos_x", "pos_y", "pos_z", "facing", "pause_ms"})) {
+        Statement s(db_, "SELECT a.pool_id, a.step, a.pos_x, a.pos_y, a.pos_z, a.facing, a.pause_ms FROM spawnpool_patrol a "
+                         "JOIN spawnpool p ON p.id = a.pool_id WHERE p.map_context_id = ?1 ORDER BY a.pool_id, a.step");
+        s.bindInt(1, mapContextId);
+        while (s.step()) {
+            PatrolStep step;
+            step.poolId = s.integer(0);
+            step.step = s.int32(1);
+            step.position = s.vec3(2);
+            step.hasFacing = s.columnType(5) != SQLITE_NULL;
+            step.facing = step.hasFacing ? s.real(5) : 0.0f;
+            step.pauseMs = s.int32(6);
+            content.patrolSteps.push_back(step);
+        }
+    }
+    if (!content.spawnPools.empty() && hasTable("spawnpool_pose") && requireColumns("spawnpool_pose", {"id", "pose"})) {
+        Statement s(db_, "SELECT a.id, a.pose FROM spawnpool_pose a JOIN spawnpool p ON p.id = a.id WHERE p.map_context_id = ?1 ORDER BY a.id");
+        s.bindInt(1, mapContextId);
+        while (s.step()) content.poses.push_back(PoolPose{s.integer(0), s.int32(1)});
+    }
     if (requireColumns("teleporter", {"id", "class_id", "type", "description", "pos_x", "pos_y", "pos_z", "rotation", "map_context_id"})) {
         Statement s(db_, "SELECT id, class_id, type, description, pos_x, pos_y, pos_z, rotation, map_context_id FROM teleporter WHERE map_context_id = ?1 ORDER BY id");
         s.bindInt(1, mapContextId);
@@ -857,6 +921,69 @@ WorldContent WorldDatabase::loadMap(int32_t mapContextId) {
         s.bindInt(1, mapContextId);
         while (s.step()) content.objects.push_back(PlacedObject{t.kind, s.integer(0), s.int32(1), s.int32(2), s.vec3(3), s.real(6), s.text(7)});
     }
+    // Rasa.NET upstream object tables (older worlds have none of them).
+    if (hasTable("ambient_npc") && requireColumns("ambient_npc", {"id", "map_context_id", "class_id", "pos_x", "pos_y", "pos_z", "rotation", "comment"})) {
+        Statement s(db_, "SELECT id, class_id, map_context_id, pos_x, pos_y, pos_z, rotation, comment FROM ambient_npc WHERE map_context_id = ?1 ORDER BY id");
+        s.bindInt(1, mapContextId);
+        while (s.step())
+            content.objects.push_back(PlacedObject{ObjectKind::AmbientNpc, s.integer(0), s.int32(1), s.int32(2), s.vec3(3), s.real(6), s.text(7)});
+    }
+    if (hasTable("world_usable") &&
+        requireColumns("world_usable", {"id", "map_context_id", "class_id", "pos_x", "pos_y", "pos_z", "rotation", "state", "usable", "item_template_id",
+                                        "item_class_id", "item_count", "reset_seconds", "interval_min_seconds", "interval_max_seconds", "damage_min",
+                                        "damage_max", "radius", "action_arg", "comment"})) {
+        Statement s(db_, "SELECT id, class_id, map_context_id, pos_x, pos_y, pos_z, rotation, comment, state, usable, item_template_id, item_class_id, "
+                         "item_count, reset_seconds, interval_min_seconds, interval_max_seconds, damage_min, damage_max, radius, action_arg "
+                         "FROM world_usable WHERE map_context_id = ?1 ORDER BY id");
+        s.bindInt(1, mapContextId);
+        while (s.step()) {
+            PlacedObject o{ObjectKind::WorldUsable, s.integer(0), s.int32(1), s.int32(2), s.vec3(3), s.real(6), s.text(7)};
+            UsableSettings& u = o.usable;
+            u.state = s.integer(8);
+            u.usable = s.integer(9);
+            u.itemTemplateId = s.integer(10);
+            u.itemClassId = s.integer(11);
+            u.itemCount = s.integer(12);
+            u.resetSeconds = s.integer(13);
+            u.intervalMinSeconds = s.integer(14);
+            u.intervalMaxSeconds = s.integer(15);
+            u.damageMin = s.integer(16);
+            u.damageMax = s.integer(17);
+            u.radius = s.real(18);
+            u.actionArg = s.integer(19);
+            content.objects.push_back(o);
+        }
+    }
+    if (hasTable("world_destructible") &&
+        requireColumns("world_destructible", {"id", "map_context_id", "class_id", "pos_x", "pos_y", "pos_z", "rotation", "hit_points", "creature_id",
+                                              "creature_count", "side", "comment"})) {
+        Statement s(db_, "SELECT id, class_id, map_context_id, pos_x, pos_y, pos_z, rotation, comment, hit_points, creature_id, creature_count, side "
+                         "FROM world_destructible WHERE map_context_id = ?1 ORDER BY id");
+        s.bindInt(1, mapContextId);
+        while (s.step()) {
+            PlacedObject o{ObjectKind::WorldDestructible, s.integer(0), s.int32(1), s.int32(2), s.vec3(3), s.real(6), s.text(7)};
+            DestructibleSettings& d = o.destructible;
+            d.hitPoints = s.integer(8);
+            d.creatureId = s.integer(9);
+            d.creatureCount = s.integer(10);
+            d.side = s.integer(11);
+            content.objects.push_back(o);
+        }
+    }
+    if (hasTable("wormhole_lock") && requireColumns("wormhole_lock", {"id", "from_teleporter_id", "to_teleporter_id", "kind", "value", "comment"})) {
+        Statement s(db_, "SELECT id, from_teleporter_id, to_teleporter_id, kind, value, comment FROM wormhole_lock ORDER BY id");
+        while (s.step()) {
+            WormholeLock w;
+            w.id = s.integer(0);
+            w.fromTeleporterId = s.integer(1);
+            w.toTeleporterId = s.integer(2);
+            w.kind = s.integer(3);
+            w.value = s.integer(4);
+            w.hasComment = s.columnType(5) != SQLITE_NULL;
+            w.comment = w.hasComment ? s.text(5) : std::string();
+            content.wormholeLocks.push_back(w);
+        }
+    }
     return content;
 }
 
@@ -882,11 +1009,30 @@ bool same(const SpawnArrival& a, const SpawnArrival& b) {
            a.comment == b.comment;
 }
 
+bool same(const PatrolStep& a, const PatrolStep& b) {
+    return a.poolId == b.poolId && a.step == b.step && sameVec(a.position, b.position) && a.hasFacing == b.hasFacing &&
+           (!a.hasFacing || a.facing == b.facing) && a.pauseMs == b.pauseMs;
+}
+
 bool same(const Teleporter& a, const Teleporter& b) {
     return a.classId == b.classId && a.type == b.type && a.description == b.description && sameVec(a.position, b.position) && a.rotation == b.rotation;
 }
+bool same(const UsableSettings& a, const UsableSettings& b) {
+    return a.state == b.state && a.usable == b.usable && a.itemTemplateId == b.itemTemplateId && a.itemClassId == b.itemClassId &&
+           a.itemCount == b.itemCount && a.resetSeconds == b.resetSeconds && a.intervalMinSeconds == b.intervalMinSeconds &&
+           a.intervalMaxSeconds == b.intervalMaxSeconds && a.damageMin == b.damageMin && a.damageMax == b.damageMax && a.radius == b.radius &&
+           a.actionArg == b.actionArg;
+}
+bool same(const DestructibleSettings& a, const DestructibleSettings& b) {
+    return a.hitPoints == b.hitPoints && a.creatureId == b.creatureId && a.creatureCount == b.creatureCount && a.side == b.side;
+}
 bool same(const PlacedObject& a, const PlacedObject& b) {
-    return a.classId == b.classId && sameVec(a.position, b.position) && a.rotation == b.rotation && a.name == b.name;
+    return a.classId == b.classId && sameVec(a.position, b.position) && a.rotation == b.rotation && a.name == b.name &&
+           (a.kind != ObjectKind::WorldUsable || same(a.usable, b.usable)) && (a.kind != ObjectKind::WorldDestructible || same(a.destructible, b.destructible));
+}
+bool same(const WormholeLock& a, const WormholeLock& b) {
+    return a.fromTeleporterId == b.fromTeleporterId && a.toTeleporterId == b.toTeleporterId && a.kind == b.kind && a.value == b.value &&
+           a.hasComment == b.hasComment && (!a.hasComment || a.comment == b.comment);
 }
 bool same(const MapLink& a, const MapLink& b) {
     return sameVec(a.position, b.position) && a.radius == b.radius && a.destinationMapContextId == b.destinationMapContextId &&
@@ -903,6 +1049,9 @@ const char* objectTable(ObjectKind kind) {
         case ObjectKind::Logos: return "logos";
         case ObjectKind::ControlPoint: return "control_point";
         case ObjectKind::Footlocker: return "footlocker";
+        case ObjectKind::AmbientNpc: return "ambient_npc";
+        case ObjectKind::WorldUsable: return "world_usable";
+        case ObjectKind::WorldDestructible: return "world_destructible";
         default: return "kraftwerks";
     }
 }
@@ -947,11 +1096,17 @@ bool WorldDatabase::save(const WorldContent& saved, const WorldContent& edited, 
             return nullptr;
         };
 
-        // Spawn pools (and their arrival points when deleted).
+        // Spawn pools, and the rows keyed by a deleted pool's id: its arrival points, patrol steps and pose (Rasa.NET
+        // spawnpool_patrol.pool_id / spawnpool_pose.id = spawnpool.id; no foreign key removes them).
         for (int64_t id : deletedIds(saved.spawnPools, edited.spawnPools)) {
-            Statement arrivals(db_, "DELETE FROM spawnpool_arrival WHERE pool_id = ?1");
-            arrivals.bindInt(1, id);
-            arrivals.run(db_);
+            for (const char* sql : {"DELETE FROM spawnpool_arrival WHERE pool_id = ?1", "DELETE FROM spawnpool_patrol WHERE pool_id = ?1",
+                                    "DELETE FROM spawnpool_pose WHERE id = ?1"}) {
+                const std::string table = std::string(sql).substr(12, std::string(sql).find(' ', 12) - 12);
+                if (!hasTable(table)) continue;               // older worlds lack the patrol / pose tables
+                Statement rows(db_, sql);
+                rows.bindInt(1, id);
+                rows.run(db_);
+            }
             Statement s(db_, "DELETE FROM spawnpool WHERE id = ?1");
             s.bindInt(1, id);
             s.run(db_);
@@ -1031,6 +1186,68 @@ bool WorldDatabase::save(const WorldContent& saved, const WorldContent& edited, 
             ++(a.id == 0 ? summary.inserted : summary.updated);
         }
 
+        // Patrol steps, by (pool, step): renumbering a pool's steps updates the rows of the numbers that stay and inserts /
+        // deletes the rest. Steps of unsaved pools (id 0) are not written.
+        if (hasTable("spawnpool_patrol")) {
+            auto find = [](const std::vector<PatrolStep>& steps, int64_t pool, int32_t number) -> const PatrolStep* {
+                for (const PatrolStep& s : steps)
+                    if (s.poolId == pool && s.step == number) return &s;
+                return nullptr;
+            };
+            for (const PatrolStep& b : saved.patrolSteps) {
+                if (find(edited.patrolSteps, b.poolId, b.step)) continue;
+                Statement s(db_, "DELETE FROM spawnpool_patrol WHERE pool_id = ?1 AND step = ?2");
+                s.bindInt(1, b.poolId);
+                s.bindInt(2, b.step);
+                s.run(db_);
+                ++summary.deleted;
+            }
+            for (const PatrolStep& e : edited.patrolSteps) {
+                if (e.poolId <= 0) continue;
+                const PatrolStep* before = find(saved.patrolSteps, e.poolId, e.step);
+                if (before && same(*before, e)) continue;
+                Statement s(db_, before ? "UPDATE spawnpool_patrol SET pos_x = ?3, pos_y = ?4, pos_z = ?5, facing = ?6, pause_ms = ?7 "
+                                          "WHERE pool_id = ?1 AND step = ?2"
+                                        : "INSERT INTO spawnpool_patrol (pool_id, step, pos_x, pos_y, pos_z, facing, pause_ms) "
+                                          "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)");
+                s.bindInt(1, e.poolId);
+                s.bindInt(2, e.step);
+                s.bindReal(3, e.position.x);
+                s.bindReal(4, e.position.y);
+                s.bindReal(5, e.position.z);
+                if (e.hasFacing) s.bindReal(6, e.facing);
+                else s.bindNull(6);
+                s.bindInt(7, e.pauseMs);
+                s.run(db_);
+                ++(before ? summary.updated : summary.inserted);
+            }
+        }
+        // Poses, by pool.
+        if (hasTable("spawnpool_pose")) {
+            auto find = [](const std::vector<PoolPose>& poses, int64_t pool) -> const PoolPose* {
+                for (const PoolPose& p : poses)
+                    if (p.poolId == pool) return &p;
+                return nullptr;
+            };
+            for (const PoolPose& b : saved.poses) {
+                if (find(edited.poses, b.poolId)) continue;
+                Statement s(db_, "DELETE FROM spawnpool_pose WHERE id = ?1");
+                s.bindInt(1, b.poolId);
+                s.run(db_);
+                ++summary.deleted;
+            }
+            for (const PoolPose& e : edited.poses) {
+                if (e.poolId <= 0) continue;
+                const PoolPose* before = find(saved.poses, e.poolId);
+                if (before && before->pose == e.pose) continue;
+                Statement s(db_, before ? "UPDATE spawnpool_pose SET pose = ?2 WHERE id = ?1" : "INSERT INTO spawnpool_pose (id, pose) VALUES (?1, ?2)");
+                s.bindInt(1, e.poolId);
+                s.bindInt(2, e.pose);
+                s.run(db_);
+                ++(before ? summary.updated : summary.inserted);
+            }
+        }
+
         // Teleporters.
         for (int64_t id : deletedIds(saved.teleporters, edited.teleporters)) {
             Statement s(db_, "DELETE FROM teleporter WHERE id = ?1");
@@ -1073,6 +1290,54 @@ bool WorldDatabase::save(const WorldContent& saved, const WorldContent& edited, 
             for (const PlacedObject& b : saved.objects) if (b.kind == o.kind && b.id == o.id) { before = &b; break; }
             if (o.id != 0 && (!before || same(*before, o))) continue;
             if (o.id == 0 && o.kind == ObjectKind::ControlPoint) continue;     // not creatable
+            if (o.kind == ObjectKind::AmbientNpc || o.kind == ObjectKind::WorldUsable || o.kind == ObjectKind::WorldDestructible) {
+                // Columns per Rasa.NET AmbientNpcEntry / WorldUsableEntry / WorldDestructibleEntry.
+                std::vector<std::string> columns = {"class_id", "map_context_id", "pos_x", "pos_y", "pos_z", "rotation", "comment"};
+                if (o.kind == ObjectKind::WorldUsable)
+                    for (const char* c : {"state", "usable", "item_template_id", "item_class_id", "item_count", "reset_seconds", "interval_min_seconds",
+                                          "interval_max_seconds", "damage_min", "damage_max", "radius", "action_arg"})
+                        columns.push_back(c);
+                if (o.kind == ObjectKind::WorldDestructible)
+                    for (const char* c : {"hit_points", "creature_id", "creature_count", "side"}) columns.push_back(c);
+                std::string sql;
+                if (o.id == 0) {
+                    std::string names, values;
+                    for (size_t k = 0; k < columns.size(); ++k) {
+                        names += (k ? ", " : "") + columns[k];
+                        values += (k ? ", ?" : "?") + std::to_string(k + 1);
+                    }
+                    sql = std::string("INSERT INTO ") + objectTable(o.kind) + " (" + names + ") VALUES (" + values + ")";
+                } else {
+                    std::string sets;
+                    for (size_t k = 0; k < columns.size(); ++k) sets += (k ? ", " : "") + columns[k] + " = ?" + std::to_string(k + 1);
+                    sql = std::string("UPDATE ") + objectTable(o.kind) + " SET " + sets + " WHERE id = ?" + std::to_string(columns.size() + 1);
+                }
+                Statement s(db_, sql);
+                int n = 1;
+                s.bindInt(n++, o.classId);
+                s.bindInt(n++, context);
+                s.bindReal(n++, o.position.x);
+                s.bindReal(n++, o.position.y);
+                s.bindReal(n++, o.position.z);
+                s.bindReal(n++, o.rotation);
+                s.bindText(n++, o.name);
+                if (o.kind == ObjectKind::WorldUsable) {
+                    const UsableSettings& u = o.usable;
+                    for (int64_t v : {u.state, u.usable, u.itemTemplateId, u.itemClassId, u.itemCount, u.resetSeconds, u.intervalMinSeconds,
+                                      u.intervalMaxSeconds, u.damageMin, u.damageMax})
+                        s.bindInt(n++, v);
+                    s.bindReal(n++, u.radius);
+                    s.bindInt(n++, u.actionArg);
+                }
+                if (o.kind == ObjectKind::WorldDestructible) {
+                    const DestructibleSettings& d = o.destructible;
+                    for (int64_t v : {d.hitPoints, d.creatureId, d.creatureCount, d.side}) s.bindInt(n++, v);
+                }
+                if (o.id != 0) s.bindInt(n, o.id);
+                s.run(db_);
+                ++(o.id == 0 ? summary.inserted : summary.updated);
+                continue;
+            }
             const bool logos = o.kind == ObjectKind::Logos;
             const std::string table = objectTable(o.kind);
             const std::string nameColumn = (logos || o.kind == ObjectKind::ControlPoint) ? "name" : "comment";
@@ -1094,6 +1359,32 @@ bool WorldDatabase::save(const WorldContent& saved, const WorldContent& edited, 
             if (o.id != 0) s.bindInt(8, o.id);
             s.run(db_);
             ++(o.id == 0 ? summary.inserted : summary.updated);
+        }
+
+        // Wormhole locks (all rows, keyed by id).
+        if (hasTable("wormhole_lock")) {
+            for (int64_t id : deletedIds(saved.wormholeLocks, edited.wormholeLocks)) {
+                Statement s(db_, "DELETE FROM wormhole_lock WHERE id = ?1");
+                s.bindInt(1, id);
+                s.run(db_);
+                ++summary.deleted;
+            }
+            for (const WormholeLock& w : edited.wormholeLocks) {
+                const WormholeLock* before = w.id ? findById(saved.wormholeLocks, w.id) : nullptr;
+                if (w.id != 0 && (!before || same(*before, w))) continue;
+                Statement s(db_, w.id == 0 ? "INSERT INTO wormhole_lock (from_teleporter_id, to_teleporter_id, kind, value, comment) VALUES (?1, ?2, ?3, ?4, ?5)"
+                                           : "UPDATE wormhole_lock SET from_teleporter_id = ?1, to_teleporter_id = ?2, kind = ?3, value = ?4, comment = ?5 "
+                                             "WHERE id = ?6");
+                s.bindInt(1, w.fromTeleporterId);
+                s.bindInt(2, w.toTeleporterId);
+                s.bindInt(3, w.kind);
+                s.bindInt(4, w.value);
+                if (w.hasComment) s.bindText(5, w.comment);
+                else s.bindNull(5);
+                if (w.id != 0) s.bindInt(6, w.id);
+                s.run(db_);
+                ++(w.id == 0 ? summary.inserted : summary.updated);
+            }
         }
 
         // Map links.

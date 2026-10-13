@@ -37,7 +37,11 @@ void drawMarkerLegend() {
     row(markerColour::vendor, "Spawn pool: vendor");
     row(markerColour::teleporter, "Teleporter / waypoint / hospital");
     row(markerColour::object, "Object (logos, shrine, ...)");
+    row(markerColour::ambientNpc, "Ambient NPC figure");
+    row(markerColour::worldUsable, "World usable (switch, door, dispenser, blast)");
+    row(markerColour::worldDestructible, "World destructible (barrel, pod, hive, force field)");
     row(markerColour::arrival, "Spawn arrival (dropship pad / Bane teleporter), line to its pool");
+    row(markerColour::patrol, "Patrol step, lines along the pool's circuit");
     row(markerColour::mapLink, "Map link");
     row(markerColour::mapLinkDisabled, "Map link (disabled)");
     row(markerColour::missionArea, "Mission area");
@@ -323,7 +327,8 @@ void OverviewPanel::draw(EditorContext& ctx, const char* title, const OverviewLa
             }
             for (size_t k = 0; k < server.objects.size(); ++k) {
                 const ImVec2 p = toScreen(server.objects[k].position.x, server.objects[k].position.z);
-                draw->AddQuadFilled(ImVec2(p.x, p.y - 5), ImVec2(p.x + 5, p.y), ImVec2(p.x, p.y + 5), ImVec2(p.x - 5, p.y), toU32(markerColour::object));
+                draw->AddQuadFilled(ImVec2(p.x, p.y - 5), ImVec2(p.x + 5, p.y), ImVec2(p.x, p.y + 5), ImVec2(p.x - 5, p.y),
+                                    toU32(markerColour::ofObject(server.objects[k].kind)));
                 consider(p, Selection{SelectionKind::Object, k});
             }
             for (size_t k = 0; k < server.arrivals.size(); ++k) {
@@ -333,6 +338,20 @@ void OverviewPanel::draw(EditorContext& ctx, const char* title, const OverviewLa
                     if (pool.id == a.poolId) draw->AddLine(p, toScreen(pool.position.x, pool.position.z), toU32(markerColour::arrival) & 0xA0FFFFFF, 1.0f);
                 draw->AddTriangleFilled(ImVec2(p.x, p.y - 5), ImVec2(p.x + 5, p.y + 4), ImVec2(p.x - 5, p.y + 4), toU32(markerColour::arrival));
                 consider(p, Selection{SelectionKind::Arrival, k});
+            }
+            for (size_t k = 0; k < server.patrolSteps.size(); ++k) {
+                const PatrolStep& s = server.patrolSteps[k];
+                const ImVec2 p = toScreen(s.position.x, s.position.z);
+                size_t next = k + 1;
+                if (next >= server.patrolSteps.size() || server.patrolSteps[next].poolId != s.poolId) {
+                    next = k;
+                    while (next > 0 && server.patrolSteps[next - 1].poolId == s.poolId) --next;
+                }
+                if (next != k)
+                    draw->AddLine(p, toScreen(server.patrolSteps[next].position.x, server.patrolSteps[next].position.z),
+                                  toU32(markerColour::patrol) & 0xC0FFFFFF, 1.5f);
+                draw->AddCircleFilled(p, 3.5f, toU32(markerColour::patrol), 8);
+                consider(p, Selection{SelectionKind::PatrolStep, k});
             }
             for (size_t k = 0; k < server.mapLinks.size(); ++k) {
                 const MapLink& l = server.mapLinks[k];
