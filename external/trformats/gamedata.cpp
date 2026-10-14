@@ -4,6 +4,7 @@
 #include <zlib.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -593,6 +594,270 @@ py::Ref evaluateModule(const Bytes& pyo, const std::string& moduleName) {
 }
 
 // ------------------------------------------------------------------------------------------
+// Python source modules (literal tables only)
+// ------------------------------------------------------------------------------------------
+namespace {
+
+using py::Kind;
+using py::Object;
+using py::Ref;
+using py::dictFindRef;
+using py::dictSet;
+using py::make;
+using py::makeString;
+
+void appendUtf8(std::string& out, uint32_t c) {
+    if (c < 0x80) out += char(c);
+    else if (c < 0x800) { out += char(0xC0 | (c >> 6)); out += char(0x80 | (c & 0x3F)); }
+    else if (c < 0x10000) { out += char(0xE0 | (c >> 12)); out += char(0x80 | ((c >> 6) & 0x3F)); out += char(0x80 | (c & 0x3F)); }
+    else { out += char(0xF0 | (c >> 18)); out += char(0x80 | ((c >> 12) & 0x3F)); out += char(0x80 | ((c >> 6) & 0x3F)); out += char(0x80 | (c & 0x3F)); }
+}
+
+class SourceParser {
+public:
+    SourceParser(const Bytes& source, const std::string& moduleName) : s_(source), module_(moduleName) {}
+
+    Ref run() {
+        Ref globals = make(Kind::Dict);
+        for (;;) {
+            skipSpace(true);
+            if (p_ >= s_.size()) break;
+            const std::string name = identifier();
+            if (name.empty()) fail("expected a name");
+            skipSpace(false);
+            if (peek() != '=') fail("expected '=' after " + name);
+            ++p_;
+            globals_ = globals.get();
+            Ref value = expression();
+            dictSet(*globals, makeString(name), value);
+            skipSpace(false);
+            if (p_ < s_.size() && peek() != '\n' && peek() != ';' && peek() != '#') fail("unexpected text after " + name);
+        }
+        return globals;
+    }
+
+private:
+    const Bytes& s_;
+    std::string module_;
+    size_t p_ = 0;
+    int depth_ = 0;                                   // inside brackets: newlines are spaces
+    Object* globals_ = nullptr;
+
+    [[noreturn]] void fail(const std::string& what) const {
+        size_t line = 1;
+        for (size_t k = 0; k < p_ && k < s_.size(); ++k) line += s_[k] == '\n';
+        throw FormatError(module_ + ": " + what + " (line " + std::to_string(line) + ")");
+    }
+    char peek() const { return p_ < s_.size() ? char(s_[p_]) : '\0'; }
+    // Spaces, tabs, carriage returns, comments, backslash continuations; newlines too when inside brackets or asked.
+    void skipSpace(bool newlines) {
+        while (p_ < s_.size()) {
+            const char c = char(s_[p_]);
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\f') ++p_;
+            else if (c == '\n' && (newlines || depth_ > 0)) ++p_;
+            else if (c == '\\' && p_ + 1 < s_.size() && (s_[p_ + 1] == '\n' || s_[p_ + 1] == '\r')) p_ += 2;
+            else if (c == '#') { while (p_ < s_.size() && s_[p_] != '\n') ++p_; }
+            else break;
+        }
+    }
+    std::string identifier() {
+        const size_t start = p_;
+        while (p_ < s_.size() && (std::isalnum(s_[p_]) || s_[p_] == '_')) ++p_;
+        if (start < p_ && std::isdigit(s_[start])) { p_ = start; return {}; }
+        return std::string(reinterpret_cast<const char*>(s_.data()) + start, p_ - start);
+    }
+    Ref expression() {
+        skipSpace(false);
+        Ref first = atom();
+        skipSpace(false);
+        if (depth_ == 0 && peek() == ',') {               // a bare tuple: name = 1, 2
+            Ref tuple = make(Kind::Tuple);
+            tuple->items.push_back(first);
+            while (peek() == ',') {
+                ++p_;
+                skipSpace(false);
+                if (p_ >= s_.size() || peek() == '\n' || peek() == '#') break;
+                tuple->items.push_back(atom());
+                skipSpace(false);
+            }
+            return tuple;
+        }
+        return first;
+    }
+    // Items up to `close`, separated by commas (a trailing comma allowed).
+    template <typename Item>
+    bool items(char close, Item item) {
+        ++depth_;
+        bool comma = false;
+        for (;;) {
+            skipSpace(true);
+            if (peek() == close) { ++p_; break; }
+            item();
+            skipSpace(true);
+            if (peek() == ',') { ++p_; comma = true; continue; }
+            if (peek() != close) fail(std::string("expected '") + close + "'");
+            ++p_;
+            break;
+        }
+        --depth_;
+        return comma;
+    }
+    Ref atom() {
+        skipSpace(false);
+        const char c = peek();
+        if (c == '(') {
+            ++p_;
+            Ref tuple = make(Kind::Tuple);
+            const bool comma = items(')', [&] { tuple->items.push_back(atom()); });
+            if (tuple->items.size() == 1 && !comma) return tuple->items[0];      // parentheses only
+            return tuple;
+        }
+        if (c == '[') {
+            ++p_;
+            Ref list = make(Kind::List);
+            items(']', [&] { list->items.push_back(atom()); });
+            return list;
+        }
+        if (c == '{') {
+            ++p_;
+            Ref dict = make(Kind::Dict);
+            items('}', [&] {
+                Ref key = atom();
+                skipSpace(true);
+                if (peek() != ':') fail("expected ':' in a dict");
+                ++p_;
+                dictSet(*dict, key, atom());
+            });
+            return dict;
+        }
+        if (c == '-' || c == '+' || std::isdigit(static_cast<unsigned char>(c)) || (c == '.' && std::isdigit(s_[p_ + 1]))) return number();
+        if (c == '\'' || c == '"') return string(false);
+        if ((c == 'u' || c == 'U' || c == 'r' || c == 'R') && p_ + 1 < s_.size()) {
+            size_t q = p_;
+            bool unicode = false, raw = false;
+            while (q < s_.size() && std::strchr("uUrR", s_[q])) { unicode |= s_[q] == 'u' || s_[q] == 'U'; raw |= s_[q] == 'r' || s_[q] == 'R'; ++q; }
+            if (q < s_.size() && (s_[q] == '\'' || s_[q] == '"') && q - p_ <= 2) {
+                p_ = q;
+                return string(unicode, raw);
+            }
+        }
+        const std::string name = identifier();
+        if (name == "None") return make(Kind::None);
+        if (name == "True" || name == "False") {
+            Ref b = make(Kind::Bool);
+            b->boolean = name == "True";
+            b->integer = b->boolean ? 1 : 0;
+            return b;
+        }
+        if (!name.empty() && globals_) {
+            Ref value = dictFindRef(*globals_, *makeString(name));
+            if (value) return value;
+            fail("unknown name " + name);
+        }
+        fail("unexpected character");
+    }
+    Ref number() {
+        const size_t start = p_;
+        if (peek() == '-' || peek() == '+') { ++p_; skipSpace(false); }
+        bool real = false;
+        while (p_ < s_.size() && (std::isalnum(s_[p_]) || s_[p_] == '.' ||
+                                  ((s_[p_] == '-' || s_[p_] == '+') && (s_[p_ - 1] == 'e' || s_[p_ - 1] == 'E')))) {
+            if (s_[p_] == '.' || ((s_[p_] == 'e' || s_[p_] == 'E') && !(p_ > start + 1 && (s_[start + 1] == 'x' || s_[start + 1] == 'X')))) real = true;
+            ++p_;
+        }
+        std::string text(reinterpret_cast<const char*>(s_.data()) + start, p_ - start);
+        text.erase(std::remove(text.begin(), text.end(), ' '), text.end());
+        while (!text.empty() && (text.back() == 'L' || text.back() == 'l')) text.pop_back();
+        if (real) {
+            Ref f = make(Kind::Float);
+            f->real = std::stod(text);
+            return f;
+        }
+        Ref i = make(Kind::Int);
+        const bool negative = !text.empty() && text[0] == '-';
+        std::string digits = text.substr(!text.empty() && (text[0] == '-' || text[0] == '+') ? 1 : 0);
+        int base = 10;
+        if (digits.size() > 2 && digits[0] == '0' && (digits[1] == 'x' || digits[1] == 'X')) { base = 16; digits = digits.substr(2); }
+        else if (digits.size() > 1 && digits[0] == '0') base = 8;
+        i->integer = int64_t(std::stoull(digits, nullptr, base)) * (negative ? -1 : 1);
+        return i;
+    }
+    // One string literal, then any adjacent literals concatenated (Python's implicit concatenation).
+    Ref string(bool unicode, bool raw = false) {
+        std::string text = literal(unicode, raw);
+        for (;;) {
+            const size_t save = p_;
+            skipSpace(depth_ > 0);
+            size_t q = p_;
+            bool u = false, r = false;
+            while (q < s_.size() && std::strchr("uUrR", s_[q]) && q - p_ < 2) { u |= s_[q] == 'u' || s_[q] == 'U'; r |= s_[q] == 'r' || s_[q] == 'R'; ++q; }
+            if (q < s_.size() && (s_[q] == '\'' || s_[q] == '"')) {
+                p_ = q;
+                unicode |= u;
+                text += literal(u || unicode, r);
+            } else {
+                p_ = save;
+                break;
+            }
+        }
+        return makeString(std::move(text), unicode);
+    }
+    std::string literal(bool unicode, bool raw) {
+        const char quote = peek();
+        const bool triple = p_ + 2 < s_.size() && s_[p_ + 1] == quote && s_[p_ + 2] == quote;
+        p_ += triple ? 3 : 1;
+        std::string out;
+        for (;;) {
+            if (p_ >= s_.size()) fail("unterminated string");
+            const char c = char(s_[p_]);
+            if (c == quote && (!triple || (p_ + 2 < s_.size() && s_[p_ + 1] == quote && s_[p_ + 2] == quote))) {
+                p_ += triple ? 3 : 1;
+                return out;
+            }
+            if (c == '\\' && !raw && p_ + 1 < s_.size()) {
+                const char e = char(s_[p_ + 1]);
+                p_ += 2;
+                auto hex = [&](size_t n) {
+                    if (p_ + n > s_.size()) fail("bad escape");
+                    const uint32_t v = uint32_t(std::stoul(std::string(reinterpret_cast<const char*>(s_.data()) + p_, n), nullptr, 16));
+                    p_ += n;
+                    return v;
+                };
+                switch (e) {
+                    case 'n': out += '\n'; break;
+                    case 'r': out += '\r'; break;
+                    case 't': out += '\t'; break;
+                    case '0': case '1': case '2': case '3': case '4': case '5': case '6': case '7': {
+                        uint32_t v = uint32_t(e - '0');
+                        for (int k = 0; k < 2 && p_ < s_.size() && s_[p_] >= '0' && s_[p_] <= '7'; ++k) v = v * 8 + uint32_t(s_[p_++] - '0');
+                        if (unicode) appendUtf8(out, v); else out += char(v);
+                        break;
+                    }
+                    case 'x': { const uint32_t v = hex(2); if (unicode) appendUtf8(out, v); else out += char(v); break; }
+                    case 'u': if (unicode) { appendUtf8(out, hex(4)); break; } out += "\\u"; break;
+                    case 'U': if (unicode) { appendUtf8(out, hex(8)); break; } out += "\\U"; break;
+                    case 'a': out += '\a'; break;
+                    case 'b': out += '\b'; break;
+                    case 'f': out += '\f'; break;
+                    case 'v': out += '\v'; break;
+                    case '\n': break;                                      // line continuation inside the string
+                    case '\\': case '\'': case '"': out += e; break;
+                    default: out += '\\'; out += e; break;
+                }
+                continue;
+            }
+            if (unicode && (unsigned char)c >= 0x80) appendUtf8(out, (unsigned char)c);      // Latin-1 source bytes
+            else out += c;
+            ++p_;
+        }
+    }
+};
+
+}  // namespace
+
+py::Ref evaluateSource(const Bytes& source, const std::string& moduleName) { return SourceParser(source, moduleName).run(); }
+
+// ------------------------------------------------------------------------------------------
 // ZipArchive
 // ------------------------------------------------------------------------------------------
 namespace {
@@ -671,17 +936,21 @@ Bytes ZipArchive::read(const ZipEntry& entry) const {
 // GameData
 // ------------------------------------------------------------------------------------------
 GameData::GameData(const std::string& gameZipPath) : zip_(gameZipPath) {
+    // Compiled modules (.pyo / .pyc) first; a module shipped only as source (.py) is evaluated by evaluateSource.
     const auto& entries = zip_.entries();
-    for (size_t k = 0; k < entries.size(); ++k) {
-        const std::string name = toLowerAscii(entries[k].name);
-        if (name.size() < 5 || (name.compare(name.size() - 4, 4, ".pyo") != 0 && name.compare(name.size() - 4, 4, ".pyc") != 0)) continue;
-        size_t start = 0;
-        for (size_t pos = name.find("generated/"); pos != std::string::npos; pos = name.find("generated/", pos + 1))
-            if (pos == 0 || name[pos - 1] == '/') { start = pos; break; }
-        std::string dotted = name.substr(start, name.size() - 4 - start);
-        std::replace(dotted.begin(), dotted.end(), '/', '.');
-        moduleEntries_.emplace(dotted, k);
-    }
+    for (int pass = 0; pass < 2; ++pass)
+        for (size_t k = 0; k < entries.size(); ++k) {
+            const std::string name = toLowerAscii(entries[k].name);
+            const bool compiled = name.size() > 4 && (name.compare(name.size() - 4, 4, ".pyo") == 0 || name.compare(name.size() - 4, 4, ".pyc") == 0);
+            const bool source = name.size() > 3 && name.compare(name.size() - 3, 3, ".py") == 0;
+            if (pass == 0 ? !compiled : !source) continue;
+            size_t start = 0;
+            for (size_t pos = name.find("generated/"); pos != std::string::npos; pos = name.find("generated/", pos + 1))
+                if (pos == 0 || name[pos - 1] == '/') { start = pos; break; }
+            std::string dotted = name.substr(start, name.size() - (compiled ? 4 : 3) - start);
+            std::replace(dotted.begin(), dotted.end(), '/', '.');
+            moduleEntries_.emplace(dotted, k);        // a compiled module of the same name stays
+        }
 }
 
 std::vector<std::string> GameData::moduleNames() const {
@@ -700,7 +969,9 @@ const py::Object& GameData::module(const std::string& module) {
     if (cached != cache_.end()) return *cached->second;
     const auto it = moduleEntries_.find(key);
     if (it == moduleEntries_.end()) throw FormatError("game data has no module " + module);
-    py::Ref globals = evaluateModule(zip_.read(zip_.entries()[it->second]), module);
+    const ZipEntry& entry = zip_.entries()[it->second];
+    const bool source = entry.name.size() > 3 && toLowerAscii(entry.name.substr(entry.name.size() - 3)) == ".py";
+    py::Ref globals = source ? evaluateSource(zip_.read(entry), module) : evaluateModule(zip_.read(entry), module);
     return *cache_.emplace(key, globals).first->second;
 }
 
@@ -800,6 +1071,17 @@ bool GameData::radarInfo(int32_t contextId, int32_t regionId, RadarInfo& info) {
 std::string GameData::creatureName(int32_t nameId) {
     const py::Object* name = py::dictGet(global("generated.client.language.english.creaturenamelanguage", "lookup"), nameId);
     return name && py::isString(name) ? py::asString(name) : "";
+}
+
+std::string GameData::regionDisplayName(int32_t displayName, int32_t gender) {
+    const std::string name = py::asString(py::dictGet(global("generated.client.uielement", "byvalue"), displayName));
+    if (name.empty()) return "";
+    const int64_t index = py::asInt(py::dictGet(global("generated.client.uielement", "bystring"), name), 0);
+    if (index == 0) return "";
+    const py::Object* lookup = global("generated.client.language.english.uielementlanguage", "lookup");
+    const py::Object* lines = py::dictGetTuple(lookup, {index, gender});
+    const py::Object* line = py::length(lines) > 0 ? py::item(lines, 0) : py::dictGet(lookup, index);
+    return line && py::isString(line) ? py::asString(line) : "";
 }
 
 std::string GameData::missionText(int32_t textId, int32_t gender) {

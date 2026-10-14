@@ -85,6 +85,13 @@ std::string repr(const Object* o, size_t maxItems = 8);    // Python-like text, 
 
 // Evaluate one compiled module; returns its globals (a Dict keyed by variable name).
 py::Ref evaluateModule(const Bytes& pyo, const std::string& moduleName);
+// Evaluate a module shipped as Python source (.py). The stock game.zip has only compiled modules, but an edited one may
+// carry source (the user's: generated/client/uielement.py, language/english/uielementlanguage.py and keymapping.py, edited
+// for a developer menu); Python loads a .py when no .pyo is present, so the editor does too. Generated tables hold only
+// `name = literal` statements (ints, floats, strings with escapes, None / True / False, tuples, lists, dicts, earlier names).
+// Without a coding declaration Python 2.4 reads the source as Latin-1, so non-ASCII bytes in u'' literals become those
+// code points (UTF-8 bytes in such a file come out as mojibake in game too).
+py::Ref evaluateSource(const Bytes& source, const std::string& moduleName);
 
 // Zip archive (stored and deflate entries), streamed from disk.
 struct ZipEntry {
@@ -178,6 +185,11 @@ public:
     // A creature's in-game name: generated.client.language.english.creaturenamelanguage lookup[nameId] (the client's
     // creaturenamelanguage module; Rasa.NET sends creature.name_id in CreatureInfoPacket). "" if none.
     std::string creatureName(int32_t nameId);
+    // A map region's in-game name (MapRegion.displayName), as the client builds it: regionmanager.py _BuildRegionTuple turns
+    // the id into generated.client.uielement.byvalue[id] (a name such as ID_...), gameui.py DisplayRegionName maps that back
+    // through uielement.bystring and reads uielementlanguage (gender-keyed (id, gender) -> [text]). "" when the region has none
+    // (the client then shows "No Default Map Name").
+    std::string regionDisplayName(int32_t displayName, int32_t gender = 1);
     // An NPC greeting line: generated.client.language.english.npcgreetinglanguage lookup[(id, gender)][0] (a gender module:
     // clientlanguagemanager.py BuildModuleText; gender 1 = male, 2 = female). "" if none.
     std::string npcGreeting(int32_t greetingId, int32_t gender = 1);

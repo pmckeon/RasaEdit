@@ -60,8 +60,12 @@ int main(int argc, char** argv) {
                         if (id <= 0) return "";
                         try { return data.stringById(id); } catch (const std::exception&) { return "?"; }
                     };
-                    std::printf("region %d priority %d flags 0x%x env '%s' sky '%s'\n", r.regionId, r.priority, unsigned(r.enabledFlags),
-                                name(r.environmentMap).c_str(), name(r.sky).c_str());
+                    std::string display;
+                    if (r.displayName > 0) {
+                        try { display = data.regionDisplayName(r.displayName); } catch (const std::exception& e) { display = std::string("? ") + e.what(); }
+                    }
+                    std::printf("region %d priority %d flags 0x%x env '%s' sky '%s' name %d '%s'\n", r.regionId, r.priority, unsigned(r.enabledFlags),
+                                name(r.environmentMap).c_str(), name(r.sky).c_str(), r.displayName, display.c_str());
                 }
             scene.setRegionSkies(regionSkies);
             std::vector<std::pair<int32_t, std::string>> regionEnvironmentMaps;

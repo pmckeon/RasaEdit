@@ -270,6 +270,20 @@ RadarMap* EditorContext::radarFor(int32_t regionId) {
     }
 }
 
+std::string EditorContext::regionName(int32_t regionId) {
+    if (!map || !gameData) return "";
+    for (const tr::MapRegion& r : map->map.regions)
+        if (r.regionId == regionId && r.displayName > 0) {
+            try { return gameData->regionDisplayName(r.displayName); } catch (const std::exception&) { return ""; }
+        }
+    return "";
+}
+
+std::string EditorContext::regionLabel(int32_t regionId) {
+    const std::string name = regionName(regionId);
+    return "Region " + std::to_string(regionId) + (name.empty() ? "" : ": " + name);
+}
+
 int32_t EditorContext::radarRegionAtCamera() const {
     if (radarRegions.empty()) return -1;
     std::vector<int32_t> regions = scene ? scene->regionsAtCamera() : std::vector<int32_t>{0};

@@ -123,8 +123,8 @@ void drawMapInfoPanel(EditorContext& ctx, const char* title) {
     ImGui::TextWrapped("Radar: %s", ctx.map->radarArchivePath.empty() ? "(none)" : ctx.map->radarArchivePath.c_str());
     if (!ctx.radarRegions.empty()) {
         std::string regions;
-        for (int32_t id : ctx.radarRegions) regions += (regions.empty() ? "" : ", ") + std::to_string(id);
-        ImGui::TextWrapped("Radar maps: context %d, regions %s", ctx.radarContextId, regions.c_str());
+        for (int32_t id : ctx.radarRegions) regions += (regions.empty() ? "" : "; ") + ctx.regionLabel(id);
+        ImGui::TextWrapped("Radar maps (context %d): %s", ctx.radarContextId, regions.c_str());
     }
     ImGui::End();
 }
@@ -210,16 +210,13 @@ void OverviewPanel::draw(EditorContext& ctx, const char* title, const OverviewLa
         if (ImGui::RadioButton("Radar map", backgroundMode_ == 0)) backgroundMode_ = 0;
         if (hasRadar && ctx.radarRegions.size() > 1) {
             ImGui::SameLine();
-            char preview[48];
-            if (radarChoice_ < 0) std::snprintf(preview, sizeof preview, "Auto: region %d", autoRegion);
-            else std::snprintf(preview, sizeof preview, "Region %d", radarChoice_);
-            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9);
-            if (ImGui::BeginCombo("##radarregion", preview)) {
+            const std::string preview = radarChoice_ < 0 ? "Auto: " + ctx.regionLabel(autoRegion) : ctx.regionLabel(radarChoice_);
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16);
+            if (ImGui::BeginCombo("##radarregion", preview.c_str())) {
                 if (ImGui::Selectable("Auto: follow the camera", radarChoice_ < 0)) radarChoice_ = -1;
                 for (int32_t id : ctx.radarRegions) {
-                    char label[48];
-                    std::snprintf(label, sizeof label, id == 0 ? "Region %d (main map)" : "Region %d", id);
-                    if (ImGui::Selectable(label, radarChoice_ == id)) {
+                    const std::string label = ctx.regionLabel(id) + (id == 0 ? " (main map)" : "");
+                    if (ImGui::Selectable(label.c_str(), radarChoice_ == id)) {
                         radarChoice_ = id;
                         backgroundMode_ = 0;
                         fitPending_ = true;                  // show the whole chosen map

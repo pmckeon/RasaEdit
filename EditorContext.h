@@ -106,6 +106,10 @@ public:
     // regionmanager.py OnUpdateRegions): the regions the camera is in plus region 0, sorted by id ascending, the LAST with radar
     // tiles. -1 if the map has none.
     int32_t radarRegionAtCamera() const;
+    // A map region's in-game name (MapRegion.displayName through uielement / uielementlanguage; GameData::regionDisplayName),
+    // "" if none. regionLabel: "Region <id>: <name>" (or "Region <id>").
+    std::string regionName(int32_t regionId);
+    std::string regionLabel(int32_t regionId);
     std::unique_ptr<Renderer> renderer;
     std::unique_ptr<SceneView> scene;
     ViewSettings view;
