@@ -185,6 +185,10 @@ public:
     // lookup[(id, gender)][0], a gender module like npcgreetinglanguage. "" if none.
     std::string missionText(int32_t textId, int32_t gender = 1);
     std::vector<SwapsetPart> itemSwapsetParts(int32_t itemClassId, int32_t baseMeshId);
+    // equipmentdata.equipableClassEquipmentSlot[itemClass] (1 helmet, 14 hair, 17 face, 20 beard, ...; -1 if none) and
+    // equipableClassEquipmentSlotExclusion[itemClass] (the slots wearing it hides, e.g. a mask hides eyewear, beard, mask).
+    int32_t itemEquipmentSlot(int32_t itemClassId);
+    std::vector<int32_t> itemSlotExclusions(int32_t itemClassId);
     // equipmentdata.equipableClassAccessoryConnectionPointWeaponOverride[(itemClass, weaponPosition)] (1 stowed, 2 drawn) if
     // present, else equipableClassAccessoryConnectionPoint[itemClass]; each (mesh string id, connection point id).
     std::vector<AccessoryAttachment> itemAccessories(int32_t itemClassId, int32_t weaponPosition);

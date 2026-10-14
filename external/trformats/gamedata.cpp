@@ -800,6 +800,19 @@ std::vector<SwapsetPart> GameData::itemSwapsetParts(int32_t itemClassId, int32_t
     return parts;
 }
 
+int32_t GameData::itemEquipmentSlot(int32_t itemClassId) {
+    const py::Object* slot = py::dictGet(global("generated.client.equipmentdata", "equipableClassEquipmentSlot"), itemClassId);
+    return py::isInt(slot) ? int32_t(py::asInt(slot)) : -1;
+}
+
+std::vector<int32_t> GameData::itemSlotExclusions(int32_t itemClassId) {
+    std::vector<int32_t> slots;
+    const py::Object* list = py::dictGet(global("generated.client.equipmentdata", "equipableClassEquipmentSlotExclusion"), itemClassId);
+    for (size_t k = 0; k < py::length(list); ++k)
+        if (py::isInt(py::item(list, k))) slots.push_back(int32_t(py::asInt(py::item(list, k))));
+    return slots;
+}
+
 std::vector<AccessoryAttachment> GameData::itemAccessories(int32_t itemClassId, int32_t weaponPosition) {
     std::vector<AccessoryAttachment> out;
     const py::Object* list = py::dictGetTuple(global("generated.client.equipmentdata", "equipableClassAccessoryConnectionPointWeaponOverride"),
