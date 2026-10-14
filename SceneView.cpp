@@ -1332,7 +1332,7 @@ void SceneView::loadModel(const std::string& name, Model& model) {
             if (refraction) glowUvSet = 1;                 // TRRefract: the normal map is on UV set 1 (vertex shader: v4)
             // TR* deferred materials (stage 3): which maps fill slots 1 and 2, and their UV sets (vertex shader array element =
             // the *TexCoord parameters, e.g. vsDiffDetDecEnvDeferredArray[DetailTexCoord x 3 + DecalTexCoord]).
-            const TrDescription trDesc = (!additive && !translucent && !water) ? trDescription(effect) : TrDescription{};
+            const TrDescription trDesc = (!additive && !translucent && !water) ? trDescription(effect) : TrDescription{};
             auto parameterInt = [&](const char* key, int fallback) {
                 for (const tr::GeoParameter& gp : piece.parameters)
                     if (gp.key == key) return std::atoi(gp.value.c_str());
@@ -1596,6 +1596,7 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 if (rigidBone >= 0) model.animated = true;
                 if (trDesc.known) {
                     TrMaterial& m = part.trMaterial;
+                    part.fadeForward = effect.rfind("trdiffmapdiffmap", 0) == 0;
                     m.active = true;
                     auto textureOf = [&](const char* key) -> SDL_GPUTexture* {
                         for (const tr::GeoParameter& gp : piece.parameters)
@@ -2565,7 +2566,15 @@ void SceneView::queueDraws(const Selection& selection) {
         return piece.group == hiddenGroup;
     };
     // A placed model's pieces, as map entities draw them (entityHue: the entity's hue when set, w = 1).
-    auto drawModelPieces = [&](const Model& model, const Mat4& placementWorld, const Vec4f& entityHue, bool selected) {
+    // fading: the body is in the game's distance fade band (FUN_00856c00: 0.01 < alpha < 0.999). The engine then sets MatDiffuse.a to
+    // the alpha and moves Opaque pieces to the Translucent phase (FUN_007ffd80 / FUN_007ffb90), drawn with their forward technique.
+    // Verified in the fountain capture (tabula_rasa.2.trace, 2026-10-14) for the TRDiffMapDiffMap* effects - the four fading bodies
+    // there (770, 772, 1105, 1106), each effect with one static RenderMode 0 technique: blended SRCALPHA / INVSRCALPHA, no depth
+    // writes, CULLMODE CCW, fog on; vertex shader: hemi + gDirLight[0] N.L only (no point lights) x vertex colour; pixel shader:
+    // lerp(diffuse, modifier, vertex alpha) [+ decal / detail] x 2 x light, alpha = lerp(diffuse.a, modifier.a, vertex alpha) -
+    // MatDiffuse.a is not read, so these bodies show their textures' alpha, not a fade. Other effects have several forward techniques
+    // whose runtime choice is not decoded (the engine validates them, FUN_005c1d40); their pieces stay opaque here (UNVERIFIED).
+    auto drawModelPieces = [&](const Model& model, const Mat4& placementWorld, const Vec4f& entityHue, bool selected, bool fading = false) {
         const std::vector<Mat4> animatedMatrices = animatedPieceMatrices(model, lightTime);
         auto pieceWorld = [&](const ModelPiece& piece) {
             return piece.animBone >= 0 && size_t(piece.animBone) < animatedMatrices.size() ? multiply(placementWorld, animatedMatrices[size_t(piece.animBone)]) : placementWorld;
@@ -2614,6 +2623,11 @@ void SceneView::queueDraws(const Selection& selection) {
                     trm.transform0u = uv.u0; trm.transform0v = uv.v0; trm.transform1u = uv.u1; trm.transform1v = uv.v1;
                     trm.transform2u = uv.u2; trm.transform2v = uv.v2;
                 }
+                if (fading && piece.fadeForward && showTextures && materialMaps && trm.active) {
+                    renderer_.drawFadingForward(piece.mesh, world, scaledTint(tint, piece.colourScale), piece.texture, trm, !piece.twoSided);
+                    ++fadingForwardPieces_;
+                    continue;
+                }
                 renderer_.draw(piece.mesh, world, scaledTint(tint, piece.colourScale), true, showTextures ? piece.texture : nullptr, showTextures && piece.alphaTest,
                                 hue, showTextures ? piece.glow : nullptr, piece.twoSided, piece.alphaReference,
                                 showTextures && materialMaps ? piece.normalMap : nullptr, showTextures && materialMaps ? piece.glossMap : nullptr,
@@ -2625,6 +2639,7 @@ void SceneView::queueDraws(const Selection& selection) {
     };
 
     drawnEntities_ = 0;
+    fadingForwardPieces_ = 0;
     if (showEntities) {
         const float maxDistance2 = drawDistance * drawDistance;
         for (size_t k = 0; k < placements_.size(); ++k) {
@@ -2637,7 +2652,8 @@ void SceneView::queueDraws(const Selection& selection) {
             if (!visible(p.centre, p.radius)) continue;
             ++drawnEntities_;
             const bool selected = int(k) == selectedEntity;
-            if (p.model && p.model->loaded) drawModelPieces(*p.model, p.world, p.hue, selected);
+            const float fade = gameDistances ? entityDistanceAlpha(p) : 1.0f;
+            if (p.model && p.model->loaded) drawModelPieces(*p.model, p.world, p.hue, selected, fade < 0.999f && !selected);
             if (p.model && p.model->loaded && p.model->hasSolid) {
                 // drawn above
             } else if (p.model && p.model->loaded && p.model->effectOnly) {

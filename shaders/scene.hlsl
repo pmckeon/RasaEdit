@@ -332,9 +332,11 @@ float4 psMain(VertexOutput input) : SV_Target0
     // slot order, the environment cube (EnvMapSampler = gGlobalEnvTexture, reflect(-V, N) per vertex, no bias) by
     // detail.a or diffuse.a x MatSpecular.z, then x vertex colour x 2 (+ MatEmissive x 0.5 for DetMapDecMap).
     float trGloss = 1.0;
+    float fadeAlpha = 1.0;               // trBits 0x10 (fading forward TRDiffMapDiffMap*): lerp(diffuse.a, modifier.a, vertex alpha)
     if (trBits & 0x1)
     {
         const float4 map1 = detailTexture.Sample(detailSampler, trTransformUv(input.uv1, 1));
+        fadeAlpha = trFlags.x == 1 ? lerp(texel.a, map1.a, input.colour.a) : texel.a;
         const float4 map2 = decalTexture.Sample(decalSampler, trTransformUv(input.uv2, 2));
         const uint kind1 = (uint)trFlags.x, kind2 = (uint)trFlags.y, envMode = (uint)trFlags.z;
         const float4 detail = kind1 == 2 ? map1 : map2;
@@ -357,10 +359,12 @@ float4 psMain(VertexOutput input) : SV_Target0
     s.hemiTop = hemiTop.rgb;
     s.hemiBottom = hemiBottom.rgb;
     // Glow maps add after lighting (the game's glow buffer, added in trhdrcomposite before fog).
-    const float3 glow = glowTexture.Sample(glowSampler, input.uv1).rgb + ((trBits & 0x8) ? trEmissive.rgb : float3(0, 0, 0));
+    const float3 glow = glowTexture.Sample(glowSampler, input.uv1).rgb + ((trBits & 0x8) && !(trBits & 0x10) ? trEmissive.rgb : float3(0, 0, 0));
     // Translucent draws are forward pieces: the game's forward vertex shader has no shadow term.
     s.sunVisibility = options.y > 1.5 ? 1.0 : sunShadow(shadowMap, shadowSampler, shadowMatrix, shadowParams, shadowExtra, cameraPosition.xyz, input.world, n);
-    const float3 light = skyLight(n, s) + extraSkyLight(n, extraTowards, extraFront, extraBack, options.y > 1.5) + localLights(input.world, n, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner, localRotation,
+    // Fading forward pieces (trBits 0x10): the effect's forward vertex shader lights with the hemi and directional sky light only.
+    const int localLightCount = (trBits & 0x10) ? 0 : (int)localCount.x;
+    const float3 light = skyLight(n, s) + extraSkyLight(n, extraTowards, extraFront, extraBack, options.y > 1.5) + localLights(input.world, n, localLightCount, localPosition, localColour, localSpot, localSpotInner, localRotation,
                                                          globeMaps, globeSampler);
     if (fogRange.z > 0.5)
         return float4(light * 0.2, 1.0);       // the game's light buffer (x OO_LIGHT_MULTIPLIER), as /dl_showlight shows it
@@ -392,7 +396,8 @@ float4 psMain(VertexOutput input) : SV_Target0
                localSpecular(input.world, n, v, gloss.r, gloss.g, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner);
     }
     // Alpha: only translucent draws blend with it. Opaque draws keep it 1 - the viewport image is composited with alpha.
-    return float4(applyFog(lit, length(view), fogColour, fogRange), options.y > 1.5 ? base.a * texel.a : 1.0);
+    const float blendAlpha = (trBits & 0x10) ? fadeAlpha : base.a * texel.a;
+    return float4(applyFog(lit, length(view), fogColour, fogRange), options.y > 1.5 ? blendAlpha : 1.0);
 }
 
 // Shadow pass: depth only; alpha-tested pieces (foliage) discard like the colour pass.

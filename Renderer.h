@@ -234,6 +234,10 @@ public:
     // the four NONE effects are two-sided.
     void drawTranslucent(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, SDL_GPUTexture* texture = nullptr,
                          SDL_GPUTexture* detail = nullptr, bool detailUv1 = false, bool cullBack = false);
+    // A TR piece drawn with its forward technique while its body is in the distance fade band (SceneView, "fading" in
+    // drawModelPieces): the translucent pipeline (SRCALPHA / INVSRCALPHA, no depth writes), sky lights only (no placed lights),
+    // alpha = lerp(diffuse.a, modifier.a, vertex alpha) - TrMaterial flags.w bit 0x10.
+    void drawFadingForward(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, SDL_GPUTexture* texture, const TrMaterial& material, bool cullBack);
     // Additive (one, one), unlit, faded by fog, drawn last without depth writes: the game's TRAdditive* effects.
     // lit: a forward-phase piece in the Additive phase (lit per vertex, opacity x tint.w = MatDiffuse alpha).
     void drawAdditive(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, SDL_GPUTexture* texture, bool lit = false,

@@ -231,6 +231,7 @@ public:
     // Why an entity draws the way it does: "model", "water", "effect (no geometry)", "failed: ...", etc.
     std::string modelStatus(size_t entityIndex) const;
     size_t drawnEntities() const { return drawnEntities_; }
+    size_t fadingForwardPieces() const { return fadingForwardPieces_; }   // pieces drawn in the fade band's forward mode this frame
     size_t drawnClutter() const { return drawnClutter_; }
     size_t clutterInstances() const;             // in the cells currently built
 
@@ -255,6 +256,9 @@ private:
         bool skyEmissive = false;               // TREmissive* piece: drawn as a sky layer by queueSky (unlit, MatDiffuse x 4)
         bool environment = false;              // Pal*Env* material: reflects the region's environment cube by gloss.b
         bool hueUnweighted = false;            // alpha-tested Pal*Hue: Hue added without the diffuse-alpha weight
+        // TRDiffMapDiffMap* effect: in the game's distance fade band (SceneView::entityDistanceAlpha < 0.999) the piece is drawn with
+        // the effect's one static forward technique (see "fade band" in queueDraws), which the fountain capture verifies.
+        bool fadeForward = false;
         // The material's stored Hue parameter (w = 1 when set): what a map entity's pieces keep when the entity is not hued.
         Vec4f materialHue = Vec4f{0, 0, 0, 0};
         TrMaterial trMaterial;                 // TR* deferred material (stage 3), trMaterial.active
@@ -555,6 +559,7 @@ private:
     size_t modelsLoaded_ = 0;
     size_t modelsFailed_ = 0;
     size_t drawnEntities_ = 0;
+    size_t fadingForwardPieces_ = 0;
 
     // Terrain clutter cells (32 x 32 samples). The client keeps the cells within 3 of the camera's cell
     // (FUN_0073b930), shows a model's instances while the camera is within the model's drawDistance of the cell

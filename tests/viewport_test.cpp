@@ -879,7 +879,7 @@ int main(int argc, char** argv) {
             scene.animate = true;
         }
         scene.queueDraws(highlighted);
-        std::printf("draws queued: %zu (entities drawn %zu), particle vertices %zu\n", renderer.queuedDraws(), scene.drawnEntities(), renderer.queuedParticleVertices());
+        std::printf("draws queued: %zu (entities drawn %zu, fading forward pieces %zu), particle vertices %zu\n", renderer.queuedDraws(), scene.drawnEntities(), scene.fadingForwardPieces(), renderer.queuedParticleVertices());
         std::printf("clutter drawn: %zu\n", scene.drawnClutter());
         std::printf("terrain chunks: %zu, %zu at full detail\n", scene.terrainChunkCount(), scene.terrainChunksAtFullDetail());
         {

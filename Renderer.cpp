@@ -609,6 +609,22 @@ void Renderer::drawTranslucent(const GpuMesh& mesh, const Mat4& model, const Vec
     translucentDraws_.push_back(item);
 }
 
+void Renderer::drawFadingForward(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, SDL_GPUTexture* texture, const TrMaterial& material,
+                                 bool cullBack) {
+    if (!mesh.vertices || mesh.indexCount == 0) return;
+    DrawItem item{&mesh, model, tint, true, texture ? texture : white_, false, nullptr, true, Vec4f{0, 0, 0, 0}, black_};
+    item.tr = material;
+    item.tr.flags.w = float(int(material.flags.w) | 0x10);
+    item.detail = material.slot1;                // as draw(): slot 1 / 2 maps on the detail (t2) and decal (t3) bindings
+    item.decal = material.slot2;
+    item.cullBlended = cullBack;
+    item.skinVertices = currentSkin_;
+    item.boneBase = currentBoneBase_;
+    item.skinNormals = currentSkinNormals_;
+    item.castsShadow = false;
+    translucentDraws_.push_back(item);
+}
+
 void Renderer::drawAdditive(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, SDL_GPUTexture* texture, bool lit, SDL_GPUTexture* detail,
                             bool detailUv1, bool cullBack) {
     if (!mesh.vertices || mesh.indexCount == 0) return;
