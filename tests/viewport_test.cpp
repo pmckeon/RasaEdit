@@ -865,6 +865,67 @@ int main(int argc, char** argv) {
                 }
             }
         }
+        // RASA_PROFILE=<frames>: the editor's per-frame work at this camera (Editor: loadPending(0.010); ViewportPanel::render:
+        // advanceParticles, advanceLights, queueDraws, record + submit) for that many 60 Hz frames, the camera turning 0.5 degrees
+        // per frame as when looking around; per section the mean and worst time and the frames that took over twice the median.
+        if (const char* frames = envValue("RASA_PROFILE")) {
+            const int count = std::max(1, std::atoi(frames));
+            struct Times { double load, particles, lights, queue, record, gpu, total; };
+            double sections[7] = {};
+            std::vector<Times> times;
+            auto now = [] { return std::chrono::steady_clock::now(); };
+            auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+            for (int f = 0; f < count; ++f) {
+                Times t{};
+                const auto t0 = now();
+                scene.loadPending(0.010);
+                const auto t1 = now();
+                scene.advanceParticles(1.0f / 60.0f);
+                const auto t2 = now();
+                scene.advanceLights(1.0f / 60.0f);
+                const auto t3 = now();
+                scene.queueDraws(highlighted);
+                const auto t4 = now();
+                for (int k = 0; k < 7; ++k) sections[k] += scene.queueSectionMs(k);
+                SDL_GPUCommandBuffer* cb = SDL_AcquireGPUCommandBuffer(device);
+                renderer.record(cb);
+                const auto t5 = now();
+                SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cb);
+                if (fence) {
+                    SDL_WaitForGPUFences(device, true, &fence, 1);
+                    SDL_ReleaseGPUFence(device, fence);
+                }
+                const auto t6 = now();
+                t = Times{ms(t0, t1), ms(t1, t2), ms(t2, t3), ms(t3, t4), ms(t4, t5), ms(t5, t6), ms(t0, t6)};
+                times.push_back(t);
+                scene.camera().yaw += 0.5f * 3.14159265f / 180.0f;
+            }
+            std::vector<double> totals;
+            for (const Times& t : times) totals.push_back(t.total);
+            std::vector<double> sorted = totals;
+            std::sort(sorted.begin(), sorted.end());
+            const double median = sorted[sorted.size() / 2];
+            auto report = [&](const char* name, double Times::*field) {
+                double sum = 0, worst = 0;
+                for (const Times& t : times) { sum += t.*field; worst = std::max(worst, t.*field); }
+                std::printf("profile %-9s mean %7.2f ms  worst %7.2f ms\n", name, sum / double(times.size()), worst);
+            };
+            report("load", &Times::load);
+            report("particles", &Times::particles);
+            report("lights", &Times::lights);
+            report("queue", &Times::queue);
+            report("record", &Times::record);
+            report("gpu", &Times::gpu);
+            report("total", &Times::total);
+            std::printf("profile queue sections (mean ms): terrain+setup %.2f (terrain %.2f)  entities %.2f  clutter %.2f  particles %.2f  sky %.2f  server %.2f;"
+                        " entities drawn %zu, clutter drawn %zu, draws queued %zu\n", sections[0] / count, sections[6] / count, sections[1] / count, sections[2] / count,
+                        sections[3] / count, sections[4] / count, sections[5] / count, scene.drawnEntities(), scene.drawnClutter(), renderer.queuedDraws());
+            std::printf("profile median frame %.2f ms; spikes (> 2x median):\n", median);
+            for (size_t f = 0; f < times.size(); ++f)
+                if (times[f].total > 2.0 * median)
+                    std::printf("  frame %3zu total %7.2f  load %6.2f particles %6.2f lights %6.2f queue %6.2f record %6.2f gpu %6.2f\n", f,
+                                times[f].total, times[f].load, times[f].particles, times[f].lights, times[f].queue, times[f].record, times[f].gpu);
+        }
         if (envValue("RASA_SKINTIMING")) {
             for (int pass = 0; pass < 3; ++pass) {        // on, off, on: the first pass also pays one-time costs
                 scene.animate = pass != 1;

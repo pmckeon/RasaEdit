@@ -302,7 +302,7 @@ void unitCube(std::vector<MeshVertex>& vertices, std::vector<uint32_t>& triangle
 SceneView::SceneView(Renderer& renderer, const tr::AssetLibrary& assets, const tr::MapBundle& map,
                      std::function<std::string(int32_t)> meshForClass, std::function<bool(int32_t)> classKnown,
                      std::function<int32_t(int32_t)> cullingLayerForClass, uint32_t terrainStep)
-    : renderer_(renderer), assets_(assets), map_(map) {
+    : renderer_(renderer), assets_(assets), map_(map), cullingLayerForClass_(cullingLayerForClass) {
     std::vector<MeshVertex> vertices;
     std::vector<uint32_t> triangles, lines;
     unitCube(vertices, triangles, lines);
@@ -2522,6 +2522,12 @@ void SceneView::updateClutterCells() {
 // ------------------------------------------------------------------------------------------
 void SceneView::queueDraws(const Selection& selection) {
     ++frameNumber_;
+    auto sectionStart = std::chrono::steady_clock::now();
+    auto endSection = [&](int section) {
+        const auto t = std::chrono::steady_clock::now();
+        queueSectionMs_[section] = std::chrono::duration<double, std::milli>(t - sectionStart).count();
+        sectionStart = t;
+    };
     const int selectedEntity = selection.kind == SelectionKind::MapEntity ? int(selection.index) : -1;
     const float aspect = float(renderer_.width()) / float(std::max<uint32_t>(1, renderer_.height()));
     const Mat4 viewProjection = multiply(camera_.projectionMatrix(aspect), camera_.viewMatrix());
@@ -2548,7 +2554,9 @@ void SceneView::queueDraws(const Selection& selection) {
         }
         return true;
     };
+    const auto terrainStart = std::chrono::steady_clock::now();
     if (showTerrain && !terrainChunks_.empty()) queueTerrain(visible);
+    queueTerrainMs_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - terrainStart).count();
 
     // Map entities and server objects are lit and tinted alike; only the selection is highlighted.
     auto modelTint = [&](bool selected) {
@@ -2660,6 +2668,7 @@ void SceneView::queueDraws(const Selection& selection) {
         }
     };
 
+    endSection(0);
     drawnEntities_ = 0;
     fadingForwardPieces_ = 0;
     if (showEntities) {
@@ -2691,6 +2700,7 @@ void SceneView::queueDraws(const Selection& selection) {
         }
     }
 
+    endSection(1);
     // Terrain clutter (casts sun shadows: in-game /dl_showlight at Concordia noon shows grass and flower shadows).
     drawnClutter_ = 0;
     if (showClutter && showTerrain && map_.hasTerrain) {
@@ -2714,6 +2724,7 @@ void SceneView::queueDraws(const Selection& selection) {
         }
     }
 
+    endSection(2);
     // Particle systems (camera-facing sprites need the view's axes).
     if (showEntities && showParticles) {
         const tr::Vec3 right = camera_.right(), up = camera_.up();
@@ -2732,7 +2743,9 @@ void SceneView::queueDraws(const Selection& selection) {
         }
     }
 
+    endSection(3);
     queueSky();
+    endSection(4);
 
     // Server content (World database).
     const Vec4f highlight = markerColour::selected;
@@ -2761,7 +2774,7 @@ void SceneView::queueDraws(const Selection& selection) {
         const tr::Vec3 d = subtract(s.position, camera_.position);
         if (!selected && dot(d, d) > maxDistance2) continue;
         if (!visible(s.position, std::max(s.ringRadius, 3.0f))) continue;
-        const bool hasModel = s.model && s.model->loaded && (s.model->hasSolid || s.model->effectOnly);
+        const bool hasModel = s.model && s.model->loaded && (s.model->hasSolid || s.model->effectOnly) && (selected || !serverModelCulled(s));
         if (hasModel) {
             const Vec4f tint = modelTint(selected);
             struct IdleScope {                  // the creature's idle palettes apply to this placement only
@@ -2905,6 +2918,7 @@ void SceneView::queueDraws(const Selection& selection) {
             }
         }
     }
+    endSection(5);
 }
 
 namespace {
@@ -3076,7 +3090,7 @@ Selection SceneView::pick(float ndcX, float ndcY, bool pickEntities, bool pickSe
         bool hit = false;
         if (s.area) {
             hit = raySphere(tr::Vec3{s.shape.position.x, s.shape.position.y + 2.0f, s.shape.position.z}, 3.0f, t);
-        } else if (s.model && s.model->loaded && !s.model->triangles.empty()) {
+        } else if (s.model && s.model->loaded && !s.model->triangles.empty() && !serverModelCulled(s)) {
             const Mat4& w = s.world;                    // yaw rotation, unit scale: local = R^T (p - t)
             auto toLocal = [&](const tr::Vec3& v) {
                 return tr::Vec3{w.row0.x * v.x + w.row1.x * v.y + w.row2.x * v.z, w.row0.y * v.x + w.row1.y * v.y + w.row2.y * v.z,
@@ -3270,8 +3284,15 @@ std::string SceneView::objectAnimationFor(const std::string& mesh) {
 // trace (2026-10-14) with view scalar 1 and f = 1: no entity predicted culled is drawn, and the four predicted fading in view
 // (770, 772, 1105, 1106) are exactly the map objects drawn in the forward pass after the sky. Not reproduced: the fade band's
 // look (the forward shaders differ per material; the two checked ignore MatDiffuse.a) - fading entities are drawn opaque.
-float SceneView::entityDistanceAlpha(const Placement& p) const {
-    const int32_t layer = p.cullingLayer;
+float SceneView::entityDistanceAlpha(const Placement& p) const { return distanceAlpha(p.cullingLayer, p.centre, p.radius); }
+
+bool SceneView::serverModelCulled(const ServerPlacement& s) const {
+    if (!gameDistances || s.cullingLayer == 0 || s.area) return false;
+    const float radius = s.model && s.model->loaded ? std::max(0.5f, length(subtract(s.model->bounds.max, s.model->bounds.min)) * 0.5f) : 1.0f;
+    return distanceAlpha(s.cullingLayer, tr::Vec3{s.position.x, s.position.y + 1.0f, s.position.z}, radius) <= 0.01f;
+}
+
+float SceneView::distanceAlpha(int32_t layer, const tr::Vec3& centre, float radius) const {
     if (layer == 6) return 0.0f;
     const float f = farCullLayerScalar;
     const float layerDistance = layer == 2 ? 100 + 200 * f : layer == 3 ? 100 : layer == 4 ? 10 : layer == 5 ? 25 : layer == 7 ? 50
@@ -3279,9 +3300,9 @@ float SceneView::entityDistanceAlpha(const Placement& p) const {
     if (layerDistance <= 0) return 1.0f;
     const float maxDistance = std::min(layerDistance * std::max(viewDistanceMultiplier, 1.0f), 250.0f);
     const float start = 0.9f * maxDistance;
-    const float d = length(subtract(p.centre, camera_.position));
+    const float d = length(subtract(centre, camera_.position));
     if (d <= start) return 1.0f;
-    return std::clamp(1.0f - (d - p.radius - start) / (maxDistance - start), 0.0f, 1.0f);
+    return std::clamp(1.0f - (d - radius - start) / (maxDistance - start), 0.0f, 1.0f);
 }
 
 // Any object's model (map entities, server objects, special-FX accessories, avatar accessories) with its animation played:
@@ -3377,7 +3398,9 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
         return placementMatrix(position, tr::Quat{0, std::sin(rotation * 0.5f), 0, std::cos(rotation * 0.5f)}, 1.0f);
     };
     // A creature's figure: its class mesh, or the assembled avatar with its idles and accessories.
+    auto layerOf = [&](int32_t classId) { return cullingLayerForClass_ ? cullingLayerForClass_(classId) : 3; };
     auto dressCreature = [&](ServerPlacement& s, const Creature* creature) {
+        if (creature) s.cullingLayer = layerOf(creature->classId);
         s.model = creature ? modelFor(meshForClass(creature->classId)) : nullptr;
         if (!creature || !avatarFor) return;
         const AvatarLook look = avatarFor(*creature);
@@ -3440,6 +3463,7 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
         const Teleporter& t = content->teleporters[k];
         ServerPlacement s;
         s.selection = Selection{SelectionKind::Teleporter, k};
+        s.cullingLayer = layerOf(t.classId);
         s.position = t.position;
         s.world = yawPlacement(t.position, t.rotation);
         s.model = objectModelFor(meshForClass(t.classId));
@@ -3456,6 +3480,7 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
         const PlacedObject& o = content->objects[k];
         ServerPlacement s;
         s.selection = Selection{SelectionKind::Object, k};
+        s.cullingLayer = layerOf(o.classId);
         s.position = o.position;
         s.world = yawPlacement(o.position, o.rotation);
         s.model = objectModelFor(meshForClass(o.classId));

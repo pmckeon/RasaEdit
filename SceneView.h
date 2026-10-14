@@ -231,7 +231,10 @@ public:
     // Why an entity draws the way it does: "model", "water", "effect (no geometry)", "failed: ...", etc.
     std::string modelStatus(size_t entityIndex) const;
     size_t drawnEntities() const { return drawnEntities_; }
-    size_t fadingForwardPieces() const { return fadingForwardPieces_; }   // pieces drawn in the fade band's forward mode this frame
+    size_t fadingForwardPieces() const { return fadingForwardPieces_; }
+    // Diagnostic: milliseconds the last queueDraws spent per section - 0 setup + terrain, 1 map entities, 2 clutter, 3 particles,
+    // 4 sky, 5 server objects.
+    double queueSectionMs(int section) const { return section >= 0 && section < 6 ? queueSectionMs_[section] : section == 6 ? queueTerrainMs_ : 0.0; }   // 6: terrain alone (part of 0)   // pieces drawn in the fade band's forward mode this frame
     size_t drawnClutter() const { return drawnClutter_; }
     size_t clutterInstances() const;             // in the cells currently built
 
@@ -410,6 +413,7 @@ private:
     };
     struct ServerPlacement {
         Selection selection;
+        int32_t cullingLayer = 0;       // the class's vizsetting culling layer (creature / teleporter / object class; 0 = no limit)
         tr::Vec3 position;
         Mat4 world;                     // position + yaw (unit scale)
         Model* model = nullptr;         // the base suit for avatars
@@ -440,6 +444,11 @@ private:
     Model* modelFor(const std::string& mesh, const std::string& poseAnimation = "", const std::string& skeletonMesh = "");
     std::string objectAnimationFor(const std::string& mesh);
     float entityDistanceAlpha(const Placement& p) const;    // 1 opaque, (0.01, 1) fading, <= 0.01 culled
+    float distanceAlpha(int32_t layer, const tr::Vec3& centre, float radius) const;   // the game's rule for any body
+    // A server object's model beyond the game's draw distance for its class's culling layer (with gameDistances): not posed,
+    // drawn or picked - the marker box stands in (the selection is always drawn).
+    bool serverModelCulled(const ServerPlacement& s) const;
+    std::function<int32_t(int32_t)> cullingLayerForClass_;
     Model* objectModelFor(const std::string& mesh, const std::string& packageAnimation = "");
     std::unordered_map<std::string, std::string> objectAnimations_;   // mesh -> its object animation ("" = none)
     // Creature idles: animations by name (null = failed to read), bone -> track per (model, animation), and the palettes of the
@@ -560,6 +569,8 @@ private:
     size_t modelsFailed_ = 0;
     size_t drawnEntities_ = 0;
     size_t fadingForwardPieces_ = 0;
+    double queueSectionMs_[6] = {};
+    double queueTerrainMs_ = 0;
 
     // Terrain clutter cells (32 x 32 samples). The client keeps the cells within 3 of the camera's cell
     // (FUN_0073b930), shows a model's instances while the camera is within the model's drawDistance of the cell
