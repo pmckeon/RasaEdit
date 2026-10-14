@@ -1065,9 +1065,19 @@ GpuMesh SceneView::buildTerrainChunkMesh(const TerrainChunk& chunk, uint32_t lev
     rowLines.push_back(chunk.row1);
     for (uint32_t c = chunk.col0; c < chunk.col1; c += step) columnLines.push_back(c);
     columnLines.push_back(chunk.col1);
+    // Terrain holes (verified in game 2026-10-14: Daghda's Urn Village -796 761, Pinhole Falls 321 470, Ranja Cavern's mouth): a
+    // sample whose flag 0 is clear is cut out - the base pass texkills where the base mask (255 where flag 0 is set) is under 0.5
+    // (TRTerrainClient SetZBufferAndFog). Its height is the stored 12-bit value like any other sample's (the .tpc reader keeps
+    // height and flags apart, FUN_0094d6b0), i.e. boundsMax.y above worldHeight's, which counts flag 0 as height bit 12; so the
+    // half-cells at a hole's edge keep their real slope. The vertex alpha carries flag 0; terrain.hlsl discards below 0.5.
+    auto holeAt = [&](int64_t r, int64_t c) {
+        return r >= 0 && c >= 0 && r <= int64_t(lastRow) && c <= int64_t(lastColumn) && t.hasData(uint32_t(r), uint32_t(c)) &&
+               !tr::terrainFlag(t.sampleAt(uint32_t(r), uint32_t(c)).word, 0);
+    };
     auto heightAt = [&](int64_t r, int64_t c, float fallback) {
         if (r < 0 || c < 0 || r > int64_t(lastRow) || c > int64_t(lastColumn)) return fallback;
-        return t.hasData(uint32_t(r), uint32_t(c)) ? t.worldHeightAt(uint32_t(r), uint32_t(c)) : fallback;
+        if (!t.hasData(uint32_t(r), uint32_t(c))) return fallback;
+        return t.worldHeightAt(uint32_t(r), uint32_t(c)) + (holeAt(r, c) ? t.header.bounds.max.y : 0.0f);
     };
     const float spacing = t.header.spacing * float(step);
     const size_t rows = rowLines.size(), columns = columnLines.size();
@@ -1087,7 +1097,7 @@ GpuMesh SceneView::buildTerrainChunkMesh(const TerrainChunk& chunk, uint32_t lev
             v.normalX = n.x;
             v.normalY = n.y;
             v.normalZ = n.z;
-            v.colour = heightColour((h - terrainLowest_) / terrainRange_);
+            v.colour = (heightColour((h - terrainLowest_) / terrainRange_) & 0x00FFFFFFu) | (holeAt(r, c) ? 0u : 0xFF000000u);
             vertices.push_back(v);
         }
     }

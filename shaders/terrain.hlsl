@@ -69,6 +69,7 @@ struct VertexOutput
     float4 position : SV_Position;
     float3 world    : TEXCOORD0;
     float3 normal   : TEXCOORD1;
+    float  solid    : TEXCOORD2;      // the sample's flag 0 (1 = terrain, 0 = hole), interpolated
 };
 
 VertexOutput vsMain(VertexInput input)
@@ -78,6 +79,7 @@ VertexOutput vsMain(VertexInput input)
     output.position = mul(viewProjection, world);
     output.world = world.xyz;
     output.normal = mul((float3x3)model, input.normal);
+    output.solid = input.colour.a;
     return output;
 }
 
@@ -91,6 +93,9 @@ float layerTiling(uint layer)
 
 float4 psMain(VertexOutput input) : SV_Target0
 {
+    // Terrain holes: TRTerrainClient's SetZBufferAndFog pass texkills where the base mask (flag 0) is under 0.5.
+    if (input.solid < 0.5)
+        discard;
     const float3 n = normalize(input.normal);
     const float3 an = abs(n);
     // Tri-planar projection chosen once per pixel; gradients taken outside the loops.

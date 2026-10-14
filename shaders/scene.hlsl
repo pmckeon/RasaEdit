@@ -405,4 +405,6 @@ void psShadow(VertexOutput input)
 {
     if (options.x > 0.0 && diffuseTexture.Sample(diffuseSampler, input.uv).a < options.x)
         discard;
+    if (options.y > 0.5 && input.colour.a < 0.5)
+        discard;                           // terrain holes (vertex alpha = flag 0) cast no shadow (UNVERIFIED)
 }

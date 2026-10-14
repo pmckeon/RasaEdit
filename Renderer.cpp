@@ -1095,7 +1095,7 @@ void Renderer::recordShadows(SDL_GPUCommandBuffer*& commands) {
         const bool alphaTest = !item.terrain && item.alphaTest;
         const SDL_GPUTextureSamplerBinding sampler = {alphaTest && item.texture ? item.texture : white_, linearSampler_};
         SDL_BindGPUFragmentSamplers(pass, 0, &sampler, 1);
-        const Vec4f options{alphaTest ? item.alphaReference : 0.0f, 0, 0, 0};
+        const Vec4f options{alphaTest ? item.alphaReference : 0.0f, item.terrain ? 1.0f : 0.0f, 0, 0};
         SceneFragmentUniforms u{Vec4f{1, 1, 1, 1}, towardsLight_, options, Vec4f{0, 0, 0, 0},
                                 lightingUniforms(lighting_, cameraPosition_, shadowMatrix_, false, float(shadowSize))};
         SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof u);
