@@ -302,7 +302,8 @@ void unitCube(std::vector<MeshVertex>& vertices, std::vector<uint32_t>& triangle
 SceneView::SceneView(Renderer& renderer, const tr::AssetLibrary& assets, const tr::MapBundle& map,
                      std::function<std::string(int32_t)> meshForClass, std::function<bool(int32_t)> classKnown,
                      std::function<int32_t(int32_t)> cullingLayerForClass, uint32_t terrainStep)
-    : renderer_(renderer), assets_(assets), map_(map), cullingLayerForClass_(cullingLayerForClass) {
+    : renderer_(renderer), assets_(assets), map_(map), cullingLayerForClass_(cullingLayerForClass), meshForClass_(meshForClass),
+      classKnown_(classKnown) {
     std::vector<MeshVertex> vertices;
     std::vector<uint32_t> triangles, lines;
     unitCube(vertices, triangles, lines);
@@ -344,23 +345,7 @@ SceneView::SceneView(Renderer& renderer, const tr::AssetLibrary& assets, const t
     float minX = 1e30f, maxX = -1e30f, minZ = 1e30f, maxZ = -1e30f;
     placements_.reserve(map_.map.entities.size());
     for (const tr::MapEntity& e : map_.map.entities) {
-        Placement p;
-        p.world = placementMatrix(e.location, e.orientation, e.scale);
-        p.hasBounds = e.hasBounds;
-        const tr::Bounds bounds = e.hasBounds ? e.bounds : tr::Bounds{tr::Vec3{-0.5f, 0, -0.5f}, tr::Vec3{0.5f, 1, 0.5f}};
-        p.boxWorld = multiply(p.world, boxMatrix(bounds));
-        const tr::Vec3 localCentre = scaled(add(bounds.min, bounds.max), 0.5f);
-        p.centre = transformPoint(p.world, localCentre);
-        p.radius = std::max(0.5f, length(subtract(bounds.max, bounds.min)) * 0.5f * e.scale);
-        p.classKnown = classKnown(e.classId);
-        p.cullingLayer = e.cullLayer != 0 ? e.cullLayer : cullingLayerForClass ? cullingLayerForClass(e.classId) : 3;
-        p.neverDrawn = p.cullingLayer == 6;
-        const std::string mesh = p.neverDrawn ? std::string() : meshForClass(e.classId);
-        // With the model's own animation, played on the light clock (without it the hologram's skinned pieces collapse into a
-        // column).
-        p.model = objectModelFor(mesh);      // unordered_map nodes are stable
-        p.hue = entityHue(e.hue1);
-        placements_.push_back(p);
+        placements_.push_back(makePlacement(e));
         minX = std::min(minX, e.location.x); maxX = std::max(maxX, e.location.x);
         minZ = std::min(minZ, e.location.z); maxZ = std::max(maxZ, e.location.z);
     }
@@ -392,6 +377,7 @@ SceneView::SceneView(Renderer& renderer, const tr::AssetLibrary& assets, const t
 }
 
 void SceneView::setClassHues(const std::function<bool(int32_t, tr::HueColour&, tr::HueColour&)>& classHue) {
+    classHue_ = classHue;
     for (size_t k = 0; k < placements_.size() && k < map_.map.entities.size(); ++k) {
         tr::HueColour hue1 = map_.map.entities[k].hue1, hue2 = map_.map.entities[k].hue2;
         if (classHue) classHue(map_.map.entities[k].classId, hue1, hue2);
@@ -3251,6 +3237,51 @@ std::vector<std::pair<std::string, Mat4>> SceneView::debugWorldSkinMatrices(size
     const std::vector<Mat4> skin = skinMatrices(m.skeleton, m.animation, t, nullptr, nullptr, &m.boneTracks);
     for (size_t k = 0; k < skin.size(); ++k) out.emplace_back(m.skeleton.bones[k].name, multiply(p.world, skin[k]));
     return out;
+}
+
+SceneView::Placement SceneView::makePlacement(const tr::MapEntity& e) {
+    Placement p;
+    p.world = placementMatrix(e.location, e.orientation, e.scale);
+    p.hasBounds = e.hasBounds;
+    const tr::Bounds bounds = e.hasBounds ? e.bounds : tr::Bounds{tr::Vec3{-0.5f, 0, -0.5f}, tr::Vec3{0.5f, 1, 0.5f}};
+    p.boxWorld = multiply(p.world, boxMatrix(bounds));
+    const tr::Vec3 localCentre = scaled(add(bounds.min, bounds.max), 0.5f);
+    p.centre = transformPoint(p.world, localCentre);
+    p.radius = std::max(0.5f, length(subtract(bounds.max, bounds.min)) * 0.5f * e.scale);
+    p.classKnown = classKnown_ ? classKnown_(e.classId) : true;
+    p.cullingLayer = e.cullLayer != 0 ? e.cullLayer : cullingLayerForClass_ ? cullingLayerForClass_(e.classId) : 3;
+    p.neverDrawn = p.cullingLayer == 6;
+    const std::string mesh = p.neverDrawn || !meshForClass_ ? std::string() : meshForClass_(e.classId);
+    // With the model's own animation, played on the light clock (without it the hologram's skinned pieces collapse into a column).
+    p.model = objectModelFor(mesh);      // unordered_map nodes are stable
+    tr::HueColour hue1 = e.hue1, hue2 = e.hue2;
+    if (classHue_) classHue_(e.classId, hue1, hue2);              // physicalentityclasshue wins when the class has a row (setClassHues)
+    p.hue = entityHue(hue1);
+    return p;
+}
+
+void SceneView::refreshEntity(size_t entityIndex) {
+    if (entityIndex >= placements_.size() || entityIndex >= map_.map.entities.size()) return;
+    placements_[entityIndex] = makePlacement(map_.map.entities[entityIndex]);
+    liveParticles_.erase(std::remove_if(liveParticles_.begin(), liveParticles_.end(),
+                                        [&](const LiveParticles& l) { return !l.server && l.placement == entityIndex; }),
+                         liveParticles_.end());
+}
+
+void SceneView::rebuildEntities() {
+    placements_.clear();
+    placements_.reserve(map_.map.entities.size());
+    for (const tr::MapEntity& e : map_.map.entities) placements_.push_back(makePlacement(e));
+    liveParticles_.erase(std::remove_if(liveParticles_.begin(), liveParticles_.end(), [](const LiveParticles& l) { return !l.server; }),
+                         liveParticles_.end());
+}
+
+bool SceneView::entityModelBounds(size_t entityIndex, tr::Bounds& bounds) const {
+    if (entityIndex >= placements_.size()) return false;
+    const Model* m = placements_[entityIndex].model;
+    if (!m || !m->loaded) return false;
+    bounds = m->bounds;
+    return true;
 }
 
 bool SceneView::entityBounds(size_t entityIndex, tr::Vec3& centre, float& radius) const {

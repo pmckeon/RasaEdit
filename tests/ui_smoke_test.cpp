@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <filesystem>
 #include <vector>
 #include <cstdlib>
 #include <string>
@@ -386,6 +387,50 @@ int main() {
         check(!ctx.scene->showServer, "client viewport hides the server overlay");
         check(editor.client_->visibleEntities_.size() == ctx.map->map.entities.size(), "client entity table filled");
         saveViewport(ctx, device, outputPath("smoke_client.rgba").c_str());
+
+        // Map editing: move, rotate, duplicate, delete, undo; save into a COPY of the map folder (never the game's) and read back.
+        {
+            ClientWorkspace& client = *editor.client_;
+            namespace fs = std::filesystem;
+            const fs::path copyFolder = fs::path(outputPath("smoke_map")) / ctx.map->name;
+            std::error_code ec;
+            fs::remove_all(copyFolder.parent_path(), ec);
+            fs::create_directories(copyFolder, ec);
+            for (const auto& f : fs::directory_iterator(ctx.map->folder, ec))
+                if (tr::toLowerAscii(f.path().extension().string()) == ".map") fs::copy_file(f.path(), copyFolder / f.path().filename(), ec);
+            const std::string realFolder = ctx.map->folder;
+            ctx.map->folder = copyFolder.string();
+            const size_t count = ctx.map->map.entities.size();
+            client.selection_ = Selection{SelectionKind::MapEntity, 0};
+            const tr::Vec3 before = ctx.map->map.entities[0].location;
+            client.beginEdit();
+            client.selectedPosition()->x += 5.0f;
+            client.contentChanged();
+            *client.selectedRotation() += 1.5707963f;            // 90 degrees about the vertical
+            client.contentChanged();
+            client.duplicateSelected();
+            check(ctx.map->map.entities.size() == count + 1 && client.hasUnsavedChanges(), "map entity moved, rotated and duplicated");
+            client.deleteSelected();                              // the duplicate (selected after duplicating)
+            check(ctx.map->map.entities.size() == count, "duplicate deleted");
+            client.undo();
+            check(ctx.map->map.entities.size() == count + 1, "undo brings the duplicate back");
+            client.redo();
+            frames(editor, device, 2);
+            const tr::MapEntity edited = ctx.map->map.entities[0];
+            const bool saved = client.saveMap();
+            const fs::path written = copyFolder / (ctx.map->name + ".map");
+            tr::MapFile reread;
+            try { reread = tr::readMap(written.string()); } catch (const std::exception&) {}
+            fs::path original = written;
+            original += ".rasaedit-original";
+            const bool backup = fs::exists(original, ec);
+            std::printf("      map save: %d, %zu entities read back, entity 0 x %.2f -> %.2f, backup %d\n", saved ? 1 : 0, reread.entities.size(),
+                        before.x, reread.entities.empty() ? 0.0f : reread.entities[0].location.x, backup ? 1 : 0);
+            check(saved && !client.hasUnsavedChanges() && reread.entities.size() == count && reread.entities[0].location.x == edited.location.x &&
+                      reread.entities[0].orientation.y == edited.orientation.y && backup,
+                  "map saved to a copy, read back with the edits, original kept");
+            ctx.map->folder = realFolder;
+        }
 
         // Assets panel previews: a model (rendered by its own scene and renderer), a texture and a sound.
         {

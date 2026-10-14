@@ -30,7 +30,9 @@ void Editor::processPendingActions() {
     const EditorContext::Pending pending = context_->takePending();
     // Loading a game, map or database replaces the server content: ask first if it has unsaved edits.
     auto mayReplaceServerContent = [&](PromptAction action, const std::string& target) {
-        if (!server_->hasUnsavedChanges() || skipUnsavedCheck_) {
+        // A new game or map also replaces the client workspace's map edits; a new database only the server content.
+        const bool unsaved = server_->hasUnsavedChanges() || (action != PromptAction::OpenDatabase && client_->hasUnsavedChanges());
+        if (!unsaved || skipUnsavedCheck_) {
             skipUnsavedCheck_ = false;
             return true;
         }
@@ -78,6 +80,7 @@ void Editor::drawMenuBar() {
         if (ImGui::MenuItem("Open Game Folder...")) context_->showGameFolderDialog();
         if (ImGui::MenuItem("Open Server Database...")) server_->showDatabaseDialog();
         if (ImGui::MenuItem("Save Server Changes", "Ctrl+S", false, server_->canEditServer() && server_->hasUnsavedChanges())) server_->saveChanges();
+        if (ImGui::MenuItem("Save Map Changes", nullptr, false, client_->hasUnsavedChanges())) client_->saveMap();
         ImGui::Separator();
         if (ImGui::MenuItem("Quit")) {
             SDL_Event quit = {};
@@ -88,12 +91,15 @@ void Editor::drawMenuBar() {
     }
     if (ImGui::BeginMenu("Edit")) {
         active_->drawEditMenu();
-        if (active_ == client_.get()) ImGui::TextDisabled("The client workspace is read-only for now.");
         ImGui::EndMenu();
     }
     if (server_->hasUnsavedChanges()) {
         ImGui::Separator();
         ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "unsaved server changes");
+    }
+    if (client_->hasUnsavedChanges()) {
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "unsaved map changes");
     }
     if (!context_->statusText.empty()) {
         ImGui::Separator();
@@ -114,7 +120,7 @@ void Editor::releaseGpuResources() {
 // Unsaved changes
 // ------------------------------------------------------------------------------------------
 bool Editor::requestQuit() {
-    if (!server_->hasUnsavedChanges()) return true;
+    if (!server_->hasUnsavedChanges() && !client_->hasUnsavedChanges()) return true;
     promptAction_ = PromptAction::Quit;
     return false;
 }
@@ -123,7 +129,9 @@ void Editor::drawUnsavedPrompt() {
     if (promptAction_ == PromptAction::None) return;
     if (!ImGui::IsPopupOpen("Unsaved server changes")) ImGui::OpenPopup("Unsaved server changes");
     if (!ImGui::BeginPopupModal("Unsaved server changes", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
-    ImGui::Text("The server content of %s has unsaved changes.", context_->currentMapName.c_str());
+    if (server_->hasUnsavedChanges()) ImGui::Text("The server content of %s has unsaved changes.", context_->currentMapName.c_str());
+    if (client_->hasUnsavedChanges() && promptAction_ != PromptAction::OpenDatabase)
+        ImGui::Text("The map %s has unsaved entity changes.", context_->currentMapName.c_str());
     ImGui::Spacing();
     auto proceed = [&]() {
         switch (promptAction_) {
@@ -137,7 +145,8 @@ void Editor::drawUnsavedPrompt() {
         ImGui::CloseCurrentPopup();
     };
     if (ImGui::Button("Save")) {
-        if (server_->saveChanges()) {
+        const bool clientToo = promptAction_ != PromptAction::OpenDatabase;
+        if (server_->saveChanges() && (!clientToo || client_->saveChanges())) {
             proceed();
         } else {
             promptAction_ = PromptAction::None;              // keep the changes; the status bar shows why

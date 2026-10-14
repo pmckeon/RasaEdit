@@ -113,6 +113,13 @@ public:
     bool fitEntityToModel(size_t entityIndex);
     // World-space bounding sphere of a map entity's placement.
     bool entityBounds(size_t entityIndex, tr::Vec3& centre, float& radius) const;
+    // Map editing (Client workspace): after an entity of the map's MapFile changed (moved, rotated, scaled, new class or hue),
+    // refreshEntity rebuilds its placement; after entities were added or removed, rebuildEntities rebuilds them all. Both drop
+    // the affected entities' particle systems, which advanceParticles restarts at the new place.
+    void refreshEntity(size_t entityIndex);
+    void rebuildEntities();
+    // The local bounds of a map entity's loaded model (false while loading or without a model) - a new class's bounds.
+    bool entityModelBounds(size_t entityIndex, tr::Bounds& bounds) const;
     // Diagnostic: world skin matrix (placement x skin(time)) of every skeleton bone of an animated map entity's model, by bone
     // name - comparable with the game's gWorldMatrixArray palette (e.g. from an apitrace capture). Empty if not animated.
     std::vector<std::pair<std::string, Mat4>> debugWorldSkinMatrices(size_t entityIndex, float time) const;
@@ -449,6 +456,10 @@ private:
     // drawn or picked - the marker box stands in (the selection is always drawn).
     bool serverModelCulled(const ServerPlacement& s) const;
     std::function<int32_t(int32_t)> cullingLayerForClass_;
+    std::function<std::string(int32_t)> meshForClass_;
+    std::function<bool(int32_t)> classKnown_;
+    Placement makePlacement(const tr::MapEntity& e);
+    std::function<bool(int32_t, tr::HueColour&, tr::HueColour&)> classHue_;
     Model* objectModelFor(const std::string& mesh, const std::string& packageAnimation = "");
     std::unordered_map<std::string, std::string> objectAnimations_;   // mesh -> its object animation ("" = none)
     // Creature idles: animations by name (null = failed to read), bone -> track per (model, animation), and the palettes of the

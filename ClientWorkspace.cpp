@@ -2,7 +2,11 @@
 
 #include "imgui_internal.h"   // DockBuilder
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
+#include <filesystem>
+#include <set>
 
 void ClientWorkspace::buildDefaultLayout(ImGuiID dockspace) {
     ImGui::DockBuilderRemoveNode(dockspace);
@@ -34,6 +38,251 @@ void ClientWorkspace::onMapLoaded() {
     selection_ = Selection{};
     rebuildEntityFilter();
     overview_.onMapLoaded(ctx_);
+    undoStack_.clear();
+    redoStack_.clear();
+    cleanUndoDepth_ = 0;
+    cleanReachable_ = true;
+    fitBounds_.clear();
+    saved_ = snapshot();
+}
+
+// ------------------------------------------------------------------------------------------
+// Map editing
+// ------------------------------------------------------------------------------------------
+ClientWorkspace::MapEdit ClientWorkspace::snapshot() const {
+    if (!ctx_.map) return MapEdit{};
+    return MapEdit{ctx_.map->map.entities, ctx_.map->map.generatedAbvs};
+}
+
+void ClientWorkspace::restore(const MapEdit& edit) {
+    if (!ctx_.map) return;
+    ctx_.map->map.entities = edit.entities;
+    ctx_.map->map.generatedAbvs = edit.abvs;
+    entitiesChanged();
+}
+
+void ClientWorkspace::beginEdit() {
+    if (!ctx_.map) return;
+    if (undoStack_.size() < cleanUndoDepth_) cleanReachable_ = false;
+    undoStack_.push_back(snapshot());
+    redoStack_.clear();
+    if (undoStack_.size() > 200) {                   // whole-map snapshots: keep memory bounded
+        undoStack_.erase(undoStack_.begin());
+        if (cleanUndoDepth_ > 0) --cleanUndoDepth_;
+        else cleanReachable_ = false;
+    }
+}
+
+void ClientWorkspace::noteEdit() {
+    const ImGuiID id = ImGui::GetItemID();
+    if (id != editItem_) {
+        beginEdit();
+        editItem_ = id;
+    }
+}
+
+void ClientWorkspace::undo() {
+    if (undoStack_.empty()) return;
+    redoStack_.push_back(snapshot());
+    const MapEdit edit = undoStack_.back();
+    undoStack_.pop_back();
+    restore(edit);
+}
+
+void ClientWorkspace::redo() {
+    if (redoStack_.empty()) return;
+    undoStack_.push_back(snapshot());
+    const MapEdit edit = redoStack_.back();
+    redoStack_.pop_back();
+    restore(edit);
+}
+
+void ClientWorkspace::entityChanged(size_t index) {
+    if (ctx_.scene) ctx_.scene->refreshEntity(index);
+}
+
+void ClientWorkspace::entitiesChanged() {
+    if (ctx_.scene) ctx_.scene->rebuildEntities();
+    if (selection_.kind == SelectionKind::MapEntity && (!ctx_.map || selection_.index >= ctx_.map->map.entities.size())) selection_ = Selection{};
+    rebuildEntityFilter();
+}
+
+tr::Vec3* ClientWorkspace::selectedPosition() {
+    const int k = selectedEntity();
+    return ctx_.map && k >= 0 && size_t(k) < ctx_.map->map.entities.size() ? &ctx_.map->map.entities[size_t(k)].location : nullptr;
+}
+
+float* ClientWorkspace::selectedRotation() {
+    if (!selectedPosition()) return nullptr;
+    yawHandle_ = 0;                                  // the viewport adds its step; contentChanged applies it
+    return &yawHandle_;
+}
+
+// Rotation about the world's vertical axis by the yaw handle - the server's yaw convention (CreateFromYawPitchRoll(r, 0, 0):
+// q = (0, sin r/2, 0, cos r/2)), applied before the entity's own rotation so any tilt it has is kept.
+void ClientWorkspace::contentChanged() {
+    const int k = selectedEntity();
+    if (!ctx_.map || k < 0 || size_t(k) >= ctx_.map->map.entities.size()) return;
+    tr::MapEntity& e = ctx_.map->map.entities[size_t(k)];
+    if (yawHandle_ != 0.0f) {
+        const float h = yawHandle_ * 0.5f;
+        const tr::Quat r{0, std::sin(h), 0, std::cos(h)};
+        const tr::Quat q = e.orientation;
+        e.orientation = tr::Quat{r.w * q.x + r.x * q.w + r.y * q.z - r.z * q.y, r.w * q.y - r.x * q.z + r.y * q.w + r.z * q.x,
+                                 r.w * q.z + r.x * q.y - r.y * q.x + r.z * q.w, r.w * q.w - r.x * q.x - r.y * q.y - r.z * q.z};
+        yawHandle_ = 0;
+    }
+    entityChanged(size_t(k));
+}
+
+void ClientWorkspace::deleteSelected() {
+    const int k = selectedEntity();
+    if (!ctx_.map || k < 0 || size_t(k) >= ctx_.map->map.entities.size()) return;
+    beginEdit();
+    tr::MapFile& m = ctx_.map->map;
+    const uint64_t id = m.entities[size_t(k)].entityId;
+    m.entities.erase(m.entities.begin() + k);
+    m.generatedAbvs.erase(std::remove_if(m.generatedAbvs.begin(), m.generatedAbvs.end(), [&](const tr::MapGeneratedAbv& a) { return a.entityId == id; }),
+                          m.generatedAbvs.end());
+    selection_ = Selection{};
+    entitiesChanged();
+}
+
+// A new entity id: one more than the largest in the map (ids are unique within a map; the server's control points and Bane
+// teleporter arrivals refer to map entities by id, so existing ids are never reused).
+uint64_t ClientWorkspace::newEntityId() const {
+    uint64_t largest = 0;
+    for (const tr::MapEntity& e : ctx_.map->map.entities) largest = std::max(largest, e.entityId);
+    return largest + 1;
+}
+
+void ClientWorkspace::duplicateSelected() {
+    const int k = selectedEntity();
+    if (!ctx_.map || k < 0 || size_t(k) >= ctx_.map->map.entities.size()) return;
+    beginEdit();
+    tr::MapFile& m = ctx_.map->map;
+    tr::MapEntity copy = m.entities[size_t(k)];
+    const uint64_t oldId = copy.entityId;
+    copy.entityId = newEntityId();
+    copy.location.x += 2.0f;                          // beside the original
+    std::vector<tr::MapGeneratedAbv> abvs;
+    for (const tr::MapGeneratedAbv& a : m.generatedAbvs)
+        if (a.entityId == oldId) {
+            tr::MapGeneratedAbv b = a;
+            b.entityId = copy.entityId;
+            abvs.push_back(b);
+        }
+    m.generatedAbvs.insert(m.generatedAbvs.end(), abvs.begin(), abvs.end());
+    m.entities.push_back(copy);
+    selection_ = Selection{SelectionKind::MapEntity, m.entities.size() - 1};
+    entitiesChanged();
+}
+
+// A new entity of a class at the ground point under the viewport's centre: upright, scale 1, no hue (0,0,0,255 = "not hued"),
+// cull layer 0 (the class's), bounds from its model once loaded.
+void ClientWorkspace::addEntity(int32_t classId) {
+    if (!ctx_.map || !ctx_.scene) return;
+    tr::Vec3 origin, direction, point;
+    ctx_.scene->viewRay(0, 0, origin, direction);
+    if (!ctx_.scene->groundPoint(origin, direction, origin.y - 10.0f, point)) point = add(origin, scaled(direction, 20.0f));
+    beginEdit();
+    tr::MapEntity e;
+    e.classId = classId;
+    e.entityId = newEntityId();
+    e.location = point;
+    e.orientation = tr::Quat{0, 0, 0, 1};
+    e.hue1 = tr::HueColour{0, 0, 0, 255};
+    e.hue2 = tr::HueColour{0, 0, 0, 255};
+    e.scale = 1;
+    e.hasBounds = ctx_.map->map.minorVersion >= 45;
+    e.bounds = tr::Bounds{tr::Vec3{-0.5f, 0, -0.5f}, tr::Vec3{0.5f, 1, 0.5f}};
+    ctx_.map->map.entities.push_back(e);
+    selection_ = Selection{SelectionKind::MapEntity, ctx_.map->map.entities.size() - 1};
+    fitBounds_.push_back(ctx_.map->map.entities.size() - 1);
+    entitiesChanged();
+}
+
+namespace {
+
+std::filesystem::path mapFilePath(const tr::MapBundle& map) {
+    std::error_code ec;
+    const std::string wanted = tr::toLowerAscii(map.name + ".map");
+    for (const auto& f : std::filesystem::directory_iterator(map.folder, ec))
+        if (tr::toLowerAscii(f.path().filename().string()) == wanted) return f.path();
+    return std::filesystem::path(map.folder) / (map.name + ".map");
+}
+
+}  // namespace
+
+// Writes the map in place (the client reads loose .map files): the first save copies the original to <name>.map.rasaedit-original;
+// the new file is written beside it and moved over the old one, then read back and compared.
+bool ClientWorkspace::saveMap() {
+    if (!ctx_.map) return false;
+    namespace fs = std::filesystem;
+    const fs::path path = mapFilePath(*ctx_.map);
+    try {
+        const tr::Bytes data = tr::writeMap(ctx_.map->map);
+        const tr::MapFile check = tr::readMap(data);
+        if (check.entities.size() != ctx_.map->map.entities.size()) throw std::runtime_error("the written map does not read back");
+        fs::path backup = path;
+        backup += ".rasaedit-original";
+        std::error_code ec;
+        if (!fs::exists(backup, ec)) fs::copy_file(path, backup, ec);
+        if (ec) throw std::runtime_error("cannot keep the original as " + backup.string() + ": " + ec.message());
+        fs::path temp = path;
+        temp += ".rasaedit-new";
+        {
+            std::FILE* f = std::fopen(temp.string().c_str(), "wb");
+            if (!f) throw std::runtime_error("cannot write " + temp.string());
+            const size_t written = std::fwrite(data.data(), 1, data.size(), f);
+            std::fclose(f);
+            if (written != data.size()) throw std::runtime_error("short write to " + temp.string());
+        }
+        fs::rename(temp, path, ec);
+        if (ec) throw std::runtime_error("cannot replace " + path.string() + ": " + ec.message());
+    } catch (const std::exception& e) {
+        ctx_.setStatus(std::string("Saving the map failed, the file is unchanged: ") + e.what(), true);
+        return false;
+    }
+    undoStack_.clear();
+    redoStack_.clear();
+    cleanUndoDepth_ = 0;
+    cleanReachable_ = true;
+    saved_ = snapshot();
+    ctx_.setStatus("Saved " + path.string() + " (" + std::to_string(ctx_.map->map.entities.size()) + " entities). The game reads it on the next map load.",
+                   false);
+    return true;
+}
+
+void ClientWorkspace::revertMap() {
+    if (!hasUnsavedChanges()) return;
+    restore(saved_);
+    undoStack_.clear();
+    redoStack_.clear();
+    cleanUndoDepth_ = 0;
+    cleanReachable_ = true;
+    ctx_.setStatus("Map changes reverted.", false);
+}
+
+void ClientWorkspace::drawEditMenu() {
+    if (ImGui::MenuItem("Undo", "Ctrl+Z", false, !undoStack_.empty())) undo();
+    if (ImGui::MenuItem("Redo", "Ctrl+Y", false, !redoStack_.empty())) redo();
+    ImGui::Separator();
+    const bool selected = ctx_.map && selectedEntity() >= 0;
+    if (ImGui::MenuItem("Duplicate Entity", "Ctrl+D", false, selected)) duplicateSelected();
+    if (ImGui::MenuItem("Delete Entity", "Del", false, selected)) deleteSelected();
+    ImGui::Separator();
+    if (ImGui::MenuItem("Save Map", "Ctrl+S", false, ctx_.map && hasUnsavedChanges())) saveMap();
+    if (ImGui::MenuItem("Revert Map Changes", nullptr, false, hasUnsavedChanges())) revertMap();
+}
+
+void ClientWorkspace::handleShortcuts() {
+    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_Z, ImGuiInputFlags_RouteGlobal)) undo();
+    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_Y, ImGuiInputFlags_RouteGlobal) ||
+        ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Z, ImGuiInputFlags_RouteGlobal))
+        redo();
+    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_S, ImGuiInputFlags_RouteGlobal) && hasUnsavedChanges()) saveMap();
+    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_D, ImGuiInputFlags_RouteGlobal) && selectedEntity() >= 0) duplicateSelected();
 }
 
 void ClientWorkspace::drawPanels() {
@@ -59,7 +308,19 @@ void ClientWorkspace::drawPanels() {
     overview_.draw(ctx_, "Overview###Client.Overview", layers);
     assets_.draw(ctx_, "Assets###Client.Assets");
     // Drawn last: on first creation the newest window becomes the selected tab of a shared dock node.
-    viewport_.draw(ctx_, "Viewport###Client.Viewport", selection_, true, false, nullptr);
+    // New class's bounds once its model is loaded (2.45 maps store per-entity bounds the game culls and picks with).
+    if (ctx_.map && ctx_.scene)
+        for (auto it = fitBounds_.begin(); it != fitBounds_.end();) {
+            tr::Bounds b;
+            if (*it >= ctx_.map->map.entities.size()) it = fitBounds_.erase(it);
+            else if (ctx_.scene->entityModelBounds(*it, b)) {
+                ctx_.map->map.entities[*it].bounds = b;
+                ctx_.map->map.entities[*it].hasBounds = ctx_.map->map.minorVersion >= 45;
+                entityChanged(*it);
+                it = fitBounds_.erase(it);
+            } else ++it;
+        }
+    viewport_.draw(ctx_, "Viewport###Client.Viewport", selection_, true, false, this);
 }
 
 void ClientWorkspace::drawEntitiesPanel() {
@@ -220,49 +481,104 @@ void ClientWorkspace::drawEntityPanel() {
     }
     if (!ctx_.map || selectedEntity() < 0 || size_t(selectedEntity()) >= ctx_.map->map.entities.size()) {
         ImGui::TextDisabled("Nothing selected.");
+        if (ctx_.map) {
+            ImGui::SeparatorText("Add an entity");
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8);
+            ImGui::InputInt("Class id", &newClass_, 0);
+            const ClassInfo& info = ctx_.classInfo(newClass_);
+            ImGui::TextDisabled("%s", newClass_ > 0 && info.known ? (info.name + "  " + info.mesh).c_str() : "(enter an entity class id)");
+            if (!(newClass_ > 0 && info.known)) ImGui::BeginDisabled();
+            if (ImGui::Button("Add at the view's centre")) addEntity(newClass_);
+            if (!(newClass_ > 0 && info.known)) ImGui::EndDisabled();
+        }
         ImGui::End();
         return;
     }
-    const tr::MapEntity& e = ctx_.map->map.entities[size_t(selectedEntity())];
+    const size_t index = size_t(selectedEntity());
+    tr::MapEntity& e = ctx_.map->map.entities[index];
     const ClassInfo& info = ctx_.classInfo(e.classId);
-    ImGui::Text("Class %d  %s", e.classId, info.known ? info.name.c_str() : "(unknown class)");
+    const float fieldWidth = ImGui::GetFontSize() * 12;
+    bool changed = false;
+    auto edited = [&](bool c) {                      // one undo step per field being edited
+        if (ImGui::IsItemActivated()) noteEdit();
+        if (c) changed = true;
+    };
+    int32_t classId = e.classId;
+    ImGui::SetNextItemWidth(fieldWidth);
+    edited(ImGui::InputInt("Class", &classId, 0));
+    if (classId != e.classId) {
+        e.classId = classId;
+        fitBounds_.push_back(index);                 // the new model's bounds once it is loaded
+    }
+    ImGui::TextUnformatted(info.known ? info.name.c_str() : "(unknown class)");
     ImGui::Text("Mesh  %s", info.mesh.empty() ? "(none)" : info.mesh.c_str());
     if (!info.mesh.empty() && ctx_.assets && !ctx_.assets->exists(info.mesh))
         ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.4f, 1.0f), "mesh file not found in the archives");
-    if (ctx_.scene) ImGui::TextWrapped("Viewport: %s", ctx_.scene->modelStatus(size_t(selectedEntity())).c_str());
+    if (ctx_.scene) ImGui::TextWrapped("Viewport: %s", ctx_.scene->modelStatus(index).c_str());
     ImGui::Text("Entity id %llu (high %u, low %u)", static_cast<unsigned long long>(e.entityId), tr::entityIdHigh(e.entityId),
                 tr::entityIdLow(e.entityId));
+    ImGui::SetItemTooltip("Server content refers to map entities by id (control_point.marker_entity_id, spawnpool_arrival.entity_id).");
     ImGui::SeparatorText("Placement");
-    ImGui::Text("Location  %.2f, %.2f, %.2f", e.location.x, e.location.y, e.location.z);
-    ImGui::Text("Rotation  w %.3f  x %.3f  y %.3f  z %.3f", e.orientation.w, e.orientation.x, e.orientation.y, e.orientation.z);
-    ImGui::Text("Yaw       %.1f deg (if upright)", yawDegrees(e.orientation));
-    ImGui::Text("Scale     %.3f", e.scale);
+    ImGui::SetNextItemWidth(fieldWidth * 1.4f);
+    edited(ImGui::DragFloat3("Location", &e.location.x, 0.05f, 0, 0, "%.2f"));
+    float yaw = yawDegrees(e.orientation);
+    ImGui::SetNextItemWidth(fieldWidth);
+    if (ImGui::DragFloat("Yaw (deg)", &yaw, 0.5f, 0, 0, "%.1f")) {
+        yawHandle_ = (yaw - yawDegrees(e.orientation)) / 57.29578f;      // applied about the vertical, keeping any tilt
+        changed = true;
+    }
+    if (ImGui::IsItemActivated()) noteEdit();
+    ImGui::TextDisabled("Rotation  w %.3f  x %.3f  y %.3f  z %.3f", e.orientation.w, e.orientation.x, e.orientation.y, e.orientation.z);
+    ImGui::SetNextItemWidth(fieldWidth);
+    edited(ImGui::DragFloat("Scale", &e.scale, 0.01f, 0.01f, 100.0f, "%.3f"));
     if (ctx_.map->hasTerrain) {
         float ground = 0;
-        if (ctx_.map->terrain.heightAtWorld(e.location.x, e.location.z, ground))
+        if (ctx_.map->terrain.heightAtWorld(e.location.x, e.location.z, ground)) {
             ImGui::Text("Terrain   %.2f (entity %+.2f)", ground, e.location.y - ground);
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Snap to ground")) {
+                beginEdit();
+                e.location.y = ground;
+                changed = true;
+            }
+        }
     }
     ImGui::SeparatorText("Appearance");
-    ImGui::ColorButton("##hue1", ImGui::ColorConvertU32ToFloat4(hueColour(e.hue1)), ImGuiColorEditFlags_NoTooltip);
-    ImGui::SameLine(); ImGui::Text("Hue 1  %02X%02X%02X%02X", e.hue1.red, e.hue1.green, e.hue1.blue, e.hue1.alpha);
-    ImGui::ColorButton("##hue2", ImGui::ColorConvertU32ToFloat4(hueColour(e.hue2)), ImGuiColorEditFlags_NoTooltip);
-    ImGui::SameLine(); ImGui::Text("Hue 2  %02X%02X%02X%02X", e.hue2.red, e.hue2.green, e.hue2.blue, e.hue2.alpha);
-    ImGui::Text("Flags %d, cull layer %d (class %d)", e.flags, e.cullLayer, ctx_.classInfo(e.classId).cullingLayer);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("The map's cull layer (0 = use the class's vizsetting layer). Layer 6 is never drawn in game:\n"
-                          "World::AddToWorld does not add such bodies to the graphics scene.");
+    auto hueEdit = [&](const char* label, tr::HueColour& h) {
+        float c[4] = {h.red / 255.0f, h.green / 255.0f, h.blue / 255.0f, h.alpha / 255.0f};
+        if (ImGui::ColorEdit4(label, c, ImGuiColorEditFlags_Uint8 | ImGuiColorEditFlags_AlphaBar)) {
+            h = tr::HueColour{uint8_t(c[0] * 255 + 0.5f), uint8_t(c[1] * 255 + 0.5f), uint8_t(c[2] * 255 + 0.5f), uint8_t(c[3] * 255 + 0.5f)};
+            changed = true;
+        }
+        if (ImGui::IsItemActivated()) noteEdit();
+    };
+    hueEdit("Hue 1", e.hue1);
+    ImGui::SetItemTooltip("(0, 0, 0, 255) = not hued: the materials keep their own Hue (the static post-load calls SetHue only for\n"
+                          "other values). A class with a physicalentityclasshue row uses that instead, as gamemap.py does.");
+    if (ctx_.map->map.minorVersion >= 45) hueEdit("Hue 2", e.hue2);
+    ImGui::SetNextItemWidth(fieldWidth);
+    edited(ImGui::InputInt("Flags", &e.flags, 0));
+    ImGui::SetNextItemWidth(fieldWidth);
+    edited(ImGui::InputInt("Cull layer", &e.cullLayer, 1));
+    ImGui::SetItemTooltip("0 = the class's vizsetting layer (class: %d). Layer 6 is never drawn in game (World::AddToWorld skips the\n"
+                          "graphics scene); 2-5 and 7-11 limit the draw distance (see Game distances).", ctx_.classInfo(e.classId).cullingLayer);
     if (e.hasBounds)
-        ImGui::Text("Local bounds (%.1f %.1f %.1f) - (%.1f %.1f %.1f)", e.bounds.min.x, e.bounds.min.y, e.bounds.min.z,
-                    e.bounds.max.x, e.bounds.max.y, e.bounds.max.z);
+        ImGui::TextDisabled("Local bounds (%.1f %.1f %.1f) - (%.1f %.1f %.1f)", e.bounds.min.x, e.bounds.min.y, e.bounds.min.z,
+                            e.bounds.max.x, e.bounds.max.y, e.bounds.max.z);
     if (!e.particles.empty()) {
         ImGui::SeparatorText("Particles");
         for (const tr::MapParticle& p : e.particles)
             ImGui::Text("asset %d, connection point %d, type %u", p.assetId, p.connectionPoint, p.type);
     }
+    if (changed) contentChanged();
     ImGui::Spacing();
-    if (ImGui::Button("Show in overview")) overview_.requestFocus();
+    if (ImGui::Button("Duplicate")) duplicateSelected();
+    ImGui::SameLine();
+    if (ImGui::Button("Delete")) deleteSelected();
     ImGui::SameLine();
     if (ImGui::Button("Show in viewport")) viewport_.focusOn(ctx_, selection_);
+    ImGui::SameLine();
+    if (ImGui::Button("Show in overview")) overview_.requestFocus();
     ImGui::End();
 }
 
