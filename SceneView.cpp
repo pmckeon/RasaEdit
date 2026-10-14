@@ -1209,6 +1209,15 @@ void SceneView::loadModel(const std::string& name, Model& model) {
         const bool anySkinned = std::any_of(geo.pieces.begin(), geo.pieces.end(), [](const tr::GeoPiece& p) { return p.skinned; });
         if (skin.empty() && anySkinned && !geo.bones.empty()) skin = skinMatrices(geo, tr::Animation{}, 0.0f);
         model.restSkin = skin;
+        // Static pieces hang on their bone's WORLD transform: the engine resolves the bone by name and draws the piece with the
+        // bone node's matrix (FUN_00632fb0 / FUN_0067c320; the skeleton update composes parent x local, FUN_005a10b0) - the
+        // posed frame-0 world for posed models, else the bind chain. (Before 2026-10-14 the editor used the bone's local
+        // transform, which put e.g. the ambient figures' pistols, on hand bones, near the feet.)
+        std::vector<Mat4> staticBoneWorld = posedBones;
+        if (staticBoneWorld.size() != geo.bones.size() && !geo.bones.empty()) {
+            staticBoneWorld.clear();
+            skinMatrices(geo, tr::Animation{}, 0.0f, nullptr, &staticBoneWorld);
+        }
         size_t effectPieces = 0;
         // Only full detail is drawn: lower LODs (USDA "LOD" >= 1) and swap set 99 (a low-LOD stand-in) sit on top
         // of the LOD 0 geometry. A model made only of such pieces is drawn whole.
@@ -1289,11 +1298,17 @@ void SceneView::loadModel(const std::string& name, Model& model) {
             auto uvOfSet = [](const tr::GeoVertex& gv, int set) { return set == 2 ? gv.uv2 : set == 1 ? gv.uv1 : gv.uv; };
             // Static pieces attached to a bone are moved by it (as in the OBJ exporter).
             const tr::GeoBone* bone = nullptr;
+            int staticBone = -1;                   // the static piece's bone index
             if (!piece.skinned && !piece.boneName.empty())
-                for (const tr::GeoBone& b : geo.bones)
-                    if (b.name == piece.boneName) bone = &b;
+                for (size_t b = 0; b < geo.bones.size(); ++b)
+                    if (geo.bones[b].name == piece.boneName) {
+                        bone = &geo.bones[b];
+                        staticBone = int(b);
+                    }
             Mat4 boneMatrix = identityMatrix();
-            if (bone) {
+            if (bone && size_t(staticBone) < staticBoneWorld.size()) {
+                boneMatrix = staticBoneWorld[size_t(staticBone)];
+            } else if (bone) {
                 boneMatrix = rotationMatrix(bone->rotation);
                 const tr::Vec3 bs = bone->scale;
                 boneMatrix.row0 = {boneMatrix.row0.x * bs.x, boneMatrix.row0.y * bs.y, boneMatrix.row0.z * bs.z, bone->translation.x};
@@ -1322,6 +1337,7 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 }
                 if (!rigid) rigidBone = -1;
             }
+            if (staticBone >= 0 && !model.restInverse.empty()) rigidBone = staticBone;     // follows its bone in object animations
             std::vector<MeshVertex> vertices;
             vertices.reserve(piece.vertices.size());
             for (const tr::GeoVertex& gv : piece.vertices) {
@@ -1413,6 +1429,32 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                                 default: sv.bone3 = boneIndex; sv.weight3 = w; break;
                             }
                         }
+                    }
+                    part.mesh = renderer_.createMesh(stored, piece.indices, false);
+                    part.skinBuffer = renderer_.createSkinBuffer(skinVertices);
+                    part.skinNormals = !aniso;
+                    part.skinOwner = &model;
+                    model.skinAnimated = true;
+                } else if (model.avatarPose && staticBone >= 0 && size_t(staticBone) < skin.size()) {
+                    // A posed creature's static piece (e.g. the pistol in an ambient figure's hand): skinned wholly to its bone on
+                    // the GPU. Stored = inverse(skin0[bone]) x the frame-0 vertex, so skin(t)[bone] x stored = posed world(t) x local.
+                    const Mat4 back = affineInverse(skin[size_t(staticBone)]);
+                    std::vector<MeshVertex> stored = vertices;
+                    for (MeshVertex& v : stored) {
+                        const tr::Vec3 o = transformPoint(back, tr::Vec3{0, 0, 0});
+                        const tr::Vec3 p = transformPoint(back, tr::Vec3{v.positionX, v.positionY, v.positionZ});
+                        const tr::Vec3 n = subtract(transformPoint(back, tr::Vec3{v.normalX, v.normalY, v.normalZ}), o);
+                        const tr::Vec3 t = subtract(transformPoint(back, tr::Vec3{v.tangentX, v.tangentY, v.tangentZ}), o);
+                        const tr::Vec3 b = subtract(transformPoint(back, tr::Vec3{v.binormalX, v.binormalY, v.binormalZ}), o);
+                        v.positionX = p.x; v.positionY = p.y; v.positionZ = p.z;
+                        v.normalX = n.x; v.normalY = n.y; v.normalZ = n.z;
+                        v.tangentX = t.x; v.tangentY = t.y; v.tangentZ = t.z;
+                        v.binormalX = b.x; v.binormalY = b.y; v.binormalZ = b.z;
+                    }
+                    std::vector<SkinVertex> skinVertices(stored.size());
+                    for (SkinVertex& sv : skinVertices) {
+                        sv.bone0 = uint32_t(staticBone);
+                        sv.weight0 = 1.0f;
                     }
                     part.mesh = renderer_.createMesh(stored, piece.indices, false);
                     part.skinBuffer = renderer_.createSkinBuffer(skinVertices);
@@ -2052,22 +2094,40 @@ bool SceneView::poseIdle(const ServerPlacement& s) {
     };
     const float now = std::max(lightTime, 0.0f);
     if (q.current < 0 || now < q.last) {
-        q.random = uint32_t(s.selection.index % 2147483646u) + 1u;
-        q.start = 0;
+        q.random = uint32_t((size_t(s.selection.kind) * 7919u + s.selection.index) % 2147483646u) + 1u;
+        q.random = uint32_t(uint64_t(q.random) * 48271u % 2147483647u);
+        q.delay = float(s.idleDelayLower + int32_t(double(q.random) / 2147483647.0 * double(s.idleDelayUpper - s.idleDelayLower))) * 0.001f;
+        q.start = q.delay;                // objectanimationmgr.py: a delayed first animation starts after the delay
         q.current = pick();
     }
     q.last = now;
-    const tr::Animation* animation = nullptr;
-    for (int guard = 0; guard < 100000; ++guard) {
-        animation = idleAnimation(s.idles[size_t(q.current)].name);
-        const float duration = animation ? animation->duration : 0.0f;
-        if (duration > 0.0f && now - q.start < duration) break;
-        q.start += duration;
-        q.current = pick();
+    // objectanimationmgr.py _AnimationComplete by type: 2 looping - one pick, looped; 3 recurring one-shot - played once, the
+    // next pick starts its length + the delay after it (the delay is drawn once per PlayObjectAnimation); 1 / 5 one-shot and 4
+    // move-to-last-frame - one pick played once. A finished one-shot holds its last frame (UNVERIFIED: the engine's
+    // non-looping playback end is not traced), as does the gap of a recurring delay; before a delayed first animation the
+    // models' stored first frame is drawn.
+    if (now < q.start) return false;
+    const tr::Animation* animation = idleAnimation(s.idles[size_t(q.current)].name);
+    float t = 0;
+    if (s.idleType == 2) {
+        if (!animation || animation->duration <= 0.0f) return false;
+        t = std::fmod(now - q.start, animation->duration);
+    } else if (s.idleType == 3) {
         animation = nullptr;
+        for (int guard = 0; guard < 100000; ++guard) {
+            animation = idleAnimation(s.idles[size_t(q.current)].name);
+            const float duration = animation ? animation->duration : 0.0f;
+            if (duration > 0.0f && now - q.start < duration + q.delay) break;
+            q.start += duration + q.delay;
+            q.current = pick();
+            animation = nullptr;
+        }
+        if (!animation) return false;
+        t = std::min(now - q.start, animation->duration);
+    } else {
+        if (!animation || animation->duration <= 0.0f) return false;
+        t = s.idleType == 4 ? animation->duration : std::min(now - q.start, animation->duration);
     }
-    if (!animation) return false;
-    const float t = now - q.start;
     const Model& base = *s.model;
     skinOverride_[&base] = renderer_.addBones(skinMatrices(base.skeleton, *animation, t, nullptr, &idlePosed_, &idleTracks(base, *animation)));
     for (const AvatarDraw& part : s.avatarParts) {
@@ -3011,6 +3071,25 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
         s.position = o.position;
         s.world = yawPlacement(o.position, o.rotation);
         s.model = objectModelFor(meshForClass(o.classId));
+        if (o.kind == ObjectKind::AmbientNpc) {
+            // Rasa.NET creates ambient figures in USE_SS_STATE_0 (44) (Managers/AmbientNpcs.cs); the client's UsableState puts on
+            // the state's package and plays the state's animation (usable.py UsableState.__call__: AttachStateSFX, PlayAnimation).
+            StateEffects fx = stateEffects(o.classId, 44);
+            s.accessories = fx.accessories;
+            s.stateParticles = fx.particles;
+            s.stateLights = fx.lights;
+            tr::GameData::UsableAnimation animation;
+            if (usableAnimationFor_) {
+                try { animation = usableAnimationFor_(o.classId, 44); } catch (const std::exception&) {}
+            }
+            if (!animation.animations.empty()) {
+                s.model = modelFor(meshForClass(o.classId), "%" + animation.animations.front().name);
+                s.idles = animation.animations;
+                s.idleType = animation.type;
+                s.idleDelayLower = animation.delayLower;
+                s.idleDelayUpper = animation.delayUpper;
+            }
+        }
         s.colour = markerColour::ofObject(o.kind);
         s.ringRadius = 1.5f;
         s.facing = o.kind != ObjectKind::Logos;

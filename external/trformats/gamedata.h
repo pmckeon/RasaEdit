@@ -206,6 +206,18 @@ public:
     };
     int32_t meshSkeletonId(int32_t meshId);                   // -1 if the mesh has none
     std::vector<FamilyAnimation> familyAnimations(int32_t familyId, int32_t skeletonId);   // table order
+    // A usable object's animation in a state (client/augmentations/usable.py GetAnimation -> objectanimationmgr.py
+    // PlayObjectAnimation): usabledata.animation[(class, state0, state1)][0] = (spec, type override);
+    // animationdata.objectAnimationSpecification[spec] = (description, type, family, delay lower, delay upper, ...);
+    // the animations: animationFamilyObject[(family, the class's mesh id)] = [(animation string id, frequency, min level)].
+    // type (animationspecificationtype; the override when set): 1 random one-shot, 2 looping, 3 recurring one-shot,
+    // 4 move to last frame, 5 fidget between multiple animations. Empty animations = none.
+    struct UsableAnimation {
+        int32_t type = 0;
+        int32_t delayLower = 0, delayUpper = 0;                // _GetRandomDelay(lower, upper), milliseconds
+        std::vector<FamilyAnimation> animations;
+    };
+    UsableAnimation usableStateAnimation(int32_t classId, int32_t state0, int32_t state1 = 97);
 
 private:
     ZipArchive zip_;

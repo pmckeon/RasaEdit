@@ -161,6 +161,10 @@ public:
     // Server teleporters show their USE_TS_STATE_1 (56) package - Rasa.NET puts world teleporters in that state
     // (DynamicObjectManager) - as accessory models (`ACCY` events, tr::readSfxPackage), e.g. the waypoint's beam.
     void setUsableStatePackages(std::function<std::string(int32_t classId, int32_t stateId)> packageFor) { usablePackageFor_ = std::move(packageFor); }
+    // A usable class's animation in a state (GameData::usableStateAnimation); ambient figures play theirs (state 44).
+    void setUsableStateAnimations(std::function<tr::GameData::UsableAnimation(int32_t classId, int32_t stateId)> animationFor) {
+        usableAnimationFor_ = std::move(animationFor);
+    }
     const std::vector<SkyChoice>& skies() const { return skies_; }
     size_t skyIndex = 0;                    // into skies(); the sky of region 0 by default (used when not by region)
     // Sky by region, as the client does (regionmanager.py OnUpdateRegions: the regions the player is in plus region 0,
@@ -366,6 +370,7 @@ private:
         float last = -1;                // light-clock time of the last update (a clock running backwards restarts)
         int32_t current = -1;           // index in ServerPlacement::idles; -1 = not started
         uint32_t random = 1;            // Park-Miller state
+        float delay = 0;                // seconds, drawn once per sequence (objectanimationmgr.py: one delay per PlayObjectAnimation)
     };
     struct ServerPlacement {
         Selection selection;
@@ -382,7 +387,9 @@ private:
             Vec4f hue;
         };
         std::vector<BodyAccessory> bodyAccessories;
-        std::vector<tr::GameData::FamilyAnimation> idles;   // creatures: "Idle - Non Combat", played in sequence (poseIdle)
+        std::vector<tr::GameData::FamilyAnimation> idles;   // creatures: "Idle - Non Combat"; ambient figures: their state's family
+        int32_t idleType = 3;           // animationspecificationtype (3 recurring one-shot = chained, as creatures' ambient idles)
+        int32_t idleDelayLower = 0, idleDelayUpper = 0;     // milliseconds before each animation (the spec's delay range)
         mutable IdleSequence idle;
         Vec4f skinHue;                  // w: 1 = hue flesh pieces
         Vec4f colour;
@@ -478,6 +485,7 @@ private:
     const WorldDatabase* serverDatabase_ = nullptr;
     std::function<std::string(int32_t)> serverMeshForClass_;
     std::function<std::string(int32_t, int32_t)> usablePackageFor_;
+    std::function<tr::GameData::UsableAnimation(int32_t, int32_t)> usableAnimationFor_;
     struct StateEffects {
         std::vector<Model*> accessories;
         std::vector<StateParticle> particles;

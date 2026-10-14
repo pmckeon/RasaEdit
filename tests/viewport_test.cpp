@@ -70,6 +70,7 @@ int main(int argc, char** argv) {
             scene.setRegionEnvironmentMaps(regionEnvironmentMaps);
             scene.setClassHues([&](int32_t classId, tr::HueColour& hue1, tr::HueColour& hue2) { return data.classHue(classId, hue1, hue2); });
             scene.setUsableStatePackages([&](int32_t classId, int32_t stateId) { return data.usableStatePackage(classId, stateId); });
+            scene.setUsableStateAnimations([&](int32_t classId, int32_t stateId) { return data.usableStateAnimation(classId, stateId); });
             // RASA_TIME=<fraction of the day>, RASA_SKY=<index>, RASA_NOSKY=1 / RASA_NOFOG=1 for lighting checks.
             if (const char* t = envValue("RASA_TIME")) scene.timeOfDay = float(std::atof(t));
             if (const char* k = envValue("RASA_SKY")) { scene.skyIndex = size_t(std::atoi(k)); scene.skyByRegion = false; }
@@ -298,6 +299,50 @@ int main(int argc, char** argv) {
             for (const auto& f : found)
                 std::printf("feature %s | %zu entities, e.g. at %.1f %.1f %.1f\n", f.first.c_str(), f.second.first, f.second.second.x, f.second.second.y,
                             f.second.second.z);
+        }
+        // RASA_STATICBONESCAN=1: models with static pieces whose bone's world transform (the bind chain) differs from its local
+        // transform by more than 1 cm at the piece's centre - the pieces whose placement changed when static pieces moved to
+        // the bone world (2026-10-14).
+        if (envValue("RASA_STATICBONESCAN")) {
+            size_t models = 0, pieces = 0;
+            for (const std::string& name : assets.namesWithExtension(".geo")) {
+                tr::GeoModel geo;
+                try { geo = tr::readGeo(assets.read(name)); } catch (const std::exception&) { continue; }
+                auto local = [](const tr::GeoBone& bone) {
+                    Mat4 m = rotationMatrix(bone.rotation);
+                    const tr::Vec3 bs = bone.scale;
+                    m.row0 = {m.row0.x * bs.x, m.row0.y * bs.y, m.row0.z * bs.z, bone.translation.x};
+                    m.row1 = {m.row1.x * bs.x, m.row1.y * bs.y, m.row1.z * bs.z, bone.translation.y};
+                    m.row2 = {m.row2.x * bs.x, m.row2.y * bs.y, m.row2.z * bs.z, bone.translation.z};
+                    return m;
+                };
+                std::vector<Mat4> world(geo.bones.size());
+                for (size_t b = 0; b < geo.bones.size(); ++b) {
+                    const int p = geo.bones[b].parent;
+                    world[b] = p >= 0 && size_t(p) < b ? multiply(world[size_t(p)], local(geo.bones[b])) : local(geo.bones[b]);
+                }
+                size_t changed = 0;
+                for (const tr::GeoPiece& piece : geo.pieces) {
+                    if (piece.skinned || piece.boneName.empty()) continue;
+                    for (size_t b = 0; b < geo.bones.size(); ++b) {
+                        if (geo.bones[b].name != piece.boneName) continue;
+                        tr::Vec3 c{0, 0, 0};
+                        for (const tr::GeoVertex& v : piece.vertices) c = tr::Vec3{c.x + v.position.x, c.y + v.position.y, c.z + v.position.z};
+                        const float n = piece.vertices.empty() ? 1.0f : float(piece.vertices.size());
+                        c = tr::Vec3{c.x / n, c.y / n, c.z / n};
+                        const tr::Vec3 a = transformPoint(world[b], c), l = transformPoint(local(geo.bones[b]), c);
+                        const float dx = a.x - l.x, dy = a.y - l.y, dz = a.z - l.z;
+                        if (dx * dx + dy * dy + dz * dz > 1e-4f) ++changed;
+                        break;
+                    }
+                }
+                if (changed) {
+                    ++models;
+                    pieces += changed;
+                    std::printf("static bone scan: %s: %zu piece(s) move\n", name.c_str(), changed);
+                }
+            }
+            std::printf("static bone scan: %zu models, %zu pieces\n", models, pieces);
         }
         // RASA_PARAMSCAN=<effect prefix>: value counts of every material parameter of pieces whose effect starts with the
         // prefix (lower case, e.g. "trdiff"), over every model; texture names are summarised as "<texture>".

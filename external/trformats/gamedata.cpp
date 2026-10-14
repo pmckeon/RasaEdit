@@ -746,6 +746,33 @@ std::string GameData::usableStatePackage(int32_t classId, int32_t stateId) {
     return stringById(int32_t(py::asInt(id)));
 }
 
+GameData::UsableAnimation GameData::usableStateAnimation(int32_t classId, int32_t state0, int32_t state1) {
+    UsableAnimation out;
+    const py::Object* list = py::dictGetTuple(global("generated.client.usabledata", "animation"), {classId, state0, state1});
+    const py::Object* entry = py::length(list) > 0 ? py::item(list, 0) : nullptr;
+    if (!entry || !py::isInt(py::item(entry, 0))) return out;
+    const int32_t specId = int32_t(py::asInt(py::item(entry, 0)));
+    const py::Object* overrideType = py::item(entry, 1);
+    const py::Object* spec = py::dictGet(global("generated.client.animationdata", "objectAnimationSpecification"), specId);
+    if (!spec || !py::isInt(py::item(spec, 2))) return out;
+    out.type = py::isInt(overrideType) && py::asInt(overrideType) != 0 ? int32_t(py::asInt(overrideType))
+                                                                        : py::isInt(py::item(spec, 1)) ? int32_t(py::asInt(py::item(spec, 1))) : 0;
+    const int32_t familyId = int32_t(py::asInt(py::item(spec, 2)));
+    if (py::isInt(py::item(spec, 3))) out.delayLower = int32_t(py::asInt(py::item(spec, 3)));
+    if (py::isInt(py::item(spec, 4))) out.delayUpper = int32_t(py::asInt(py::item(spec, 4)));
+    const int32_t meshId = classMeshId(classId);
+    const py::Object* animations = py::dictGetTuple(global("generated.client.animationdata", "animationFamilyObject"), {familyId, meshId});
+    for (size_t k = 0; k < py::length(animations); ++k) {
+        const py::Object* a = py::item(animations, k);
+        if (!py::isInt(py::item(a, 0))) continue;
+        FamilyAnimation f;
+        f.name = stringById(int32_t(py::asInt(py::item(a, 0))));
+        f.frequency = py::isInt(py::item(a, 1)) ? int32_t(py::asInt(py::item(a, 1))) : 1;
+        if (!f.name.empty()) out.animations.push_back(std::move(f));
+    }
+    return out;
+}
+
 std::string GameData::mapTemplateName(int32_t templateId) {
     return py::asString(py::dictGet(global("generated.client.maptemplate", "lookup"), templateId));
 }

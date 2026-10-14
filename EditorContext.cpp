@@ -196,6 +196,7 @@ bool EditorContext::openMap(const std::string& name) {
                     try { return gameData->classHue(classId, hue1, hue2); } catch (const std::exception&) { return false; }
                 });
                 scene->setUsableStatePackages([this](int32_t classId, int32_t stateId) { return gameData->usableStatePackage(classId, stateId); });
+                scene->setUsableStateAnimations([this](int32_t classId, int32_t stateId) { return gameData->usableStateAnimation(classId, stateId); });
             }
         }
         currentMapName = map->name;
