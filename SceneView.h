@@ -295,6 +295,17 @@ private:
             std::string file;
         };
         std::vector<ParticleMount> particles;
+        // TRSphBillboard pieces (camera-facing sprites, e.g. the Logos symbols over arch_eloh_logos_*): drawn per frame by
+        // queueBillboards, not as meshes.
+        struct Billboard {
+            std::vector<tr::GeoVertex> vertices;   // position = corner offset (world units), position1 = centre (piece space)
+            std::vector<uint32_t> indices;
+            Mat4 boneWorld = identityMatrix();     // the static piece's bone, frame 0 / bind (model space)
+            int32_t animBone = -1;                 // follows this bone in object animations (-1: static)
+            SDL_GPUTexture* texture = nullptr;
+            Vec4f diffuse{0.5f, 0.5f, 0.5f, 1}, ambient{0.5f, 0.5f, 0.5f, 1}, emissive{0, 0, 0, 0};   // x gModulateScale 0.5 (rgb)
+        };
+        std::vector<Billboard> billboards;
         // Lights on contact points ("lsys" .ltmp templates), in model space: position = contact point frame x Offset,
         // spot/globe orientation = frame rotation x the template's. Placed per entity in lighting().
         std::vector<tr::PlacedLight> lights;
@@ -417,6 +428,8 @@ private:
     const tr::Animation* idleAnimation(const std::string& name);
     const std::vector<int>& idleTracks(const Model& model, const tr::Animation& animation);
     bool poseIdle(const ServerPlacement& s);
+    void queueBillboards(const Model& model, const Mat4& placementWorld, const std::vector<Mat4>& animatedMatrices, const SceneLighting& light);
+    SceneLighting frameLighting_;           // this frame's lighting (queueDraws)
     // The rigid bodies of a server placement that carry their own model lights and particle systems, as map entities' models do:
     // the object's model, its use-state accessories (both at the placement) and avatar accessories on their sockets (posedBones:
     // the creature's pose this frame; null = the models' stored first frame).

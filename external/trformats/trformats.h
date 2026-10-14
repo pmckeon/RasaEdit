@@ -505,6 +505,7 @@ struct VertexElement {
 
 struct GeoVertex {
     Vec3 position;
+    Vec3 position1;                    // POSITION1, if present (TRSphBillboard: the sprite's centre; POSITION is the corner offset)
     Vec3 normal;
     Vec2 uv;
     Vec2 uv1;                          // TEXCOORD1, if present (e.g. GlowTexCoord 1)

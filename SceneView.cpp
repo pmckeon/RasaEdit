@@ -1253,6 +1253,36 @@ void SceneView::loadModel(const std::string& name, Model& model) {
             // Refraction shells (TRRefract, e.g. around npc_eloh_hologram_large) are drawn by their own pass (refract.hlsl).
             const bool helperShape = piece.diffuseTexture.empty() && effect.find("diffmap") != std::string::npos;
             const bool refraction = effect.rfind("trrefract", 0) == 0;
+            if (effect.rfind("trsphbillboard", 0) == 0 && !piece.diffuseTexture.empty() && !piece.vertices.empty()) {
+                // TRSphBillboard (trsphbillboardsp_2.fxc, technique TRSphBillboard_Default, disassembled 2026-10-14): camera-facing
+                // sprites, expanded per frame (queueBillboards).
+                Model::Billboard bb;
+                bb.vertices = piece.vertices;
+                bb.indices = piece.indices;
+                bb.texture = texture(piece.diffuseTexture);
+                if (!piece.boneName.empty())
+                    for (size_t b = 0; b < geo.bones.size(); ++b)
+                        if (geo.bones[b].name == piece.boneName) {
+                            if (b < staticBoneWorld.size()) bb.boneWorld = staticBoneWorld[b];
+                            if (!model.restInverse.empty()) {
+                                bb.animBone = int32_t(b);
+                                model.animated = true;
+                            }
+                        }
+                for (const tr::GeoParameter& gp : piece.parameters) {
+                    // Material colours of semantic Diffuse / Ambient / Emissive are set x gModulateScale 0.5 (FUN_005bd040).
+                    auto halved = [&](const std::string& value) {
+                        const Vec4f c = parseColour(value);
+                        return Vec4f{c.x * 0.5f, c.y * 0.5f, c.z * 0.5f, c.w};
+                    };
+                    if (gp.key == "MatDiffuse") bb.diffuse = halved(gp.value);
+                    if (gp.key == "MatAmbient") bb.ambient = halved(gp.value);
+                    if (gp.key == "MatEmissive") bb.emissive = halved(gp.value);
+                }
+                model.billboards.push_back(std::move(bb));
+                ++effectPieces;
+                continue;
+            }
             if ((!namedAdditive && helperShape) || effect.find("billboard") != std::string::npos) {
                 ++effectPieces;
                 continue;
@@ -2029,6 +2059,53 @@ bool SceneView::serverPlacementShown(const ServerPlacement& s) const {
     return kind == SelectionKind::Region ? showRegions : kind == SelectionKind::MissionArea ? showMissionAreas : showServer;
 }
 
+// TRSphBillboard sprites (vsSphBillboardDirHemiPnt[0] + psBillboardDefault, disassembled 2026-10-14): the centre (POSITION1) goes
+// through the world matrix (entity x the piece's bone); the corner offset (POSITION, world units - the entity's scale does not size
+// the sprite) is added as offset.x x R + offset.y x toCamera - offset.z x normalize(cross(toCamera, R)), R = the view matrix's first
+// column (camera right), toCamera = normalize(eye - centre) - a sprite turned to face the camera about its centre. Colour = the
+// texture x (MatDiffuse x gDirLight[0].Color x sat(N . -direction) + MatAmbient x lerp(hemi bottom, top, (N.y + 1) / 2) +
+// MatEmissive), N = the vertex normal untransformed, clamped (oD0); alpha = texture alpha x MatDiffuse.a. Pass states: CULLMODE NONE,
+// FOGENABLE 0, ALPHATEST off; the blend comes from the piece's phase (Additive: SRCALPHA / ONE). The shader array's element [1]
+// adds one point light (gPointLight[0]) - when the engine picks it is NOT traced; the editor draws element [0]. The forward
+// gDirLight / gHemiLight are taken as the frame's sun and hemi light (forward combined lights - see "Sky lights and forward
+// pieces").
+void SceneView::queueBillboards(const Model& model, const Mat4& placementWorld, const std::vector<Mat4>& animatedMatrices, const SceneLighting& light) {
+    const tr::Vec3 right = camera_.right();
+    std::vector<MeshVertex> quads;
+    for (const Model::Billboard& bb : model.billboards) {
+        Mat4 world = multiply(placementWorld, bb.boneWorld);
+        if (bb.animBone >= 0 && size_t(bb.animBone) < animatedMatrices.size())
+            world = multiply(placementWorld, multiply(animatedMatrices[size_t(bb.animBone)], bb.boneWorld));
+        quads.clear();
+        for (uint32_t index : bb.indices) {
+            if (index >= bb.vertices.size()) continue;
+            const tr::GeoVertex& gv = bb.vertices[index];
+            const tr::Vec3 centre = transformPoint(world, gv.position1);
+            const tr::Vec3 toCamera = normalized(subtract(camera_.position, centre));
+            const tr::Vec3 up = normalized(cross(toCamera, right));
+            const tr::Vec3 p = add(add(add(centre, scaled(right, gv.position.x)), scaled(toCamera, gv.position.y)), scaled(up, -gv.position.z));
+            const tr::Vec3& n = gv.normal;
+            const float facing = std::clamp(dot(n, light.towardsLight), 0.0f, 1.0f);
+            const float h = (n.y + 1.0f) * 0.5f;
+            auto channel = [&](float diffuse, float sun, float top, float bottom, float ambient, float emissive) {
+                return std::clamp(diffuse * sun * facing + ambient * (bottom + (top - bottom) * h) + emissive, 0.0f, 1.0f);
+            };
+            const float r = channel(bb.diffuse.x, light.sunFront.x, light.hemiTop.x, light.hemiBottom.x, bb.ambient.x, bb.emissive.x);
+            const float g = channel(bb.diffuse.y, light.sunFront.y, light.hemiTop.y, light.hemiBottom.y, bb.ambient.y, bb.emissive.y);
+            const float b = channel(bb.diffuse.z, light.sunFront.z, light.hemiTop.z, light.hemiBottom.z, bb.ambient.z, bb.emissive.z);
+            MeshVertex v{};
+            v.positionX = p.x; v.positionY = p.y; v.positionZ = p.z;
+            v.normalX = toCamera.x; v.normalY = toCamera.y; v.normalZ = toCamera.z;
+            v.texU = gv.uv.x;
+            v.texV = gv.uv.y;
+            v.colour = packColour(uint8_t(r * 255.0f + 0.5f), uint8_t(g * 255.0f + 0.5f), uint8_t(b * 255.0f + 0.5f),
+                                  uint8_t(std::clamp(bb.diffuse.w, 0.0f, 1.0f) * 255.0f + 0.5f));
+            quads.push_back(v);
+        }
+        renderer_.drawParticles(quads, showTextures ? bb.texture : nullptr, 0, false);   // additive (Phase Additive), no fog
+    }
+}
+
 // ------------------------------------------------------------------------------------------
 // Creature idles
 // ------------------------------------------------------------------------------------------
@@ -2272,7 +2349,8 @@ void SceneView::queueDraws(const Selection& selection) {
     const int selectedEntity = selection.kind == SelectionKind::MapEntity ? int(selection.index) : -1;
     const float aspect = float(renderer_.width()) / float(std::max<uint32_t>(1, renderer_.height()));
     const Mat4 viewProjection = multiply(camera_.projectionMatrix(aspect), camera_.viewMatrix());
-    renderer_.beginFrame(viewProjection, camera_.position, lighting());
+    frameLighting_ = lighting();
+    renderer_.beginFrame(viewProjection, camera_.position, frameLighting_);
     renderer_.setCameraAxes(camera_.right(), camera_.up(), camera_.forward());
     renderer_.setProjection(camera_.projectionMatrix(aspect));
     {
@@ -2339,9 +2417,11 @@ void SceneView::queueDraws(const Selection& selection) {
         auto pieceWorld = [&](const ModelPiece& piece) {
             return piece.animBone >= 0 && size_t(piece.animBone) < animatedMatrices.size() ? multiply(placementWorld, animatedMatrices[size_t(piece.animBone)]) : placementWorld;
         };
-        if (showEffects)       // additive pieces: glows, holograms, light cones
+        if (showEffects) {     // additive pieces: glows, holograms, light cones; billboard sprites
             for (const ModelPiece& piece : model.pieces)
                 if (piece.additive && !groupHidden(piece)) drawEffect(&model, piece, pieceWorld(piece), placementWorld);
+            if (!model.billboards.empty()) queueBillboards(model, placementWorld, animatedMatrices, frameLighting_);
+        }
         if (!model.hasSolid) return;
         const Vec4f tint = modelTint(selected);
         SkinScope skinScope{renderer_};

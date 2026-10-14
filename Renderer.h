@@ -244,7 +244,8 @@ public:
     // Particle quads (world-space triangle list, see ParticleSim.h). blendType as tr::particleBlendType: 0 additive (the
     // game's SRCALPHA/ONE/ADD), 3 subtractive (reverse subtract); 1 multiply and 2 diffuse are alpha blended. Unlit,
     // faded by fog, drawn last in queue order without depth writes.
-    void drawParticles(const std::vector<MeshVertex>& vertices, SDL_GPUTexture* texture, uint32_t blendType);
+    // fog false: drawn without fog (TRSphBillboard sprites: their pass sets FOGENABLE 0).
+    void drawParticles(const std::vector<MeshVertex>& vertices, SDL_GPUTexture* texture, uint32_t blendType, bool fog = true);
     // Placed lights' globe maps (GlobeMapFile cube maps), cube k at index k + 1 (index 0 = white = no globe); 6 faces
     // per cube. Call between frames (releases the previous texture).
     void setGlobeMaps(const std::vector<std::vector<tr::Rgba8>>& faces, uint32_t size);
@@ -367,6 +368,7 @@ private:
         uint32_t count = 0;
         SDL_GPUTexture* texture = nullptr;
         uint32_t blendType = 0;
+        bool fog = true;
     };
     std::vector<MeshVertex> particleVertices_;
     std::vector<ParticleBatch> particleBatches_;

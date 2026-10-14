@@ -652,15 +652,17 @@ void Renderer::drawWater(const GpuMesh& mesh, const Mat4& model, const WaterMate
     waterDraws_.push_back(WaterItem{&mesh, model, material});
 }
 
-void Renderer::drawParticles(const std::vector<MeshVertex>& vertices, SDL_GPUTexture* texture, uint32_t blendType) {
+void Renderer::drawParticles(const std::vector<MeshVertex>& vertices, SDL_GPUTexture* texture, uint32_t blendType, bool fog) {
     if (vertices.empty()) return;
     ParticleBatch batch;
     batch.first = uint32_t(particleVertices_.size());
     batch.count = uint32_t(vertices.size());
     batch.texture = texture ? texture : white_;
     batch.blendType = blendType;
-    // Consecutive quads of the same texture and blend share one draw.
-    if (!particleBatches_.empty() && particleBatches_.back().texture == batch.texture && particleBatches_.back().blendType == blendType)
+    batch.fog = fog;
+    // Consecutive quads of the same texture, blend and fog share one draw.
+    if (!particleBatches_.empty() && particleBatches_.back().texture == batch.texture && particleBatches_.back().blendType == blendType &&
+        particleBatches_.back().fog == fog)
         particleBatches_.back().count += batch.count;
     else
         particleBatches_.push_back(batch);
@@ -817,6 +819,7 @@ void Renderer::recordParticles(SDL_GPUCommandBuffer*& commands, SDL_GPURenderPas
         SceneFragmentUniforms u{Vec4f{1, 1, 1, 1}, towardsLight_, Vec4f{0, added ? 0.0f : 1.0f, added ? 1.0f : 0.0f, 0}, Vec4f{0, 0, 0, 0},
                                 lightingUniforms(lighting_, cameraPosition_, shadowMatrix_, false, float(shadowSize))};
         u.lightDirection.w = 0;
+        if (!b.fog) u.lighting.fogColour.w = 0;
         SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof u);
         SDL_DrawGPUPrimitives(pass, b.count, 1, b.first, 0);
     }
