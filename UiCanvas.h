@@ -43,6 +43,11 @@ public:
         // centred on it (see drawTexture). Off: no mouse over the UI - the mask's clamped edge (1/255) leaves them invisible.
         bool mouseHighlight = false;
         float mouseX = 0, mouseY = 0;       // logical units
+        // Button state (see drawWidget): 0 as exported (the export's Bitmap / Text children: Up, or Disabled for a few), 1 up,
+        // 2 highlighted, 3 down (pushed), 4 disabled, 5 pressed (toggle buttons; push buttons show down). toggledOn: toggle buttons'
+        // Down variants.
+        int buttonState = 0;
+        bool toggledOn = false;
         int background = 0;                 // 0 black, 1 grey, 2 checkerboard
         // The screen the UI is drawn for, in pixels (0: the export's logical size, 1280 x 960, at one pixel per unit). Wider
         // than 1.5 the root is 1706 x 960 logical, as in the game; widgets are laid out in logical units and drawn at pixels.
@@ -105,6 +110,16 @@ private:
     tr::GameData* game_ = nullptr;
     std::string gameRoot_;
     Options options_;
+    // A button's state applied to its Bitmap / Text children (drawWidget): texture, text colour, text offset.
+    struct ButtonOverride {
+        bool texture = false, colour = false, offset = false;
+        std::string textureDef;
+        float rgba[4] = {1, 1, 1, 1};
+        int32_t offsetX = 0, offsetY = 0;
+    };
+    std::map<const tr::XmlNode*, ButtonOverride> buttonOverrides_;
+    void applyButtonState(const tr::XmlNode& button);
+    void colourOf(const tr::XmlNode& widget, float rgba[4]) const;
     int32_t width_ = 1280, height_ = 960;
     int32_t pixelWidth_ = 1280, pixelHeight_ = 960;
     std::map<std::string, std::unique_ptr<Image>> images_;          // by lower-case name; null = failed

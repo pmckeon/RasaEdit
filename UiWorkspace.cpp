@@ -222,6 +222,14 @@ void UiWorkspace::drawCanvasPanel() {
         ImGui::SetTooltip("The window wires (TRUIBackgroundMask) glow around the mouse in game (ui_mouse_mask.dds, 256 units across).\n"
                           "On: they follow the mouse over the canvas.");
     ImGui::SameLine();
+    ImGui::SetNextItemWidth(130);
+    ImGui::Combo("##buttons", &options_.buttonState, "Buttons as exported\0Buttons up\0Buttons highlighted\0Buttons down\0Buttons disabled\0Buttons pressed\0");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Every button's state (its texture, text colour and text offset, as the game applies them).\n"
+                          "As exported: the export's own children (Up, a few Disabled).");
+    ImGui::SameLine();
+    ImGui::Checkbox("Toggled on", &options_.toggledOn);
+    ImGui::SameLine();
     ImGui::SetNextItemWidth(110);
     ImGui::Combo("##background", &options_.background, "Black\0Grey\0Checkerboard\0");
     ImGui::SameLine();
@@ -238,7 +246,8 @@ void UiWorkspace::drawCanvasPanel() {
         options_.screenHeight = screens[screen_][1];
         dirty_ = true;
     }
-    if (options_.showHidden != before.showHidden || options_.mouseHighlight != before.mouseHighlight || options_.background != before.background)
+    if (options_.showHidden != before.showHidden || options_.mouseHighlight != before.mouseHighlight || options_.background != before.background ||
+        options_.buttonState != before.buttonState || options_.toggledOn != before.toggledOn)
         dirty_ = true;
     if (ui_ && hasBranch_) {
         size_t visual = 0;

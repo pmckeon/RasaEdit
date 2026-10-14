@@ -51,6 +51,11 @@ int main(int argc, char** argv) {
             canvas.setSources(&ui, &assets, &data, argv[1]);
             UiCanvas::Options options;
             options.showHidden = envValue("RASA_UIHIDDEN") != nullptr;
+            if (const char* state = envValue("RASA_UIBUTTONS")) {        // up / highlighted / down / disabled / pressed
+                const std::string s = state;
+                options.buttonState = s == "up" ? 1 : s == "highlighted" ? 2 : s == "down" ? 3 : s == "disabled" ? 4 : s == "pressed" ? 5 : 0;
+            }
+            options.toggledOn = envValue("RASA_UITOGGLED") != nullptr;
             if (const char* mouse = envValue("RASA_UIMOUSE")) {           // logical x,y: the window wires glow around it
                 options.mouseHighlight = std::sscanf(mouse, "%f,%f", &options.mouseX, &options.mouseY) == 2;
             }

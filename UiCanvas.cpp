@@ -335,8 +335,14 @@ UiCanvas::Rect UiCanvas::childRect(const tr::XmlNode& widget, const Rect& parent
     int32_t px = 0, py = 0, cx = 0, cy = 0;
     anchorPoint(intAttribute(widget, "parentAnchor"), parent.width(), parent.height(), px, py);
     anchorPoint(intAttribute(widget, "childAnchor"), w, h, cx, cy);
-    const int32_t x = parent.x0 + px + intAttribute(widget, "anchorOffsetX") - cx;
-    const int32_t y = parent.y0 + py + intAttribute(widget, "anchorOffsetY") - cy;
+    int32_t offsetX = intAttribute(widget, "anchorOffsetX"), offsetY = intAttribute(widget, "anchorOffsetY");
+    const auto o = buttonOverrides_.find(&widget);
+    if (o != buttonOverrides_.end() && o->second.offset) {
+        offsetX = o->second.offsetX;
+        offsetY = o->second.offsetY;
+    }
+    const int32_t x = parent.x0 + px + offsetX - cx;
+    const int32_t y = parent.y0 + py + offsetY - cy;
     return Rect{x, y, x + w, y + h};
 }
 
@@ -438,7 +444,8 @@ void widgetColour(const tr::XmlNode& w, float c[4]) {
 }  // namespace
 
 void UiCanvas::drawTexture(const tr::XmlNode& widget, const Rect& rect, const Rect& clip, Target& target) {
-    const tr::UiTextureDef* def = ui_->texture(widget.attribute("textureDef"));
+    const auto o = buttonOverrides_.find(&widget);
+    const tr::UiTextureDef* def = ui_->texture(o != buttonOverrides_.end() && o->second.texture ? o->second.textureDef : widget.attribute("textureDef"));
     if (!def) return;
     const std::string effect = lower(widget.attribute("effect"));
     Target::Blend blend = Target::Blend::Alpha;
@@ -464,7 +471,7 @@ void UiCanvas::drawTexture(const tr::XmlNode& widget, const Rect& rect, const Re
         if (!maskName.empty()) mask = image(maskName);
     }
     float colour[4];
-    widgetColour(widget, colour);
+    colourOf(widget, colour);
     if (!useColour) colour[0] = colour[1] = colour[2] = colour[3] = 1.0f;
     const Rect px = target.pixels(rect);
     const Rect area = intersect(px, target.pixels(clip));
@@ -500,7 +507,7 @@ void UiCanvas::drawTexture(const tr::XmlNode& widget, const Rect& rect, const Re
 
 void UiCanvas::drawColour(const tr::XmlNode& widget, const Rect& rect, const Rect& clip, Target& target) {
     float colour[4];
-    widgetColour(widget, colour);
+    colourOf(widget, colour);
     const Target::Blend blend = lower(widget.attribute("effect")) == "truiadditivealpha.fx" ? Target::Blend::Additive : Target::Blend::Alpha;
     const Rect area = intersect(target.pixels(rect), target.pixels(clip));
     for (int32_t y = std::max(area.y0, 0); y < std::min(area.y1, target.height); ++y)
@@ -576,7 +583,7 @@ void UiCanvas::drawText(const tr::XmlNode& widget, const Rect& rect, const Rect&
     lines.emplace_back(lineStart, items.size());
 
     float colour[4];
-    widgetColour(widget, colour);
+    colourOf(widget, colour);
     const Target::Blend blend = lower(widget.attribute("effect")) == "truiadditivealpha.fx" ? Target::Blend::Additive : Target::Blend::Alpha;
     const std::string horiz = widget.attribute("horizAlign"), vert = widget.attribute("vertAlign");
     const int32_t lineHeight = baseFace->cellHeight(baseEm), leading = baseFace->internalLeading(baseEm);
@@ -614,9 +621,72 @@ void UiCanvas::drawText(const tr::XmlNode& widget, const Rect& rect, const Rect&
     }
 }
 
+void UiCanvas::colourOf(const tr::XmlNode& widget, float rgba[4]) const {
+    const auto o = buttonOverrides_.find(&widget);
+    if (o != buttonOverrides_.end() && o->second.colour) {
+        for (int c = 0; c < 4; ++c) rgba[c] = o->second.rgba[c];
+        return;
+    }
+    widgetColour(widget, rgba);
+}
+
+// Button states (tabula_rasa.exe, decompiled 2026-10-15). A push button (PushButton; ScrollUpBtn / ScrollDownBtn, Thumb, Track and Entry
+// load the same attributes; loader FUN_008e2fc0) owns a Bitmap and a Text child (the export's children are those, dumped in the
+// state they had: Up for all but 27 Disabled ones) and applies its state to them (FUN_008e42f0): texture (FUN_008e4460), text
+// colour (FUN_008e4360, SetColor) and text anchor offset (FUN_008e43e0, SetAnchorOffset), each chosen as: not enabled -> Disabled;
+// pushed (+0x139) -> Down; highlighted (+0x138) -> Highlighted; else Up (texture attributes Up / Highlighted / Down /
+// DisabledTextureDef; colour and offset Up / Highlight / Down / DisabledTextColor / TextAnchorOffset). Defaults (constructor
+// FUN_008e2b20): textures "", colours 0xFFFFFFFF, offsets (0, 0) - so a state without an attribute still sets white / (0, 0).
+// A toggle button (Button, ToggleButton; FUN_008e7c30) owns a Bitmap and chooses its texture (FUN_008e8be0): not enabled ->
+// DownDisabled if on, else UpDisabled; pressed (+0x18b) -> Pressed; highlighted (+0x18a) -> DownHighlighted / UpHighlighted; else
+// Down / Up.
+void UiCanvas::applyButtonState(const tr::XmlNode& button) {
+    if (options_.buttonState == 0 || !button.hasAttribute("UpTextureDef")) return;
+    const tr::XmlNode* bitmap = nullptr;
+    const tr::XmlNode* textNode = nullptr;
+    for (const tr::XmlNode& c : button.children) {
+        if (!bitmap && c.tag == "Bitmap") bitmap = &c;
+        if (!textNode && c.tag == "Text") textNode = &c;
+    }
+    const int state = options_.buttonState;                 // 1 up, 2 highlighted, 3 down, 4 disabled, 5 pressed
+    const bool toggle = button.tag == "Button" || button.tag == "ToggleButton";
+    if (toggle) {
+        const bool on = options_.toggledOn;
+        std::string def;
+        if (state == 4) def = button.attribute(on ? "DownDisabledTextureDef" : "UpDisabledTextureDef");
+        else if (state == 5) def = button.attribute("PressedTextureDef");
+        else if (state == 2) def = button.attribute(on ? "DownHighlightedTextureDef" : "UpHighlightedTextureDef");
+        else def = button.attribute(on ? "DownTextureDef" : "UpTextureDef");
+        if (bitmap) {
+            ButtonOverride& o = buttonOverrides_[bitmap];
+            o.texture = true;
+            o.textureDef = def;
+        }
+        return;
+    }
+    const char* texture = state == 4 ? "DisabledTextureDef" : state == 3 || state == 5 ? "DownTextureDef" : state == 2 ? "HighlightedTextureDef" : "UpTextureDef";
+    const char* prefix = state == 4 ? "Disabled" : state == 3 || state == 5 ? "Down" : state == 2 ? "Highlight" : "Up";
+    if (bitmap) {
+        ButtonOverride& o = buttonOverrides_[bitmap];
+        o.texture = true;
+        o.textureDef = button.attribute(texture);
+    }
+    if (textNode) {
+        ButtonOverride& o = buttonOverrides_[textNode];
+        o.colour = true;
+        const std::string p = prefix;
+        if (button.hasAttribute(p + "TextColorR"))
+            for (int c = 0; c < 4; ++c) o.rgba[c] = float(intAttribute(button, (p + "TextColor" + "RGBA"[c]).c_str(), 255)) / 255.0f;
+        o.offset = true;
+        o.offsetX = intAttribute(button, (p + "TextAnchorOffsetX").c_str());
+        o.offsetY = intAttribute(button, (p + "TextAnchorOffsetY").c_str());
+    }
+}
+
 void UiCanvas::drawWidget(const tr::XmlNode& widget, std::vector<int32_t>& path, const Rect& parent, const Rect& clip, bool branchRoot,
                           Target& target) {
     if (!branchRoot && !options_.showHidden && widget.attribute("visible") == "false") return;
+    applyButtonState(widget);
     const Rect rect = childRect(widget, parent);
     bool visual = false;
     if (widget.hasAttribute("textureDef")) {
@@ -641,6 +711,7 @@ void UiCanvas::drawWidget(const tr::XmlNode& widget, std::vector<int32_t>& path,
 std::vector<UiCanvas::DrawnWidget> UiCanvas::render(const std::vector<int32_t>& path, const Options& options, std::vector<uint8_t>& rgba) {
     drawn_.clear();
     options_ = options;
+    buttonOverrides_.clear();
     const int32_t logicalW = ui_ ? ui_->logicalWidth : 1280, logicalH = ui_ ? ui_->logicalHeight : 960;
     // The root window's logical size (tabula_rasa.exe FUN_00896220, sizes from FUN_004cd8c0's call of the UI manager's init
     // FUN_00895430): 1706 x 960 when the screen's width / height exceeds 1.5 (double at 0x00c2b570), else 1280 x 960; the screen
