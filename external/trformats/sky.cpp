@@ -1,4 +1,5 @@
 #include "sky.h"
+#include "xml.h"
 
 #include <algorithm>
 #include <cctype>
@@ -9,113 +10,6 @@
 namespace tr {
 
 namespace {
-
-// Minimal XML: elements, attributes, self-closing tags, comments, processing instructions, the five predefined
-// entities. Enough for the game's property files (no DTDs, CDATA or namespaces).
-struct XmlNode {
-    std::string tag;
-    std::vector<std::pair<std::string, std::string>> attributes;
-    std::vector<XmlNode> children;
-    std::string attribute(const std::string& name) const {
-        for (const auto& a : attributes)
-            if (a.first == name) return a.second;
-        return "";
-    }
-    const XmlNode* child(const std::string& name) const {
-        for (const XmlNode& c : children)
-            if (c.tag == name) return &c;
-        return nullptr;
-    }
-};
-
-class XmlParser {
-public:
-    explicit XmlParser(const Bytes& data) : text_(reinterpret_cast<const char*>(data.data()), data.size()) {}
-    XmlNode document() {
-        skipMisc();
-        XmlNode root = element();
-        skipMisc();
-        if (pos_ < text_.size()) throw FormatError("XML: content after the root element");
-        return root;
-    }
-private:
-    [[noreturn]] void error(const std::string& what) const { throw FormatError("XML: " + what + " at offset " + std::to_string(pos_)); }
-    bool startsWith(const char* s) const { return text_.compare(pos_, std::char_traits<char>::length(s), s) == 0; }
-    void skipSpace() { while (pos_ < text_.size() && std::isspace(static_cast<unsigned char>(text_[pos_]))) ++pos_; }
-    void skipPast(const char* end) {
-        const size_t found = text_.find(end, pos_);
-        if (found == std::string::npos) error(std::string("missing ") + end);
-        pos_ = found + std::char_traits<char>::length(end);
-    }
-    void skipMisc() {                                  // whitespace, <?…?>, <!--…-->, <!…>
-        for (;;) {
-            skipSpace();
-            if (startsWith("<?")) skipPast("?>");
-            else if (startsWith("<!--")) skipPast("-->");
-            else if (startsWith("<!")) skipPast(">");
-            else return;
-        }
-    }
-    std::string name() {
-        const size_t start = pos_;
-        while (pos_ < text_.size() && (std::isalnum(static_cast<unsigned char>(text_[pos_])) || text_[pos_] == '_' || text_[pos_] == ':' ||
-                                       text_[pos_] == '-' || text_[pos_] == '.'))
-            ++pos_;
-        if (pos_ == start) error("name expected");
-        return text_.substr(start, pos_ - start);
-    }
-    static std::string decode(const std::string& s) {
-        std::string out;
-        for (size_t i = 0; i < s.size(); ++i) {
-            if (s[i] != '&') { out += s[i]; continue; }
-            const size_t semi = s.find(';', i);
-            const std::string entity = semi == std::string::npos ? "" : s.substr(i + 1, semi - i - 1);
-            const char c = entity == "amp" ? '&' : entity == "lt" ? '<' : entity == "gt" ? '>' : entity == "quot" ? '"' : entity == "apos" ? '\'' : 0;
-            if (c) { out += c; i = semi; }
-            else out += '&';
-        }
-        return out;
-    }
-    XmlNode element() {
-        if (pos_ >= text_.size() || text_[pos_] != '<') error("'<' expected");
-        ++pos_;
-        XmlNode node;
-        node.tag = name();
-        for (;;) {
-            skipSpace();
-            if (startsWith("/>")) { pos_ += 2; return node; }
-            if (startsWith(">")) { ++pos_; break; }
-            std::string key = name();
-            skipSpace();
-            if (pos_ >= text_.size() || text_[pos_] != '=') error("'=' expected");
-            ++pos_;
-            skipSpace();
-            const char quote = pos_ < text_.size() ? text_[pos_] : 0;
-            if (quote != '"' && quote != '\'') error("quoted value expected");
-            const size_t end = text_.find(quote, pos_ + 1);
-            if (end == std::string::npos) error("unterminated value");
-            node.attributes.emplace_back(std::move(key), decode(text_.substr(pos_ + 1, end - pos_ - 1)));
-            pos_ = end + 1;
-        }
-        for (;;) {                                     // content: text is ignored (the v3 files keep data in attributes)
-            const size_t lt = text_.find('<', pos_);
-            if (lt == std::string::npos) error("unterminated element " + node.tag);
-            pos_ = lt;
-            if (startsWith("</")) {
-                pos_ += 2;
-                if (name() != node.tag) error("mismatched end tag for " + node.tag);
-                skipSpace();
-                if (pos_ >= text_.size() || text_[pos_] != '>') error("'>' expected");
-                ++pos_;
-                return node;
-            }
-            if (startsWith("<!--")) { skipPast("-->"); continue; }
-            node.children.push_back(element());
-        }
-    }
-    std::string text_;
-    size_t pos_ = 0;
-};
 
 using Properties = std::map<std::string, std::string>;
 
@@ -234,7 +128,7 @@ Vec3 rotateAbout(const Vec3& v, const Vec3& axisIn, float angle) {     // Rodrig
 }  // namespace
 
 Sky readSky(const Bytes& data) {
-    const XmlNode root = XmlParser(data).document();
+    const XmlNode root = parseXml(data);
     if (root.tag != "SkyData") throw FormatError("sky: root element " + root.tag + " (only <SkyData> files are supported)");
     Sky sky;
     sky.weatherActive = flag(properties(&root), "WeatherActive");
@@ -294,7 +188,7 @@ Sky readSky(const Bytes& data) {
 }
 
 std::vector<PlacedLight> readLights(const Bytes& data, const std::map<std::string, std::string>& overrides) {
-    const XmlNode root = XmlParser(data).document();
+    const XmlNode root = parseXml(data);
     if (root.tag != "LightRoot") throw FormatError("lights: root element " + root.tag + " (expected <LightRoot>)");
     std::vector<PlacedLight> out;
     const XmlNode* lights = root.child("Lights");
@@ -495,7 +389,7 @@ std::string LightsDocument::formatVector(const float* v, size_t n) {
 }
 
 std::vector<LightModifier> readLightModifiers(const Bytes& data) {
-    const XmlNode root = XmlParser(data).document();
+    const XmlNode root = parseXml(data);
     std::vector<LightModifier> out;
     const XmlNode* mods = root.child("Mods");
     if (!mods) return out;

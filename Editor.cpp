@@ -5,8 +5,11 @@
 Editor::Editor(SDL_Window* window, SDL_GPUDevice* device)
     : context_(std::make_unique<EditorContext>(window, device)),
       client_(std::make_unique<ClientWorkspace>(*context_)),
+      ui_(std::make_unique<UiWorkspace>(*context_)),
       server_(std::make_unique<ServerWorkspace>(*context_)) {
-    active_ = context_->setting("workspace") == "client" ? static_cast<Workspace*>(client_.get()) : static_cast<Workspace*>(server_.get());
+    const std::string workspace = context_->setting("workspace");
+    active_ = workspace == "client" ? static_cast<Workspace*>(client_.get()) : workspace == "ui" ? static_cast<Workspace*>(ui_.get())
+                                                                                                 : static_cast<Workspace*>(server_.get());
     // Reopen the last game, server database and map on start-up.
     const std::string root = context_->setting("gameRoot");
     if (!root.empty()) context_->queueGameRoot(root);
@@ -20,7 +23,7 @@ Editor::~Editor() = default;
 
 void Editor::setActive(Workspace* workspace) {
     active_ = workspace;
-    context_->setSetting("workspace", workspace == client_.get() ? "client" : "server");
+    context_->setSetting("workspace", workspace == client_.get() ? "client" : workspace == ui_.get() ? "ui" : "server");
 }
 
 // ------------------------------------------------------------------------------------------
@@ -42,6 +45,7 @@ void Editor::processPendingActions() {
     };
     if (!pending.gameRoot.empty() && mayReplaceServerContent(PromptAction::OpenGame, pending.gameRoot) && context_->openGame(pending.gameRoot)) {
         client_->onGameOpened();
+        ui_->onGameOpened();
         server_->onGameOpened();
     }
     if (!pending.database.empty() && mayReplaceServerContent(PromptAction::OpenDatabase, pending.database)) server_->openDatabase(pending.database);
@@ -69,7 +73,7 @@ void Editor::drawUi() {
 void Editor::drawMenuBar() {
     if (!ImGui::BeginMainMenuBar()) return;
     // Workspace tabs.
-    for (Workspace* w : {static_cast<Workspace*>(client_.get()), static_cast<Workspace*>(server_.get())}) {
+    for (Workspace* w : {static_cast<Workspace*>(client_.get()), static_cast<Workspace*>(ui_.get()), static_cast<Workspace*>(server_.get())}) {
         const bool current = w == active_;
         if (current) ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_CheckMark));
         if (ImGui::MenuItem(w->name(), nullptr, current) && !current) setActive(w);
@@ -113,6 +117,7 @@ void Editor::renderViewport(SDL_GPUCommandBuffer* commands) { active_->renderVie
 
 void Editor::releaseGpuResources() {
     client_->releaseGpuResources();
+    ui_->releaseGpuResources();
     context_->releaseGpuResources();
 }
 

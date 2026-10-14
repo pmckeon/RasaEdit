@@ -3,6 +3,7 @@
 //   viewport_test <game root> <game.zip> <map> <out.rgba> <width> <height> <eye x y z> <target x y z>
 #include "Avatar.h"
 #include "SceneView.h"
+#include "UiCanvas.h"
 #include "gamedata.h"
 #include "WorldDatabase.h"
 
@@ -37,6 +38,65 @@ int main(int argc, char** argv) {
         renderer.resize(width, height);
         tr::AssetLibrary assets(argv[1]);
         tr::GameData data(argv[2]);
+        // RASA_UIRENDER=<uiid>/<uiid>/...[;<another branch>...] (or "*" for every root widget): draws those branches of
+        // data\xml\Tabula_Rasa_UI_EXPORT.xml in turn with UiCanvas into <out.rgba> and exits; prints what could not be resolved.
+        // RASA_UIHIDDEN=1 draws hidden widgets too, RASA_UIWIRES=1 the background-mask wires, RASA_UISCREEN=<w>x<h> draws for that screen
+        // (the output is then w x h, else the export's 1280 x 960), RASA_UIBACKGROUND=<raw rgba file of that size> draws over it.
+        if (const char* uiPaths = envValue("RASA_UIRENDER")) {
+            const tr::Bytes xml = tr::readFile((std::filesystem::path(argv[1]) / "data" / "xml" / "Tabula_Rasa_UI_EXPORT.xml").string());
+            const tr::UiExport ui = tr::readUiExport(xml);
+            std::printf("UI export: %d x %d, %zu colours, %zu fonts, %zu texture defs, %zu root widgets\n", ui.logicalWidth, ui.logicalHeight, ui.colours.size(),
+                        ui.fonts.size(), ui.textures.size(), ui.widgets.children.size());
+            UiCanvas canvas;
+            canvas.setSources(&ui, &assets, &data, argv[1]);
+            UiCanvas::Options options;
+            options.showHidden = envValue("RASA_UIHIDDEN") != nullptr;
+            options.backgroundMaskWires = envValue("RASA_UIWIRES") != nullptr;
+            if (const char* uiScreen = envValue("RASA_UISCREEN")) std::sscanf(uiScreen, "%dx%d", &options.screenWidth, &options.screenHeight);
+            std::vector<uint8_t> rgba, background;
+            if (const char* bg = envValue("RASA_UIBACKGROUND")) {
+                const tr::Bytes b = tr::readFile(bg);
+                background.assign(b.begin(), b.end());
+                options.backgroundRgba = &background;
+            }
+            std::stringstream branches(uiPaths);
+            std::string uiPath;
+            while (std::getline(branches, uiPath, ';')) {
+                std::vector<int32_t> path;
+                if (uiPath != "*") {
+                    std::stringstream parts(uiPath);
+                    std::string part;
+                    const tr::XmlNode* n = &ui.widgets;
+                    while (std::getline(parts, part, '/')) {
+                        int32_t found = -1;
+                        for (size_t k = 0; k < n->children.size() && found < 0; ++k)
+                            if (n->children[k].attribute("uiid") == part) found = int32_t(k);
+                        if (found < 0) { std::printf("UI widget %s not found\n", part.c_str()); return 1; }
+                        path.push_back(found);
+                        n = &n->children[size_t(found)];
+                    }
+                }
+                const auto t0 = std::chrono::steady_clock::now();
+                const auto drawn = canvas.render(path, options, rgba);
+                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                size_t visual = 0;
+                for (const auto& d : drawn) visual += d.visual ? 1 : 0;
+                const UiCanvas::Rect r = canvas.layout(path);
+                std::printf("UI branch %s at (%d %d)-(%d %d): %zu widgets laid out, %zu drawn something, %.1f ms\n", uiPath.c_str(), r.x0, r.y0, r.x1, r.y1,
+                            drawn.size(), visual, ms);
+                background = rgba;                    // the next branch draws over this one
+                options.backgroundRgba = &background;
+            }
+            for (const auto& t : canvas.missingTextures()) std::printf("UI missing texture %s\n", t.c_str());
+            for (const auto& f : canvas.missingFonts()) std::printf("UI missing font face %s\n", f.c_str());
+            for (const auto& t : canvas.missingTextIds()) std::printf("UI unknown text id %s\n", t.c_str());
+            std::FILE* out = std::fopen(argv[4], "wb");
+            if (out) {
+                std::fwrite(rgba.data(), 1, rgba.size(), out);
+                std::fclose(out);
+            }
+            return 0;
+        }
         const tr::MapBundle map = tr::loadMap(assets, argv[3]);
         SceneView scene(renderer, assets, map, [&](int32_t id) { return data.classMeshName(id); },
                         [&](int32_t id) { return !data.className(id).empty(); }, [&](int32_t id) { return data.classCullingLayer(id); },

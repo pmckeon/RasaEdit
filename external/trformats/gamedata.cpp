@@ -1134,6 +1134,10 @@ std::string GameData::audioSetName(int32_t audioSetId) {
 std::string GameData::regionDisplayName(int32_t displayName, int32_t gender) {
     const std::string name = py::asString(py::dictGet(global("generated.client.uielement", "byvalue"), displayName));
     if (name.empty()) return "";
+    return uiText(name, gender);
+}
+
+std::string GameData::uiText(const std::string& name, int32_t gender) {
     const int64_t index = py::asInt(py::dictGet(global("generated.client.uielement", "bystring"), name), 0);
     if (index == 0) return "";
     const py::Object* lookup = global("generated.client.language.english.uielementlanguage", "lookup");

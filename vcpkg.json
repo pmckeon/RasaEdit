@@ -21,6 +21,10 @@
         "mpg123"
       ]
     },
+    {
+      "name": "freetype",
+      "default-features": false
+    },
     "zlib",
     "sqlite3"
   ]

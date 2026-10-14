@@ -217,6 +217,9 @@ public:
     // through uielement.bystring and reads uielementlanguage (gender-keyed (id, gender) -> [text]). "" when the region has none
     // (the client then shows "No Default Map Name").
     std::string regionDisplayName(int32_t displayName, int32_t gender = 1);
+    // A UI text id ("ID_...", e.g. a UI widget's textId): generated.client.uielement.bystring[name] -> index ->
+    // uielementlanguage.lookup[(index, gender)][0]; "" when the id is unknown.
+    std::string uiText(const std::string& name, int32_t gender = 1);
     // An NPC greeting line: generated.client.language.english.npcgreetinglanguage lookup[(id, gender)][0] (a gender module:
     // clientlanguagemanager.py BuildModuleText; gender 1 = male, 2 = female). "" if none.
     std::string npcGreeting(int32_t greetingId, int32_t gender = 1);

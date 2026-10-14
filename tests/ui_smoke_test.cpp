@@ -500,6 +500,22 @@ int main() {
             check(preview.kind_ == AssetPreview::Kind::Text && preview.text_.find("SkyData") != std::string::npos, "text preview shows the .sky");
         }
 
+        // UI workspace: the export loads, a branch draws, a canvas pick finds a widget inside it.
+        {
+            editor.setActive(editor.ui_.get());
+            frames(editor, device, 2);
+            UiWorkspace& ui = *editor.ui_;
+            check(dockspaceExists("UIDockSpace"), "UI layout built");
+            check(ui.uiExport() && ui.uiExport()->widgets.children.size() == 8 && ui.uiExport()->textures.size() == 1512, "UI export loaded");
+            check(ui.showBranch("FrontEnd"), "UI branch FrontEnd found");
+            frames(editor, device, 2);
+            size_t visual = 0;
+            for (const auto& d : ui.drawnWidgets()) visual += d.visual ? 1 : 0;
+            check(ui.texture_ && visual > 0 && ui.canvas_.missingTextures().empty() && ui.canvas_.missingFonts().empty(), "UI branch drawn with its textures and fonts");
+            const std::vector<int32_t> under = ui.canvas_.pick(640, 480);
+            check(!under.empty() && under.front() == ui.branch_.front(), "UI canvas pick finds a widget of the branch");
+        }
+
         // Back to server: its selection and options survive the switch.
         editor.setActive(editor.server_.get());
         frames(editor, device, 2);

@@ -12,6 +12,7 @@ project ("RasaEdit")
 find_package(SDL3 CONFIG REQUIRED)
 find_package(SDL3_mixer CONFIG REQUIRED)       # asset preview sounds: WAV, Ogg Vorbis (libvorbis), MP3 (mpg123)
 find_package(imgui CONFIG REQUIRED)
+find_package(Freetype REQUIRED)               # UI text (UiCanvas): hinted glyphs like the game's GDI ones
 # SQLite for the server (World) database: vcpkg's port, or a system package elsewhere.
 find_package(unofficial-sqlite3 CONFIG QUIET)
 if (TARGET unofficial::sqlite3::sqlite3)
@@ -45,6 +46,8 @@ add_executable (RasaEdit
     "GpuMath.h" "MarkerColours.h" "ShaderBytecode.h"
     "WorldDatabase.cpp" "WorldDatabase.h"
     "Avatar.cpp" "Avatar.h"
+    "UiCanvas.cpp" "UiCanvas.h"
+    "UiWorkspace.cpp" "UiWorkspace.h"
 )
 
 # Link everything together
@@ -52,6 +55,7 @@ target_link_libraries(RasaEdit PRIVATE
     SDL3::SDL3
     SDL3_mixer::SDL3_mixer
     imgui::imgui
+    Freetype::Freetype
     trformats
     ${RASAEDIT_SQLITE}
 )
@@ -61,15 +65,15 @@ set_property(TARGET RasaEdit PROPERTY CXX_STANDARD 20)
 # Headless rendering test (renders a map offscreen and writes raw RGBA; works on any Vulkan driver).
 option(RASAEDIT_BUILD_TESTS "Build the headless viewport test" OFF)
 if (RASAEDIT_BUILD_TESTS)
-    add_executable(viewport_test tests/viewport_test.cpp Renderer.cpp SceneView.cpp ParticleSim.cpp GpuTexture.cpp WorldDatabase.cpp Avatar.cpp)
+    add_executable(viewport_test tests/viewport_test.cpp Renderer.cpp SceneView.cpp ParticleSim.cpp GpuTexture.cpp WorldDatabase.cpp Avatar.cpp UiCanvas.cpp)
     target_include_directories(viewport_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    target_link_libraries(viewport_test PRIVATE SDL3::SDL3 trformats ${RASAEDIT_SQLITE})
+    target_link_libraries(viewport_test PRIVATE SDL3::SDL3 Freetype::Freetype trformats ${RASAEDIT_SQLITE})
 
     # Whole-editor smoke test: real ImGui frames and both workspaces, headless.
     add_executable(ui_smoke_test tests/ui_smoke_test.cpp Editor.cpp EditorContext.cpp ClientWorkspace.cpp ServerWorkspace.cpp MissionEditor.cpp LootEditor.cpp Panels.cpp AssetPreview.cpp SoundPlayer.cpp
-                   Renderer.cpp SceneView.cpp ParticleSim.cpp GpuTexture.cpp WorldDatabase.cpp Avatar.cpp TerrainOverview.cpp RadarMap.cpp)
+                   Renderer.cpp SceneView.cpp ParticleSim.cpp GpuTexture.cpp WorldDatabase.cpp Avatar.cpp TerrainOverview.cpp RadarMap.cpp UiCanvas.cpp UiWorkspace.cpp)
     target_include_directories(ui_smoke_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    target_link_libraries(ui_smoke_test PRIVATE SDL3::SDL3 SDL3_mixer::SDL3_mixer imgui::imgui trformats ${RASAEDIT_SQLITE})
+    target_link_libraries(ui_smoke_test PRIVATE SDL3::SDL3 SDL3_mixer::SDL3_mixer imgui::imgui Freetype::Freetype trformats ${RASAEDIT_SQLITE})
     set_property(TARGET ui_smoke_test PROPERTY CXX_STANDARD 20)
     set_property(TARGET viewport_test PROPERTY CXX_STANDARD 20)
 endif()

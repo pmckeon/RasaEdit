@@ -3,13 +3,14 @@
 #include "ClientWorkspace.h"
 #include "EditorContext.h"
 #include "ServerWorkspace.h"
+#include "UiWorkspace.h"
 
 #include <SDL3/SDL.h>
 
 #include <memory>
 #include <string>
 
-// The editor shell: the shared context, the Client and Server workspaces (one active at a time,
+// The editor shell: the shared context, the Client, UI and Server workspaces (one active at a time,
 // each with its own panels and docking layout), the menu bar, queued loads and unsaved-change prompts.
 class Editor {
 public:
@@ -41,6 +42,7 @@ private:
 
     std::unique_ptr<EditorContext> context_;
     std::unique_ptr<ClientWorkspace> client_;
+    std::unique_ptr<UiWorkspace> ui_;
     std::unique_ptr<ServerWorkspace> server_;
     Workspace* active_ = nullptr;
 
