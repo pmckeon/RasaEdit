@@ -261,8 +261,13 @@ public:
     void setEnvironmentMap(SDL_GPUTexture* cube) { environment_ = cube; }
     // Sun shadow map (depth from the sun, orthographic, centred on the camera, texel-snapped).
     static constexpr uint32_t shadowSize = 2048;
-    static constexpr float shadowExtent = 120.0f;   // half width in metres
-    static constexpr float shadowDepth = 1200.0f;
+    // The game's sun shadow map (fitted to 3,868 frames of an apitrace capture at Alia Das, tabula_rasa.3.trace, 2026-10-14, with
+    // Client.Graphics.ShadowDistance 100): orthographic, 2048 x 2048, half width 35.84 m (constant in every frame), depth range
+    // 400 m (|row 2| = 0.0025), centred in the light's plane on the camera + 27.9 m along its view direction (27.4 - 28.4 as the
+    // stepped sun direction changes; residual < 0.15 m), not texel-snapped.
+    static constexpr float shadowExtent = 35.84f;   // half width in metres
+    static constexpr float shadowDepth = 400.0f;
+    static constexpr float shadowAhead = 27.9f;     // centre: metres ahead of the camera
     void record(SDL_GPUCommandBuffer* commands);
     size_t queuedDraws() const { return draws_.size() + translucentDraws_.size() + additiveDraws_.size() + particleBatches_.size(); }
     size_t queuedParticleVertices() const { return particleVertices_.size(); }

@@ -530,17 +530,15 @@ void Renderer::beginFrame(const Mat4& viewProjection, const tr::Vec3& cameraPosi
     towardsLight_ = Vec4f{lighting.towardsLight.x, lighting.towardsLight.y, lighting.towardsLight.z, 1.0f};
     clearColour_ = lighting.clearColour;
     lighting_ = lighting;
-    // Sun shadow map: orthographic from the sun around the camera, snapped to whole texels so it does not shimmer.
+    // Sun shadow map: orthographic from the sun, centred ahead of the camera as the game's (see shadowExtent).
     shadowsActive_ = lighting.sunShadows && lighting.towardsLight.y > 0.02f;
     if (shadowsActive_) {
         const tr::Vec3 toward = normalized(lighting.towardsLight);
         const tr::Vec3 forward = scaled(toward, -1.0f);
         const tr::Vec3 right = normalized(cross(std::fabs(forward.y) > 0.99f ? tr::Vec3{0, 0, 1} : tr::Vec3{0, 1, 0}, forward));
         const tr::Vec3 up = cross(forward, right);
-        const float texel = 2.0f * shadowExtent / float(shadowSize);
-        float cx = dot(cameraPosition, right), cy = dot(cameraPosition, up);
-        cx = std::floor(cx / texel) * texel;
-        cy = std::floor(cy / texel) * texel;
+        const tr::Vec3 ahead = add(cameraPosition, scaled(normalized(lighting.cameraForward), shadowAhead));
+        const float cx = dot(ahead, right), cy = dot(ahead, up);
         const float cz = dot(cameraPosition, forward);
         const tr::Vec3 centre = add(add(scaled(right, cx), scaled(up, cy)), scaled(forward, cz));
         const Mat4 view = viewLH(subtract(centre, scaled(forward, shadowDepth * 0.5f)), right, up, forward);
