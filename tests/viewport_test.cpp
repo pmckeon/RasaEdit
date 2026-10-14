@@ -733,6 +733,8 @@ int main(int argc, char** argv) {
         scene.advanceParticles(0.0f);
         for (float t = 0; t < particleSeconds; t += 1.0f / 30.0f) scene.advanceParticles(1.0f / 30.0f);
         std::printf("particle systems running: %zu, %zu particles\n", scene.liveParticleSystems(), scene.liveParticles());
+        if (envValue("RASA_LISTSERVEREFFECTS"))       // server objects whose models bring their own lights / particle systems
+            for (const std::string& line : scene.debugServerBodyEffects()) std::printf("%s\n", line.c_str());
         for (const auto& e : scene.textureErrors()) std::printf("texture error: %s: %s\n", e.first.c_str(), e.second.c_str());
         // RASA_SELECT=<map entity index>: draw that entity highlighted, as the editor shows a selection.
         Selection highlighted{};

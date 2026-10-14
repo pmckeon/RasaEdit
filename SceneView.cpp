@@ -581,24 +581,31 @@ SceneLighting SceneView::lighting() const {
         if (gap <= drawDistance) nearest.emplace_back(gap, light);
     };
     for (const tr::PlacedLight& light : mapLights_) consider(animateLights ? modifiedLight(light) : light);
-    for (const Placement& p : placements_) {
-        if (p.neverDrawn || !p.model || !p.model->loaded || p.model->lights.empty()) continue;
+    auto considerModelLights = [&](const Model& model, const Mat4& world) {
+        if (!model.loaded || model.lights.empty()) return;
         // Range is used as the property says (the point pass reads LightRange from the light's properties,
         // FUN_00875360), not scaled with the entity.
-        const tr::Quat rotation = quatFromMatrix(p.world);
+        const tr::Quat rotation = quatFromMatrix(world);
         // A light on a contact point of an animated bone follows it (e.g. prop_hum_light_rotate_v01's beacon).
-        const std::vector<Mat4> animated = animatedPieceMatrices(*p.model, lightTime);
-        for (size_t k = 0; k < p.model->lights.size(); ++k) {
-            tr::PlacedLight light = p.model->lights[k];
-            const int32_t bone = k < p.model->lightBones.size() ? p.model->lightBones[k] : -1;
+        const std::vector<Mat4> animated = animatedPieceMatrices(model, lightTime);
+        for (size_t k = 0; k < model.lights.size(); ++k) {
+            tr::PlacedLight light = model.lights[k];
+            const int32_t bone = k < model.lightBones.size() ? model.lightBones[k] : -1;
             if (bone >= 0 && size_t(bone) < animated.size()) {
                 light.position = transformPoint(animated[size_t(bone)], light.position);
                 light.worldOrientation = multiplyQuat(quatFromMatrix(animated[size_t(bone)]), light.worldOrientation);
             }
-            light.position = transformPoint(p.world, light.position);
+            light.position = transformPoint(world, light.position);
             light.worldOrientation = multiplyQuat(rotation, light.worldOrientation);
             consider(light);
         }
+    };
+    for (const Placement& p : placements_)
+        if (!p.neverDrawn && p.model) considerModelLights(*p.model, p.world);
+    // Server objects' models carry their contact-point lights the same way (one rule for client and server objects).
+    for (const ServerPlacement& s : serverPlacements_) {
+        if (s.area || !serverPlacementShown(s)) continue;
+        for (const ServerBody& b : serverBodies(s, nullptr)) considerModelLights(*b.model, b.world);
     }
     // Special-FX lights of server objects' use states (SLIT; see tr::SfxLight): persistent ones only (durationMs 0) on the
     // object itself or an accessory (target 0), at contact point frame x (Position + Offset) - the same placement rule as
@@ -1752,7 +1759,7 @@ void SceneView::advanceParticles(float dt) {
     // Special-FX particle attaches of server objects' use states (target 0 only; see tr::SfxParticleAttach).
     std::set<std::pair<size_t, size_t>> liveServer;
     for (const LiveParticles& l : liveParticles_)
-        if (l.server) liveServer.insert({l.placement, l.mount});
+        if (l.server && l.body < 0) liveServer.insert({l.placement, l.mount});
     for (size_t k = 0; k < serverPlacements_.size(); ++k) {
         const ServerPlacement& s = serverPlacements_[k];
         if (s.stateParticles.empty() || !showStateEffects) continue;
@@ -1774,6 +1781,34 @@ void SceneView::advanceParticles(float dt) {
             l.instance = std::make_unique<ParticleInstance>(*system, multiply(s.world, frame), uint32_t(k * 6271u + m * 15485863u + 7u));
             for (int step = 0; step < 90; ++step) l.instance->update(1.0f / 30.0f);
             liveParticles_.push_back(std::move(l));
+        }
+    }
+    // Server objects' own models (and accessories): their contact-point particle systems, as map entities' below.
+    std::set<std::pair<size_t, int>> liveBodies;
+    for (const LiveParticles& l : liveParticles_)
+        if (l.server && l.body >= 0) liveBodies.insert({l.placement, l.body});
+    for (size_t k = 0; k < serverPlacements_.size(); ++k) {
+        const ServerPlacement& s = serverPlacements_[k];
+        if (s.area || !serverPlacementShown(s)) continue;
+        const tr::Vec3 d = subtract(s.position, camera_.position);
+        if (dot(d, d) > particleDistance * particleDistance) continue;
+        const std::vector<ServerBody> bodies = serverBodies(s, nullptr);
+        for (size_t b = 0; b < bodies.size(); ++b) {
+            const Model& model = *bodies[b].model;
+            if (!model.loaded || model.particles.empty() || liveBodies.count({k, int(b)})) continue;
+            for (size_t m = 0; m < model.particles.size(); ++m) {
+                const tr::ParticleSystem* system = particleSystem(model.particles[m].file);
+                if (!system) continue;
+                LiveParticles l;
+                l.placement = k;
+                l.mount = m;
+                l.server = true;
+                l.body = int(b);
+                l.instance = std::make_unique<ParticleInstance>(*system, multiply(bodies[b].world, model.particles[m].local),
+                                                                uint32_t(k * 3571u + b * 7193u + m * 104729u + 11u));
+                for (int step = 0; step < 90; ++step) l.instance->update(1.0f / 30.0f);
+                liveParticles_.push_back(std::move(l));
+            }
         }
     }
     std::vector<uint8_t> live(placements_.size(), 0);
@@ -1878,6 +1913,78 @@ void SceneView::setPieceSkin(const ModelPiece& piece) {
         model.boneFrame = frameNumber_;
     }
     renderer_.setSkin(piece.skinBuffer, model.boneBase, piece.skinNormals);
+}
+
+// Avatar accessories: the accessory's plug (HPP_<name>, usage 2) is put on the body's socket (HPS_<name>, usage 1)
+// of the same connection point (TRasa::EntityBody::FinalizeAddAccessory FUN_00502060 links the two through a
+// gfxConnection (FUN_00625300; evaluated by FUN_005e2b80, phyCPConnection). Traced 2026-10-13: the evaluator copies the
+// accessory node (FUN_004d7be0), sets its scale to 1 (FLD1 + FUN_00437d20 at 005e2d20) and gives it the inverted
+// plug rotation (D3DXQuaternionInverse, FUN_004cbcf0) to carry the plug offset; it then writes only position
+// (FUN_00437c70) and rotation (FUN_004cbcf0) to the accessory node, whose scale FUN_0081d820 sets to the body node's
+// (+0xB8..0xC0, vtable +0x10 mode 3). So the frames compose without bone scale; the scale is the entity's (in s.world).
+// hp_hum_pistol_physical_holster needs this: its plug is on its only bone, scale 0.0117 (the mesh is stored 26 m wide),
+// and inverting the scaled frame drew it 85x too large (user report 2026-10-13). Full arithmetic (read 2026-10-13):
+// A = body bone world (vtable +8) composed with the socket's local rotation / position (FUN_0044ee60: position through
+// A's scaled matrix, rotations multiplied); B = accessory bone world, made relative to the accessory root (offset
+// rotated by the inverse root rotation with scale 1) and composed with the plug's local rotation / position; E =
+// inverse(rotation B), position = inverse(rotation B)(-B.pos), scale 1; result position = A.pos + rotation A (E.pos)
+// (FUN_0044f000: D3DXMatrixTransformation's scaled matrix, then x 1/scale (FUN_0044ed70) - rotation only), rotation =
+// E then A. That is s.world x rigid(socket) x inverse(rigid(plug)) here, exactly for uniform scales.
+static Mat4 rigidFrame(Mat4 m) {                // the frame without its axes' scale
+    for (int c = 0; c < 3; ++c) {
+        float* x = c == 0 ? &m.row0.x : c == 1 ? &m.row0.y : &m.row0.z;
+        float* y = c == 0 ? &m.row1.x : c == 1 ? &m.row1.y : &m.row1.z;
+        float* z = c == 0 ? &m.row2.x : c == 1 ? &m.row2.y : &m.row2.z;
+        const float n = std::sqrt(*x * *x + *y * *y + *z * *z);
+        if (n > 1e-8f) { *x /= n; *y /= n; *z /= n; }
+    }
+    return m;
+}
+
+bool SceneView::bodyAccessoryWorld(const ServerPlacement& s, const ServerPlacement::BodyAccessory& a, const std::vector<Mat4>* posedBones,
+                                   Mat4& world) const {
+    if (!a.model || !a.model->loaded) return false;
+    Mat4 socket, plug;
+    tr::Quat ignored;
+    if (!contactFrame(s.model, a.connectionPoint, 1, socket, ignored, posedBones)) return false;
+    if (!contactFrame(a.model, a.connectionPoint, 2, plug, ignored)) plug = identityMatrix();
+    world = multiply(s.world, multiply(rigidFrame(socket), affineInverse(rigidFrame(plug))));
+    return true;
+}
+
+std::vector<SceneView::ServerBody> SceneView::serverBodies(const ServerPlacement& s, const std::vector<Mat4>* posedBones) const {
+    std::vector<ServerBody> bodies;
+    if (s.model && s.model->loaded) bodies.push_back(ServerBody{s.model, s.world});
+    for (const Model* accessory : s.accessories)
+        if (accessory && accessory->loaded) bodies.push_back(ServerBody{accessory, s.world});
+    for (const ServerPlacement::BodyAccessory& a : s.bodyAccessories) {
+        Mat4 world;
+        if (bodyAccessoryWorld(s, a, posedBones, world)) bodies.push_back(ServerBody{a.model, world});
+    }
+    return bodies;
+}
+
+std::vector<std::string> SceneView::debugServerBodyEffects() const {
+    std::vector<std::string> lines;
+    for (size_t k = 0; k < serverPlacements_.size(); ++k) {
+        const ServerPlacement& s = serverPlacements_[k];
+        size_t lights = 0, systems = 0;
+        for (const ServerBody& b : serverBodies(s, nullptr)) {
+            lights += b.model->lights.size();
+            systems += b.model->particles.size();
+        }
+        if (lights == 0 && systems == 0) continue;
+        char line[160];
+        std::snprintf(line, sizeof line, "server placement %zu (kind %d) at %.1f %.1f %.1f: %zu model lights, %zu particle systems", k,
+                      int(s.selection.kind), s.position.x, s.position.y, s.position.z, lights, systems);
+        lines.push_back(line);
+    }
+    return lines;
+}
+
+bool SceneView::serverPlacementShown(const ServerPlacement& s) const {
+    const SelectionKind kind = s.selection.kind;
+    return kind == SelectionKind::Region ? showRegions : kind == SelectionKind::MissionArea ? showMissionAreas : showServer;
 }
 
 // ------------------------------------------------------------------------------------------
@@ -2362,38 +2469,8 @@ void SceneView::queueDraws(const Selection& selection) {
             }
             for (const Model* accessory : s.accessories)
                 if (accessory && accessory->loaded) drawModelPieces(*accessory, s.world, Vec4f{0, 0, 0, 0}, selected);
-            // Avatar accessories: the accessory's plug (HPP_<name>, usage 2) is put on the body's socket (HPS_<name>, usage 1)
-            // of the same connection point (TRasa::EntityBody::FinalizeAddAccessory FUN_00502060 links the two through a
-            // gfxConnection (FUN_00625300; evaluated by FUN_005e2b80, phyCPConnection). Traced 2026-10-13: the evaluator copies the
-            // accessory node (FUN_004d7be0), sets its scale to 1 (FLD1 + FUN_00437d20 at 005e2d20) and gives it the inverted
-            // plug rotation (D3DXQuaternionInverse, FUN_004cbcf0) to carry the plug offset; it then writes only position
-            // (FUN_00437c70) and rotation (FUN_004cbcf0) to the accessory node, whose scale FUN_0081d820 sets to the body node's
-            // (+0xB8..0xC0, vtable +0x10 mode 3). So the frames compose without bone scale; the scale is the entity's (in s.world).
-            // hp_hum_pistol_physical_holster needs this: its plug is on its only bone, scale 0.0117 (the mesh is stored 26 m wide),
-            // and inverting the scaled frame drew it 85x too large (user report 2026-10-13). Full arithmetic (read 2026-10-13):
-            // A = body bone world (vtable +8) composed with the socket's local rotation / position (FUN_0044ee60: position through
-            // A's scaled matrix, rotations multiplied); B = accessory bone world, made relative to the accessory root (offset
-            // rotated by the inverse root rotation with scale 1) and composed with the plug's local rotation / position; E =
-            // inverse(rotation B), position = inverse(rotation B)(-B.pos), scale 1; result position = A.pos + rotation A (E.pos)
-            // (FUN_0044f000: D3DXMatrixTransformation's scaled matrix, then x 1/scale (FUN_0044ed70) - rotation only), rotation =
-            // E then A. That is s.world x rigid(socket) x inverse(rigid(plug)) here, exactly for uniform scales.
-            auto rigid = [](Mat4 m) {
-                for (int c = 0; c < 3; ++c) {
-                    float* x = c == 0 ? &m.row0.x : c == 1 ? &m.row0.y : &m.row0.z;
-                    float* y = c == 0 ? &m.row1.x : c == 1 ? &m.row1.y : &m.row1.z;
-                    float* z = c == 0 ? &m.row2.x : c == 1 ? &m.row2.y : &m.row2.z;
-                    const float n = std::sqrt(*x * *x + *y * *y + *z * *z);
-                    if (n > 1e-8f) { *x /= n; *y /= n; *z /= n; }
-                }
-                return m;
-            };
             for (const ServerPlacement::BodyAccessory& a : s.bodyAccessories) {
-                if (!a.model || !a.model->loaded) continue;
-                Mat4 socket, plug;
-                tr::Quat ignored;
-                if (!contactFrame(s.model, a.connectionPoint, 1, socket, ignored, idling ? &idlePosed_ : nullptr)) continue;
-                if (!contactFrame(a.model, a.connectionPoint, 2, plug, ignored)) plug = identityMatrix();
-                drawWorld = multiply(s.world, multiply(rigid(socket), affineInverse(rigid(plug))));
+                if (!bodyAccessoryWorld(s, a, idling ? &idlePosed_ : nullptr, drawWorld)) continue;
                 // The appearance colour is not a hue here (traced 2026-10-14): AddAccessory's RGBA reaches FinalizeAddAccessory
                 // (4th argument) -> FUN_0081d640, which, unless it is the default (0, 0, 0, 1) at 0x00d088a8, sets it on every
                 // piece's parameters of semantic "Diffuse" and "Ambient" (FUN_0081d6f0 -> FUN_005bdc60 = GetParameterBySemantic)

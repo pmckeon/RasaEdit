@@ -113,6 +113,8 @@ public:
     // Diagnostic: world skin matrix (placement x skin(time)) of every skeleton bone of an animated map entity's model, by bone
     // name - comparable with the game's gWorldMatrixArray palette (e.g. from an apitrace capture). Empty if not animated.
     std::vector<std::pair<std::string, Mat4>> debugWorldSkinMatrices(size_t entityIndex, float time) const;
+    // Diagnostic: server placements whose bodies (serverBodies) carry model lights or particle systems: position, lights, systems.
+    std::vector<std::string> debugServerBodyEffects() const;
     // What focusOn looks at and from how far; false if the selection is not in the scene.
     bool focusTarget(const Selection& selection, tr::Vec3& target, float& distance) const;
 
@@ -402,6 +404,17 @@ private:
     const tr::Animation* idleAnimation(const std::string& name);
     const std::vector<int>& idleTracks(const Model& model, const tr::Animation& animation);
     bool poseIdle(const ServerPlacement& s);
+    // The rigid bodies of a server placement that carry their own model lights and particle systems, as map entities' models do:
+    // the object's model, its use-state accessories (both at the placement) and avatar accessories on their sockets (posedBones:
+    // the creature's pose this frame; null = the models' stored first frame).
+    struct ServerBody {
+        const Model* model = nullptr;
+        Mat4 world;
+    };
+    std::vector<ServerBody> serverBodies(const ServerPlacement& s, const std::vector<Mat4>* posedBones) const;
+    bool bodyAccessoryWorld(const ServerPlacement& s, const ServerPlacement::BodyAccessory& a, const std::vector<Mat4>* posedBones,
+                            Mat4& world) const;
+    bool serverPlacementShown(const ServerPlacement& s) const;     // its layer is on (Server / Mission areas / Regions)
     std::unordered_map<std::string, std::unique_ptr<tr::Animation>> idleAnimations_;
     std::map<std::pair<const Model*, const tr::Animation*>, std::vector<int>> idleTracks_;
     const std::vector<int>& poseBoneIndices(const Model& part, const Model& base);
@@ -490,6 +503,7 @@ private:
         size_t placement = 0;                   // map entity index, or server placement index when `server`
         size_t mount = 0;                       // model particle mount, or the server placement's stateParticles index
         bool server = false;
+        int body = -1;                          // server: index in serverBodies (its model's mount), -1 = a state particle
         std::unique_ptr<ParticleInstance> instance;
     };
     std::vector<LiveParticles> liveParticles_;
