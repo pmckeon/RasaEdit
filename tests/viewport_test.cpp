@@ -793,6 +793,48 @@ int main(int argc, char** argv) {
         if (const char* only = envValue("RASA_ONLY")) scene.onlyEntity = std::atoi(only);   // draw one map entity alone
         if (const char* range = envValue("RASA_ENTITYRANGE")) std::sscanf(range, "%d,%d", &scene.entityFirst, &scene.entityLast);   // bisecting
         if (const char* sel = envValue("RASA_SELECT")) highlighted = Selection{SelectionKind::MapEntity, size_t(std::atoi(sel))};
+        // RASA_LIGHTMARKERS=1: the map's lights as marker boxes; RASA_SELECTLIGHT=<light index> highlights one (its reach drawn)
+        // and checks that a click on its box's top near edge picks it; RASA_SELECTLIGHT=all checks every light that way from a
+        // camera 5 m away (other geometry may be in front - use RASA_NOENTITIES / RASA_NOTERRAIN) and restores the camera.
+        scene.showLightMarkers = envValue("RASA_LIGHTMARKERS") != nullptr;
+        auto pickLight = [&](size_t index) {
+            const tr::PlacedLight light = scene.displayedMapLight(index);
+            const ViewCamera& cam = scene.camera();
+            const tr::Vec3 top = add(light.position, tr::Vec3{0, 0.25f, 0});
+            tr::Vec3 toward = subtract(cam.position, top);
+            toward.y = 0;
+            const float m = std::max(std::fabs(toward.x), std::fabs(toward.z));
+            const tr::Vec3 nearEdge = m > 1e-4f ? add(top, scaled(toward, 0.25f / m)) : top;
+            const tr::Vec3 v = subtract(nearEdge, cam.position);
+            const float depth = dot(v, cam.forward());
+            const float aspect = float(width) / float(height), tanHalf = std::tan(cam.fovY * 0.5f);
+            const Selection hit = scene.pick(dot(v, cam.right()) / depth / (tanHalf * aspect), dot(v, cam.up()) / depth / tanHalf);
+            return sameSelection(hit, Selection{SelectionKind::MapLight, index});
+        };
+        if (const char* sel = envValue("RASA_SELECTLIGHT")) {
+            if (std::strcmp(sel, "all") == 0) {
+                const ViewCamera saved = scene.camera();
+                size_t ok = 0;
+                for (size_t k = 0; k < scene.mapLights().size(); ++k) {
+                    ViewCamera& cam = scene.camera();
+                    const tr::Vec3 p = scene.displayedMapLight(k).position;
+                    cam.position = add(p, tr::Vec3{3.0f, 2.0f, 3.6f});
+                    const tr::Vec3 f = normalized(subtract(p, cam.position));
+                    cam.yaw = std::atan2(f.x, f.z);
+                    cam.pitch = std::asin(f.y);
+                    if (pickLight(k)) ++ok;
+                    else std::printf("light %zu (%s): MISSED\n", k, scene.mapLights()[k].name.c_str());
+                }
+                scene.camera() = saved;
+                std::printf("light markers: %zu of %zu picked at their box edge\n", ok, scene.mapLights().size());
+            } else {
+                const size_t index = size_t(std::atoi(sel));
+                highlighted = Selection{SelectionKind::MapLight, index};
+                if (scene.showLightMarkers && index < scene.mapLights().size())
+                    std::printf("light %zu (%s): pick at its box edge %s\n", index, scene.mapLights()[index].name.c_str(),
+                                pickLight(index) ? "OK" : "MISSED (or something is in front)");
+            }
+        }
         // RASA_SKINTIMING=1: time 20 frames of queueDraws with the animation clock advancing (object animations re-skinned each
         // frame) against the same with the clock stopped (SceneView::animate off).
         // RASA_SKINDUMP=<entity index>: per skinned piece of the entity's model, its palette (GSKN bone list) as world skin

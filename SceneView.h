@@ -35,11 +35,11 @@ struct ViewCamera {
 };
 
 // What is selected: a map entity (.map file) or a server object (World database).
-enum class SelectionKind : uint8_t { None, MapEntity, SpawnPool, Teleporter, MapLink, Region, MissionArea, Object, Arrival, PatrolStep, WormholeLock };
+enum class SelectionKind : uint8_t { None, MapEntity, SpawnPool, Teleporter, MapLink, Region, MissionArea, Object, Arrival, PatrolStep, WormholeLock, MapLight };
 
 struct Selection {
     SelectionKind kind = SelectionKind::None;
-    size_t index = 0;                   // into MapFile::entities or the matching WorldContent vector
+    size_t index = 0;                   // into MapFile::entities, SceneView::mapLights() or the matching WorldContent vector
 };
 inline bool isSelected(const Selection& s) { return s.kind != SelectionKind::None; }
 inline bool sameSelection(const Selection& a, const Selection& b) { return a.kind == b.kind && (a.kind == SelectionKind::None || a.index == b.index); }
@@ -127,6 +127,7 @@ public:
     bool showTerrain = true;
     bool showEntities = true;
     bool showPlaceholders = true;
+    bool showLightMarkers = false;          // the map's lights.xml lights as small boxes (selectable); the selected one shows its reach
     bool showEffects = true;
     bool showParticles = true;          // particle systems attached to models (.pfx on "psys" contact points)
     float particleDistance = 200.0f;
@@ -205,6 +206,10 @@ public:
     bool showSkyDome = true;                // the sky's layer models (dome, sun / moon discs, stars, clouds, horizon)
     bool showShadows = true;                // sun shadows
     const std::vector<tr::PlacedLight>& mapLights() const { return mapLights_; }
+    // A map light as drawn this frame: with its modifiers (lights.xml <Mods>) applied when animateLights is on.
+    tr::PlacedLight displayedMapLight(size_t index) const;
+    // The lights.xml <Mods> tracks attached to a light (by its ID; none for ID 0).
+    size_t mapLightModifierTracks(const tr::PlacedLight& light) const;
     // World animation clock in seconds (advanceLights): light modifiers, object and material animations, creature idles. With
     // `animate` off the clock and the particle systems stand still (everything keeps its current pose). animateLights off
     // (diagnostic) draws placed lights without their modifiers.

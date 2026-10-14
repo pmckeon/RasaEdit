@@ -49,6 +49,7 @@ void drawMarkerLegend() {
     row(markerColour::regionUnderground, "Region (underground)");
     ImGui::SeparatorText("Map entities");
     row(markerColour::placeholder, "Box: no model, or an effect (Placeholders)");
+    row(markerColour::light, "Small box: a light of the map's lights.xml (Light markers)");
     row(markerColour::entityModel, "Overview dot: entity with a model");
     row(markerColour::entityNoMesh, "Overview dot: class without a mesh");
     row(markerColour::entityUnknown, "Overview dot: unknown class");
@@ -419,6 +420,7 @@ void ViewportPanel::applyOptions(const ViewSettings& view, SceneView& scene) con
     scene.gameDistances = view.gameDistances;
     scene.animate = view.animate;
     scene.showPlaceholders = view.showPlaceholders;
+    scene.showLightMarkers = view.lightMarkers && !serverControls_;      // selectable only where map entities are
     scene.showServer = options.showServer;
     scene.showMissionAreas = options.showMissionAreas;
     scene.showRegions = options.showRegions;
@@ -479,6 +481,14 @@ void ViewportPanel::draw(EditorContext& ctx, const char* title, Selection& selec
                           "editor's draw distance.");
     ImGui::SameLine();
     ImGui::Checkbox("Placeholders", &ctx.view.showPlaceholders);
+    if (!serverControls_) {
+        ImGui::SameLine();
+        ImGui::Checkbox("Light markers", &ctx.view.lightMarkers);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("The map's lights (lights.xml) as small white boxes: click one to select it; the selected light shows\n"
+                              "its reach (point: range circles, spot: its axis, plane: the box it lights). Lights on models and\n"
+                              "special-FX packages are not listed.");
+    }
     if (serverControls_) {
         ImGui::SameLine();
         ImGui::Checkbox("Server", &options.showServer);

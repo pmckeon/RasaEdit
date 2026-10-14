@@ -24,7 +24,9 @@ public:
 
 private:
     void drawEntitiesPanel();
+    void drawLightsPanel();
     void drawEntityPanel();
+    void drawLightInspector(size_t index);
     void rebuildEntityFilter();
     int selectedEntity() const { return selection_.kind == SelectionKind::MapEntity ? int(selection_.index) : -1; }
 

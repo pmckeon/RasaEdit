@@ -35,6 +35,7 @@ struct ViewSettings {
     bool gameDistances = true;   // map entities culled by distance per culling layer, as the game does
     bool animate = true;         // world animation: light modifiers, object / material animations, creature idles, particles
     bool showPlaceholders = true;
+    bool lightMarkers = false;   // the map's lights as selectable boxes (Client workspace)
     float drawDistance = 1200.0f;
     float flySpeed = 20.0f;      // metres per second
     bool skyLighting = true;     // light from the map region's .sky (the time of day and sky choice are per map, in SceneView)

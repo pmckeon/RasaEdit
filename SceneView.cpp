@@ -728,6 +728,19 @@ void SceneView::loadGlobeMaps() {
 }
 
 // A map light with its lights.xml modifiers applied at lightTime (see tr::LightModifier).
+tr::PlacedLight SceneView::displayedMapLight(size_t index) const {
+    if (index >= mapLights_.size()) return tr::PlacedLight{};
+    return animateLights ? modifiedLight(mapLights_[index]) : mapLights_[index];
+}
+
+size_t SceneView::mapLightModifierTracks(const tr::PlacedLight& light) const {
+    size_t tracks = 0;
+    if (light.id == 0) return 0;                                // LightID 0 is skipped (FUN_007df550)
+    for (const tr::LightModifier& m : lightModifiers_)
+        if (m.lightId == light.id) tracks += m.tracks.size();
+    return tracks;
+}
+
 tr::PlacedLight SceneView::modifiedLight(const tr::PlacedLight& light) const {
     if (light.id == 0 || lightModifiers_.empty()) return light;
     tr::PlacedLight out = light;
@@ -2795,6 +2808,53 @@ void SceneView::queueDraws(const Selection& selection) {
         }
         if (selected && hasModel) renderer_.draw(unitBoxLines_, multiply(s.world, boxMatrix(s.model->bounds)), highlight, false);
     }
+
+    // Map lights (lights.xml): a 0.5 m box at each light; the selected one also shows its reach - three range circles for a
+    // point light, the axis out to the range for a spot, the box it lights for a plane light (half extents Width/2, Length/2,
+    // Range in its frame, as TRPlaneLight tests).
+    if (showLightMarkers || selection.kind == SelectionKind::MapLight) {
+        for (size_t k = 0; k < mapLights_.size(); ++k) {
+            const bool selected = selection.kind == SelectionKind::MapLight && selection.index == k;
+            if (!showLightMarkers && !selected) continue;
+            const tr::PlacedLight light = displayedMapLight(k);
+            const tr::Vec3 d = subtract(light.position, camera_.position);
+            if (!selected && (dot(d, d) > maxDistance2 || !visible(light.position, 0.5f))) continue;
+            const Vec4f colour = selected ? highlight : markerColour::light;
+            const tr::Vec3& p = light.position;
+            renderer_.draw(unitBoxLines_, boxMatrix(tr::Bounds{tr::Vec3{p.x - 0.25f, p.y - 0.25f, p.z - 0.25f},
+                                                               tr::Vec3{p.x + 0.25f, p.y + 0.25f, p.z + 0.25f}}), colour, false);
+            if (!selected) continue;
+            const float r = light.range;
+            if (light.kind == tr::PlacedLight::Kind::Point) {
+                Mat4 ring = identityMatrix();               // unitCircle_ lies in XZ; also map it onto XY and YZ
+                ring.row0 = {r, 0, 0, p.x};
+                ring.row1 = {0, 1, 0, p.y};
+                ring.row2 = {0, 0, r, p.z};
+                renderer_.draw(unitCircle_, ring, colour, false);
+                ring.row1 = {0, 0, r, p.y};
+                ring.row2 = {0, 1, 0, p.z};
+                renderer_.draw(unitCircle_, ring, colour, false);
+                ring.row0 = {0, 1, 0, p.x};
+                ring.row1 = {r, 0, 0, p.y};
+                ring.row2 = {0, 0, r, p.z};
+                renderer_.draw(unitCircle_, ring, colour, false);
+            } else if (light.kind == tr::PlacedLight::Kind::Spot) {
+                const tr::Vec3 axis = scaled(normalized(light.direction()), r);
+                Mat4 line = identityMatrix();               // pole_ (0..1 along +y) stretched along the axis
+                line.row0 = {1, axis.x, 0, p.x};
+                line.row1 = {0, axis.y, 0, p.y};
+                line.row2 = {0, axis.z, 1, p.z};
+                renderer_.draw(pole_, line, colour, false);
+            } else {
+                const tr::Vec3 half{light.width * 0.5f, light.length * 0.5f, r};
+                Mat4 frame = rotationMatrix(light.worldOrientation);
+                frame.row0.w = p.x;
+                frame.row1.w = p.y;
+                frame.row2.w = p.z;
+                renderer_.draw(unitBoxLines_, multiply(frame, boxMatrix(tr::Bounds{tr::Vec3{-half.x, -half.y, -half.z}, half})), colour, false);
+            }
+        }
+    }
 }
 
 namespace {
@@ -2938,6 +2998,16 @@ Selection SceneView::pick(float ndcX, float ndcY, bool pickEntities, bool pickSe
     }
     Selection result;
     if (best >= 0) result = Selection{SelectionKind::MapEntity, size_t(best)};
+    // Map light markers (0.5 m boxes): by their outline, like the other marker boxes.
+    for (size_t k = 0; k < mapLights_.size() && showLightMarkers && pickEntities; ++k) {
+        const tr::Vec3 p = displayedMapLight(k).position;
+        float t = 0;
+        if (rayHitsBoxOutline(subtract(camera_.position, p), direction, tr::Vec3{-0.25f, -0.25f, -0.25f}, tr::Vec3{0.25f, 0.25f, 0.25f}, 1.0f, t) &&
+            t < bestT && t < drawDistance) {
+            bestT = t;
+            result = Selection{SelectionKind::MapLight, k};
+        }
+    }
 
     // 3. Server objects: their model's triangles, else a sphere around the marker / area centre.
     auto raySphere = [&](const tr::Vec3& centre, float radius, float& t) {
@@ -3058,6 +3128,13 @@ void SceneView::frameTarget(const tr::Vec3& target, float distance) {
 }
 
 bool SceneView::focusTarget(const Selection& selection, tr::Vec3& target, float& distance) const {
+    if (selection.kind == SelectionKind::MapLight) {
+        if (selection.index >= mapLights_.size()) return false;
+        const tr::PlacedLight light = displayedMapLight(selection.index);
+        target = light.position;
+        distance = std::clamp(light.range * 1.5f, 6.0f, 150.0f);
+        return true;
+    }
     if (selection.kind == SelectionKind::MapEntity) {
         if (selection.index >= placements_.size()) return false;
         const Placement& p = placements_[selection.index];
