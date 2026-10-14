@@ -629,6 +629,9 @@ void Renderer::drawSkyEmissive(const GpuMesh& mesh, const Mat4& model, const Vec
     DrawItem item{&mesh, model, tint, false, texture ? texture : white_, false, nullptr, true, Vec4f{0, 0, 0, 0}, black_};
     item.sky = true;                             // blended SRCALPHA / INVSRCALPHA, no depth writes (the translucent pipelines)
     item.cullBlended = cullBack;
+    item.skinVertices = currentSkin_;            // skinned layers (e.g. the Bane dropships, animated)
+    item.boneBase = currentBoneBase_;
+    item.skinNormals = currentSkinNormals_;
     item.castsShadow = false;
     skyDraws_.push_back(item);
 }
