@@ -221,7 +221,7 @@ public:
     void draw(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, bool lit, SDL_GPUTexture* texture = nullptr, bool alphaTest = false,
               const Vec4f& hue = Vec4f{0, 0, 0, 0}, SDL_GPUTexture* glow = nullptr, bool twoSided = false, float alphaReference = 0.5f,
               SDL_GPUTexture* normalMap = nullptr, SDL_GPUTexture* glossMap = nullptr, bool environment = false,
-              const TrMaterial* trMaterial = nullptr, bool hairCutout = false);
+              const TrMaterial* trMaterial = nullptr, bool hairCutout = false, SDL_GPUTexture* palDecal = nullptr);
     // Back faces of opaque lit draws are culled when true, as in the game: PalGlobalEffect.fx sets CULLMODE = CCW and
     // is begun without state saving (D3DXFX_DONOTSAVESTATE), so it is the baseline; material effects leave it alone
     // except the few that set NONE. false draws everything two-sided (comparison / debugging).

@@ -247,7 +247,7 @@ int main(int argc, char** argv) {
         }
         // RASA_FINDFEATURES=1: map entities whose models use material features worth checking in game - TR texture transforms
         // with an offset in the third row, TR environment reflection (MatSpecular.z > 0), modifier blending, decals on UV
-        // set 2, TRHair. One line per (feature, model) with the nearest-to-first entity position and the entity count.
+        // set 2, TRHair, Pal*Dec* decal maps. One line per (feature, model) with the nearest-to-first entity position and the entity count.
         if (envValue("RASA_FINDFEATURES")) {
             std::map<std::string, tr::GeoModel> geos;
             std::map<std::string, std::pair<size_t, tr::Vec3>> found;      // "feature | model | detail" -> count, first position
@@ -262,7 +262,8 @@ int main(int argc, char** argv) {
                 }
                 for (const tr::GeoPiece& piece : it->second.pieces) {
                     const std::string effect = tr::toLowerAscii(piece.effectName);
-                    if (effect.rfind("tr", 0) != 0 || effect.find("additive") != std::string::npos) continue;
+                    const bool palDecal = effect.rfind("paldiff", 0) == 0 && effect.find("dec") != std::string::npos;
+                    if ((effect.rfind("tr", 0) != 0 && !palDecal) || effect.find("additive") != std::string::npos) continue;
                     std::string phase;
                     for (const tr::GeoParameter& gp : piece.parameters)
                         if (gp.key == "Phase") phase = tr::toLowerAscii(gp.value);
@@ -285,6 +286,9 @@ int main(int argc, char** argv) {
                     }
                     if (effect.find("diffmapdiffmap") != std::string::npos) features.push_back("modifier blend (second diffuse by vertex alpha)");
                     if (effect.rfind("trhair", 0) == 0) features.push_back("hair cut-out");
+                    if (palDecal)
+                        for (const tr::GeoParameter& gp : piece.parameters)
+                            if (gp.key == "DecalTexture" && !gp.value.empty()) features.push_back("Pal decal " + gp.value);
                     for (const std::string& f : features) {
                         auto& slot = found[f.substr(0, f.find(',') == std::string::npos ? f.size() : f.size()) + " | " + mesh + " | " + piece.effectName];
                         if (slot.first++ == 0) slot.second = e.location;

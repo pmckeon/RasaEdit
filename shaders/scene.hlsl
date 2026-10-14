@@ -65,6 +65,7 @@ cbuffer FragmentUniforms : register(b0, space3)
     float4 extraBack[MAX_EXTRA_DIRECTIONAL];
     float4 specular;          // aniso additive: MatSpecular
     float4 layers;            // x detail on UV set 1, y decal on UV set 1, z has detail, w has decal (aniso additive and
+                              // forward-phase pieces; w = 2: a Pal*Dec* decal map in t3 on uv2, lerped into the deferred albedo)
                               // forward-phase pieces)
     float4 material;          // x: 1 = normal map (t7, tangent frame), y: 1 = gloss map (t8: r spec power, g spec intensity,
                               // b environment reflection), z: 1 = environment cube reflection (t9), w: 1 = cut-out by normal-map alpha
@@ -312,6 +313,15 @@ float4 psMain(VertexOutput input) : SV_Target0
         const float3 r = reflect(-normalize(view), n);
         const float3 env = environmentTexture.SampleBias(environmentSampler, r, 3.0 - 4.0 * sqrt(gloss.r)).rgb;
         base.rgb = lerp(base.rgb, env, gloss.b);
+    }
+    // Decal map (every Pal*Dec* deferred pixel shader - ps2x_DeferredDec*, ps2x_DeferredNoEnvDecAlphaTestHue, disassembled
+    // 2026-10-14): albedo = lerp(albedo after the reflection, decal.rgb, decal.a); the decal is on UV set DecalTexCoord (the
+    // vertex shader array element is DecalTexCoord itself), untransformed, and is not scaled by the vertex colour. tint carries
+    // the x2 of the Pal albedo, so the decal gets tint / 2 (the selection highlight only).
+    if (layers.w > 1.5)
+    {
+        const float4 decal = decalTexture.Sample(decalSampler, input.uv2);
+        base.rgb = lerp(base.rgb, decal.rgb * tint.rgb * 0.5, decal.a);
     }
     // TR* deferred materials (effects.glm G-buffer pixel shaders): diffuse, then a modifier (slot 1), detail and decal maps in
     // slot order, the environment cube (EnvMapSampler = gGlobalEnvTexture, reflect(-V, N) per vertex, no bias) by

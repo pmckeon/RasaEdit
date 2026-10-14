@@ -1277,7 +1277,8 @@ void SceneView::loadModel(const std::string& name, Model& model) {
             // TRAdditiveAnisoSpec*: vs2x_AnisoDetDec[DetailTexCoord x 3 + DecalTexCoord] (element layout, 2026-10-13).
             // vsAdditive_Array (plain TRAdditive*): the same element layout (disassembled 2026-10-14).
             const int uvSet1 = aniso || plainAdditive ? parameterInt("DetailTexCoord", 0) : trDesc.slot1Uv ? parameterInt(trDesc.slot1Uv, 0) : 0;
-            const int uvSet2 = aniso || plainAdditive ? parameterInt("DecalTexCoord", 0) : trDesc.slot2Uv ? parameterInt(trDesc.slot2Uv, 0) : 0;
+            const bool palDecal = palDeferred && !hair && effect.find("dec") != std::string::npos;    // Pal*Dec* effects
+            const int uvSet2 = aniso || plainAdditive || palDecal ? parameterInt("DecalTexCoord", 0) : trDesc.slot2Uv ? parameterInt(trDesc.slot2Uv, 0) : 0;
             auto uvOfSet = [](const tr::GeoVertex& gv, int set) { return set == 2 ? gv.uv2 : set == 1 ? gv.uv1 : gv.uv; };
             // Static pieces attached to a bone are moved by it (as in the OBJ exporter).
             const tr::GeoBone* bone = nullptr;
@@ -1556,6 +1557,7 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                     for (const tr::GeoParameter& gp : piece.parameters) {
                         if (gp.key == "NormalMapTexture") part.normalMap = texture(gp.value);
                         if (gp.key == "GlossMapTexture") part.glossMap = texture(gp.value);
+                        if (gp.key == "DecalTexture" && palDecal) part.palDecal = texture(gp.value);
                     }
                 part.forwardLit = (additive || translucent) && !namedAdditive && !aniso;
                 if (part.forwardLit)
@@ -2199,7 +2201,7 @@ void SceneView::queueDraws(const Selection& selection) {
                                 showTextures && materialMaps ? piece.normalMap : nullptr, showTextures && materialMaps ? piece.glossMap : nullptr,
                                 showTextures && materialMaps && piece.environment,
                                 showTextures && materialMaps && trm.active ? &trm : nullptr,
-                                showTextures && piece.hairCutout);
+                                showTextures && piece.hairCutout, showTextures && materialMaps ? piece.palDecal : nullptr);
             }
         }
     };
@@ -2333,7 +2335,7 @@ void SceneView::queueDraws(const Selection& selection) {
                                showTextures && materialMaps ? piece.normalMap : nullptr, showTextures && materialMaps ? piece.glossMap : nullptr,
                                showTextures && materialMaps && piece.environment,
                                showTextures && materialMaps && piece.trMaterial.active ? &piece.trMaterial : nullptr,
-                               showTextures && piece.hairCutout);
+                               showTextures && piece.hairCutout, showTextures && materialMaps ? piece.palDecal : nullptr);
             };
             // Avatars: the base suit minus the swap sets replaced by loaded parts, then each part's swap set
             // from its suit (a part still loading, or failed, leaves the base pieces in place).

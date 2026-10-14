@@ -566,7 +566,7 @@ void Renderer::beginFrame(const Mat4& viewProjection, const tr::Vec3& cameraPosi
 
 void Renderer::draw(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, bool lit, SDL_GPUTexture* texture, bool alphaTest, const Vec4f& hue,
                     SDL_GPUTexture* glow, bool twoSided, float alphaReference, SDL_GPUTexture* normalMap, SDL_GPUTexture* glossMap,
-                    bool environment, const TrMaterial* trMaterial, bool hairCutout) {
+                    bool environment, const TrMaterial* trMaterial, bool hairCutout, SDL_GPUTexture* palDecal) {
     if (!mesh.vertices || mesh.indexCount == 0) return;
     DrawItem item{&mesh, model, tint, lit, texture ? texture : white_, alphaTest, nullptr, false, hue, glow ? glow : black_};
     item.twoSided = twoSided;
@@ -580,6 +580,9 @@ void Renderer::draw(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, b
         item.tr = *trMaterial;
         item.detail = trMaterial->slot1;         // slot 1 / 2 maps use the detail (t2) and decal (t3) bindings
         item.decal = trMaterial->slot2;
+    } else if (palDecal) {
+        item.decal = palDecal;                   // Pal*Dec* decal map (t3, UV set 2): layers.w = 2
+        item.layers.w = 2.0f;
     }
     item.skinVertices = currentSkin_;
     item.boneBase = currentBoneBase_;

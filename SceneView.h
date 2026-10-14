@@ -231,6 +231,7 @@ private:
         // CLAUDE.md "Material maps". Environment reflection (gloss b) not applied yet.
         SDL_GPUTexture* normalMap = nullptr;
         SDL_GPUTexture* glossMap = nullptr;
+        SDL_GPUTexture* palDecal = nullptr;     // Pal*Dec* decal map (DecalTexture on UV set DecalTexCoord, in texU2)
         bool environment = false;              // Pal*Env* material: reflects the region's environment cube by gloss.b
         bool hueUnweighted = false;            // alpha-tested Pal*Hue: Hue added without the diffuse-alpha weight
         // The material's stored Hue parameter (w = 1 when set): what a map entity's pieces keep when the entity is not hued.
