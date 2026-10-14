@@ -2054,6 +2054,62 @@ std::vector<std::string> SceneView::debugServerBodyEffects() const {
     return lines;
 }
 
+std::vector<std::string> SceneView::debugServerPose(float x, float z) {
+    std::vector<std::string> lines;
+    size_t best = serverPlacements_.size();
+    float bestD = 1e30f;
+    for (size_t k = 0; k < serverPlacements_.size(); ++k) {
+        const ServerPlacement& s = serverPlacements_[k];
+        if (s.idles.empty()) continue;
+        const float d = (s.position.x - x) * (s.position.x - x) + (s.position.z - z) * (s.position.z - z);
+        if (d < bestD) { bestD = d; best = k; }
+    }
+    if (best == serverPlacements_.size()) return lines;
+    const ServerPlacement& s = serverPlacements_[best];
+    const bool posed = poseIdle(s);
+    skinOverride_.clear();
+    char line[200];
+    std::snprintf(line, sizeof line, "pose: placement %zu at %.2f %.2f %.2f, posed %d, animation %s, t %.3f", best, s.position.x, s.position.y,
+                  s.position.z, int(posed), s.idle.current >= 0 ? s.idles[size_t(s.idle.current)].name.c_str() : "-", lightTime - s.idle.start);
+    lines.push_back(line);
+    if (!posed || !s.model) return lines;
+    // Skinned vertices weighted >= 0.9 to the right hand bone, skinned on the CPU with this frame's palette: centroid (world).
+    try {
+        std::string mesh;
+        for (const auto& m : models_)
+            if (&m.second == s.model) mesh = m.first.substr(0, m.first.find('|'));
+        const tr::GeoModel geo = tr::readGeo(assets_.read(mesh));
+        for (const tr::GeoPiece& piece : geo.pieces) {
+            if (!piece.skinned) continue;
+            tr::Vec3 sum{0, 0, 0}, rest{0, 0, 0};
+            size_t n = 0;
+            for (const tr::GeoVertex& gv : piece.vertices) {
+                const uint32_t slot = tr::blendIndex(gv, 0);
+                if (tr::blendWeight(gv, 0) < 0.9f || slot >= piece.skinBones.size() || piece.skinBones[slot] != "Bip01 R Hand") continue;
+                size_t bone = 0;
+                while (bone < geo.bones.size() && geo.bones[bone].name != "Bip01 R Hand") ++bone;
+                if (bone >= s.idle.baseSkin.size()) continue;
+                sum = add(sum, transformPoint(multiply(s.world, s.idle.baseSkin[bone]), gv.position));
+                rest = add(rest, gv.position);
+                ++n;
+            }
+            if (!n) continue;
+            char l[200];
+            const tr::Vec3 c = scaled(sum, 1.0f / float(n)), r = scaled(rest, 1.0f / float(n));
+            std::snprintf(l, sizeof l, "pose: piece %s: %zu right-hand vertices, centroid %.3f %.3f %.3f (stored %.3f %.3f %.3f)", piece.pieceName.c_str(), n,
+                          c.x, c.y, c.z, r.x, r.y, r.z);
+            lines.push_back(l);
+        }
+    } catch (const std::exception&) {
+    }
+    for (size_t b = 0; b < s.model->skeleton.bones.size() && b < idlePosed_.size(); ++b) {
+        const tr::Vec3 p = transformPoint(multiply(s.world, idlePosed_[b]), tr::Vec3{0, 0, 0});
+        std::snprintf(line, sizeof line, "pose: %3zu %-28s %8.3f %8.3f %8.3f", b, s.model->skeleton.bones[b].name.c_str(), p.x, p.y, p.z);
+        lines.push_back(line);
+    }
+    return lines;
+}
+
 bool SceneView::serverPlacementShown(const ServerPlacement& s) const {
     const SelectionKind kind = s.selection.kind;
     return kind == SelectionKind::Region ? showRegions : kind == SelectionKind::MissionArea ? showMissionAreas : showServer;

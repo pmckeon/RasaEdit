@@ -778,6 +778,11 @@ int main(int argc, char** argv) {
         scene.advanceParticles(0.0f);
         for (float t = 0; t < particleSeconds; t += 1.0f / 30.0f) scene.advanceParticles(1.0f / 30.0f);
         std::printf("particle systems running: %zu, %zu particles\n", scene.liveParticleSystems(), scene.liveParticles());
+        if (const char* pose = envValue("RASA_POSEDUMP")) {     // x,z: the idle pose of the nearest posed server placement
+            float x = 0, z = 0;
+            std::sscanf(pose, "%f,%f", &x, &z);
+            for (const std::string& line : scene.debugServerPose(x, z)) std::printf("%s\n", line.c_str());
+        }
         if (envValue("RASA_LISTSERVEREFFECTS"))       // server objects whose models bring their own lights / particle systems
             for (const std::string& line : scene.debugServerBodyEffects()) std::printf("%s\n", line.c_str());
         for (const auto& e : scene.textureErrors()) std::printf("texture error: %s: %s\n", e.first.c_str(), e.second.c_str());
