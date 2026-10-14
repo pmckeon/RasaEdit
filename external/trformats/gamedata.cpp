@@ -1120,6 +1120,13 @@ int32_t GameData::audioSetSelectionType(int32_t audioSetId) {
     return int32_t(py::asInt(py::item(py::dictGet(global("generated.client.audiosetdata", "audioSet"), audioSetId), 3), 0));
 }
 
+std::string GameData::itemName(int32_t templateId, int32_t classId) {
+    const py::Object* name = py::dictGet(global("generated.client.language.english.itemtemplatelanguage", "lookup"), templateId);
+    if (name && py::isString(name)) return py::asString(name);
+    name = py::dictGet(global("generated.client.language.english.physicalentityclassnamelanguage", "lookup"), classId);
+    return name && py::isString(name) ? py::asString(name) : "";
+}
+
 std::string GameData::audioSetName(int32_t audioSetId) {
     return py::asString(py::item(py::dictGet(global("generated.client.audiosetdata", "audioSet"), audioSetId), 0));
 }

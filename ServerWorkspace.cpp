@@ -27,6 +27,7 @@ void ServerWorkspace::buildDefaultLayout(ImGuiID dockspace) {
     ImGui::DockBuilderDockWindow("Inspector###Server.Inspector", right);
     ImGui::DockBuilderDockWindow("Creatures###Server.Creatures", right);
     ImGui::DockBuilderDockWindow("Missions###Server.Missions", right);
+    ImGui::DockBuilderDockWindow("Loot###Server.Loot", right);
     ImGui::DockBuilderDockWindow("Map###Server.Map", rightBottom);
     ImGui::DockBuilderFinish(dockspace);
 }
@@ -52,6 +53,7 @@ void ServerWorkspace::drawPanels() {
     drawInspectorPanel();
     drawCreaturePanel();
     drawMissionPanel();
+    drawLootPanel();
     drawMapInfoPanel(ctx_, "Map###Server.Map");
     OverviewLayers layers;
     layers.selection = &selection_;
@@ -109,6 +111,12 @@ void ServerWorkspace::openDatabase(const std::string& path) {
         } catch (const std::exception& e) {
             missions_.clear();
             ctx_.setStatus(std::string("Mission tables not loaded: ") + e.what(), true);
+        }
+        try {
+            loot_.load(*database_);
+        } catch (const std::exception& e) {
+            loot_.clear();
+            ctx_.setStatus(std::string("Loot tables not loaded: ") + e.what(), true);
         }
         ctx_.setSetting("database", path);
         loadServerContent();
@@ -1383,6 +1391,23 @@ void ServerWorkspace::drawMissionPanel() {
             for (int k = 0; k < 6; ++k)
                 if (spawnSlot(p, k).creatureId > 0) creatures.push_back(spawnSlot(p, k).creatureId);
         missions_.draw(ctx_, *database_, serverContent_.mapContextId, creatures, !database_->readOnly());
+    }
+    ImGui::End();
+}
+
+// ------------------------------------------------------------------------------------------
+// Loot
+// ------------------------------------------------------------------------------------------
+void ServerWorkspace::drawLootPanel() {
+    if (!ImGui::Begin("Loot###Server.Loot")) { ImGui::End(); return; }
+    if (!database_) ImGui::TextDisabled("Open a server database first.");
+    else {
+        std::set<int32_t> creatures;
+        for (const SpawnPool& p : serverContent_.spawnPools)
+            for (int k = 0; k < 6; ++k)
+                if (spawnSlot(p, k).creatureId > 0 && spawnSlot(p, k).maxCount > 0) creatures.insert(spawnSlot(p, k).creatureId);
+        loot_.draw(ctx_, *database_, serverContent_.mapContextId, std::vector<int32_t>(creatures.begin(), creatures.end()), !database_->readOnly(),
+                   [this](const char* id, int32_t& creature) { return creatureCombo(id, creature, false); });
     }
     ImGui::End();
 }

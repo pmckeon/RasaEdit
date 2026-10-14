@@ -297,6 +297,7 @@ struct CreatureDefinition {
 struct ItemTemplateInfo {                            // itemtemplate + itemtemplate_itemclass (read-only)
     int32_t classId = 0;                             // an entity class id (e.g. 15542 Armor_T1_..._Boots)
     int32_t buyPrice = 0;
+    int32_t qualityId = 0;                           // Rasa.NET LootQuality: 1 Mission, 2 Normal, 3 Uncommon, 4 Rare, 5 Epic, 6 Legendary, 7 Junk
 };
 bool sameCreatureDefinition(const CreatureDefinition& a, const CreatureDefinition& b);
 
@@ -382,6 +383,9 @@ public:
     bool saveTables(const std::vector<std::pair<const DbTable*, const DbTable*>>& tables, SaveSummary& summary, std::string& error);
     const CreatureStat* creatureStat(int32_t creatureId) const;                     // nullptr if the creature has no row
     const ItemTemplateInfo* itemTemplate(int32_t templateId) const;                 // nullptr if unknown
+    // The creatures a map's spawn pools can spawn (slots with a creature and max_count > 0), ascending - the set Rasa.NET's
+    // ordinary loot coverage check walks for a map that requires loot profiles (OrdinaryLootCoverage: spawn pools).
+    std::vector<int32_t> spawnableCreatures(int32_t mapContextId) const;
     const std::vector<CreatureAction>& creatureActions() const { return actions_; }  // sorted by id
     std::vector<CreatureDefinition> creatureDefinitions() const;                    // every creature, sorted by id
     // creature_battlecry scope 1: entity class id -> battle cry package (every creature of the class; empty without the table).

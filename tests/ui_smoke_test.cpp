@@ -262,6 +262,82 @@ int main() {
             check(sounds > 0 && missing == 0 && decodes, "battle cry sounds present and playable");
         }
 
+        // Loot panel: the shipped tables pass the server's checks; a weight edit saves and reads back; a new profile (group, item,
+        // binding) saves and deletes again; a rule break blocks the save.
+        check(showTab("Loot###Server.Loot"), "loot panel exists");
+        if (server.loot_.loaded()) {
+            LootEditor& loot = server.loot_;
+            const auto initial = loot.validate(*server.database_);
+            for (size_t k = 0; k < initial.size() && k < 5; ++k) std::printf("      loot problem: %s\n", initial[k].c_str());
+            check(initial.empty(), "shipped loot tables pass the server's checks");
+            loot.selected_ = loot.profiles_.edited.rows.front()[size_t(loot.profiles_.edited.column("profile_key"))].t;
+            frames(editor, device, 3);
+            DbTable& items = loot.items_.edited;
+            const int weightColumn = items.column("weight");
+            const int64_t weight = items.rows.front()[size_t(weightColumn)].asInt();
+            items.rows.front()[size_t(weightColumn)] = DbValue::integer(weight + 7);
+            std::string message;
+            check(loot.changed() && server.hasUnsavedChanges() && loot.save(*server.database_, message) && !loot.changed(), "loot weight edit saves");
+            const DbTable reread = server.database_->loadTable("loot_item");
+            check(reread.rows.front()[size_t(weightColumn)].asInt() == weight + 7, "loot weight reads back");
+            // A new profile with one group, one item and a binding on this map.
+            const std::string key = "smoke_test_profile";
+            const size_t profileCount = loot.profiles_.saved.rows.size();
+            auto row =[](const DbTable& t) { return std::vector<DbValue>(t.columns.size(), DbValue::integer(0)); };
+            std::vector<DbValue> profile = row(loot.profiles_.edited);
+            for (const char* c : {"profile_key", "description", "content_revision", "provenance", "evidence_notes"})
+                profile[size_t(loot.profiles_.edited.column(c))] = DbValue::text(c == std::string("profile_key") ? key : "smoke");
+            loot.profiles_.edited.rows.push_back(profile);
+            std::vector<DbValue> group = row(loot.groups_.edited);
+            group[size_t(loot.groups_.edited.column("profile_key"))] = DbValue::text(key);
+            group[size_t(loot.groups_.edited.column("group_key"))] = DbValue::text("consumable");
+            group[size_t(loot.groups_.edited.column("kind"))] = DbValue::integer(3);
+            group[size_t(loot.groups_.edited.column("chance_basis_points"))] = DbValue::integer(5000);
+            group[size_t(loot.groups_.edited.column("minimum_rolls"))] = DbValue::integer(1);
+            group[size_t(loot.groups_.edited.column("maximum_rolls"))] = DbValue::integer(1);
+            loot.groups_.edited.rows.push_back(group);
+            std::vector<DbValue> item = row(items);
+            item[size_t(items.column("profile_key"))] = DbValue::text(key);
+            item[size_t(items.column("group_key"))] = DbValue::text("consumable");
+            item[size_t(items.column("item_template_id"))] = DbValue::integer(44917);         // medpack, a Normal-quality consumable
+            for (const char* c : {"weight", "minimum_quantity", "maximum_quantity"}) item[size_t(items.column(c))] = DbValue::integer(1);
+            items.rows.push_back(item);
+            const int32_t creature = server.database_->creatureList().front().id;
+            std::vector<DbValue> binding = row(loot.bindings_.edited);
+            binding[size_t(loot.bindings_.edited.column("map_context_id"))] = DbValue::integer(server.serverContent_.mapContextId);
+            binding[size_t(loot.bindings_.edited.column("creature_id"))] = DbValue::integer(creature);
+            binding[size_t(loot.bindings_.edited.column("profile_key"))] = DbValue::text(key);
+            const bool alreadyBound = !loot.profileFor(server.serverContent_.mapContextId, creature).empty();
+            if (!alreadyBound) loot.bindings_.edited.rows.push_back(binding);
+            loot.selected_ = key;
+            frames(editor, device, 3);
+            const auto added = loot.validate(*server.database_);
+            for (size_t k = 0; k < added.size() && k < 5; ++k) std::printf("      loot problem: %s\n", added[k].c_str());
+            check(added.empty() && loot.save(*server.database_, message), "new loot profile saves");
+            check(loot.profiles_.saved.rows.size() == loot.profiles_.edited.rows.size() &&
+                      (alreadyBound || loot.profileFor(server.serverContent_.mapContextId, creature) == key),
+                  "new loot profile and binding read back");
+            // A Junk group may pick at most once: the editor refuses to save that.
+            for (auto& g : loot.groups_.edited.rows)
+                if (g[size_t(loot.groups_.edited.column("profile_key"))].t == key) {
+                    g[size_t(loot.groups_.edited.column("kind"))] = DbValue::integer(1);
+                    g[size_t(loot.groups_.edited.column("maximum_rolls"))] = DbValue::integer(2);
+                }
+            check(!loot.save(*server.database_, message) && loot.changed(), "loot rule break blocks the save");
+            loot.revert();
+            // Delete it again.
+            auto drop = [&](DbTable& t) {
+                t.rows.erase(std::remove_if(t.rows.begin(), t.rows.end(), [&](const std::vector<DbValue>& r) { return r[size_t(t.column("profile_key"))].t == key; }),
+                             t.rows.end());
+            };
+            drop(loot.bindings_.edited);
+            drop(items);
+            drop(loot.groups_.edited);
+            drop(loot.profiles_.edited);
+            check(loot.save(*server.database_, message) && server.database_->loadTable("loot_profile").rows.size() == profileCount,
+                  "loot profile deleted again");
+        }
+
         // Missions panel: select the first mission, draw its tree, edit an objective comment and save.
         check(showTab("Missions###Server.Missions"), "missions panel exists");
         check(server.missions_.loaded(), "mission tables loaded");

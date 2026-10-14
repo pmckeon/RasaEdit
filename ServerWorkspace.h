@@ -1,5 +1,6 @@
 #pragma once
 
+#include "LootEditor.h"
 #include "MissionEditor.h"
 #include "SoundPlayer.h"
 #include "Panels.h"
@@ -26,7 +27,7 @@ public:
     void drawPanels() override;
     void renderViewport(SDL_GPUCommandBuffer* commands) override { viewport_.render(ctx_, commands, selection_); }
     bool hasUnsavedChanges() const override {
-        return !cleanReachable_ || undoStack_.size() != cleanUndoDepth_ || creaturesChanged() || missions_.changed();
+        return !cleanReachable_ || undoStack_.size() != cleanUndoDepth_ || creaturesChanged() || missions_.changed() || loot_.changed();
     }
     bool saveChanges() override {
         bool ok = true;
@@ -35,6 +36,12 @@ public:
         if (missions_.changed() && database_) {
             std::string message;
             const bool saved = missions_.save(*database_, message);
+            ctx_.setStatus(message, !saved);
+            ok = saved && ok;
+        }
+        if (loot_.changed() && database_) {
+            std::string message;
+            const bool saved = loot_.save(*database_, message);
             ctx_.setStatus(message, !saved);
             ok = saved && ok;
         }
@@ -102,6 +109,8 @@ private:
     char creatureFilter_[64] = "";
     char serverFilter_[128] = "";
     MissionEditor missions_;
+    LootEditor loot_;
+    void drawLootPanel();
     std::vector<CreatureDefinition> creatureDefs_;
     std::vector<CreatureDefinition> creatureDefsSaved_;
     std::map<int32_t, int32_t> classCries_, classCriesSaved_;     // creature_battlecry scope 1 (class id -> package)

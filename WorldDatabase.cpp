@@ -237,8 +237,10 @@ void WorldDatabase::loadCreatures() {
         while (s.step()) vendorItems_[s.int32(0)].push_back(s.int32(1));
     }
     if (requireColumns("itemtemplate", {"id", "buy_price"}) && requireColumns("itemtemplate_itemclass", {"itemtemplateid", "itemclassid"})) {
-        Statement s(db_, "SELECT t.id, c.itemClassId, t.buy_price FROM itemtemplate t LEFT JOIN itemtemplate_itemclass c ON c.itemTemplateId = t.id");
-        while (s.step()) itemTemplates_[s.int32(0)] = ItemTemplateInfo{s.int32(1), s.int32(2)};
+        const bool quality = hasColumn("itemtemplate", "quality_id");
+        Statement s(db_, std::string("SELECT t.id, c.itemClassId, t.buy_price") + (quality ? ", t.quality_id" : "") +
+                             " FROM itemtemplate t LEFT JOIN itemtemplate_itemclass c ON c.itemTemplateId = t.id");
+        while (s.step()) itemTemplates_[s.int32(0)] = ItemTemplateInfo{s.int32(1), s.int32(2), quality ? s.int32(3) : 0};
     }
     if (requireColumns("creature", {"id", "comment", "class_id", "faction", "level", "max_hp", "name_id", "run_speed", "walk_speed"})) {
         Statement s(db_, "SELECT id, comment, class_id, faction, level, max_hp, name_id, run_speed, walk_speed FROM creature");
@@ -567,6 +569,19 @@ bool WorldDatabase::saveTables(const std::vector<std::pair<const DbTable*, const
         summary = SaveSummary{};
         return false;
     }
+}
+
+std::vector<int32_t> WorldDatabase::spawnableCreatures(int32_t mapContextId) const {
+    std::set<int32_t> ids;
+    std::string sql = "SELECT ";
+    for (int k = 1; k <= 6; ++k)
+        sql += std::string(k > 1 ? ", " : "") + "creature_" + std::to_string(k) + "_Id, creature_" + std::to_string(k) + "_max_count";
+    Statement s(db_, sql + " FROM spawnpool WHERE map_context_id = ?1");
+    s.bindInt(1, mapContextId);
+    while (s.step())
+        for (int k = 0; k < 6; ++k)
+            if (s.int32(2 * k) > 0 && s.int32(2 * k + 1) > 0) ids.insert(s.int32(2 * k));
+    return std::vector<int32_t>(ids.begin(), ids.end());
 }
 
 const ItemTemplateInfo* WorldDatabase::itemTemplate(int32_t templateId) const {

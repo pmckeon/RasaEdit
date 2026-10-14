@@ -198,6 +198,9 @@ public:
     std::vector<int32_t> battlecryPackages();                        // every package id, ascending
     std::vector<BattlecryCry> battlecryCries(int32_t packageId);     // by type
     std::string audioSetName(int32_t audioSetId);
+    // An item's name as the client shows it without module prefixes (clientlanguagemanager.py GetItemTemplateName):
+    // itemtemplatelanguage[templateId] when present, else physicalentityclassnamelanguage[classId]. "" if neither.
+    std::string itemName(int32_t templateId, int32_t classId);
     // An audio set's sounds (client/audiomgr.py Initialize: audiosetdata.audioSetMember[(set, sound)] -> AddAudioSetMember;
     // sound[id] = (file, description, a float - 0.6 for most, not named by the scripts)), in table order. Which one the game
     // plays is chosen in the engine (selection type: audioSet[id][3], 1 Random / 2 Sequential / 3 Simultaneous; battle cries

@@ -31,6 +31,7 @@ add_executable (RasaEdit
     "Workspace.h"
     "ClientWorkspace.cpp" "ClientWorkspace.h"
     "MissionEditor.cpp" "MissionEditor.h"
+    "LootEditor.cpp" "LootEditor.h"
     "ServerWorkspace.cpp" "ServerWorkspace.h"
     "Panels.cpp" "Panels.h"
     "AssetPreview.cpp" "AssetPreview.h"
@@ -65,7 +66,7 @@ if (RASAEDIT_BUILD_TESTS)
     target_link_libraries(viewport_test PRIVATE SDL3::SDL3 trformats ${RASAEDIT_SQLITE})
 
     # Whole-editor smoke test: real ImGui frames and both workspaces, headless.
-    add_executable(ui_smoke_test tests/ui_smoke_test.cpp Editor.cpp EditorContext.cpp ClientWorkspace.cpp ServerWorkspace.cpp MissionEditor.cpp Panels.cpp AssetPreview.cpp SoundPlayer.cpp
+    add_executable(ui_smoke_test tests/ui_smoke_test.cpp Editor.cpp EditorContext.cpp ClientWorkspace.cpp ServerWorkspace.cpp MissionEditor.cpp LootEditor.cpp Panels.cpp AssetPreview.cpp SoundPlayer.cpp
                    Renderer.cpp SceneView.cpp ParticleSim.cpp GpuTexture.cpp WorldDatabase.cpp Avatar.cpp TerrainOverview.cpp RadarMap.cpp)
     target_include_directories(ui_smoke_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(ui_smoke_test PRIVATE SDL3::SDL3 SDL3_mixer::SDL3_mixer imgui::imgui trformats ${RASAEDIT_SQLITE})
