@@ -444,9 +444,16 @@ void UiCanvas::drawTexture(const tr::XmlNode& widget, const Rect& rect, const Re
     Target::Blend blend = Target::Blend::Alpha;
     bool useColour = true;
     if (effect == "truiadditivealpha.fx" || effect == "paluimultitexadd.fx") blend = Target::Blend::Additive;
+    // TRUIBackgroundMask (traced 2026-10-15 in the fountain trace, call 37335934): pixel shader rgb = texture x UIMouseMaskSampler, alpha
+    // 1, blended ONE / ONE, no vertex colour; the vertex shader's mask coordinate = MouseUVXForm x the vertex's screen position (NDC) -
+    // (3.332, -1.875) at 1920 x 1080 = 1/288 per pixel on both axes, i.e. the 256 x 256 ui_mouse_mask.dds (the UI manager loads it,
+    // FUN_00895430; a radial white spot, 1/255 at the edges) spread over 256 logical units centred on the mouse, address CLAMP.
+    const Image* mouseMask = nullptr;
     if (effect == "truibackgroundmask.fx") {
-        if (!options_.backgroundMaskWires) return;
-        blend = Target::Blend::One;            // texture x mouse mask, alpha 1, ONE / ONE; no vertex colour
+        if (!options_.mouseHighlight) return;  // the clamped edge: 1/255, nothing visible
+        mouseMask = image("ui_mouse_mask.dds");
+        if (!mouseMask) return;
+        blend = Target::Blend::One;
         useColour = false;
     }
     const Image* img = image(def->name);
@@ -476,6 +483,15 @@ void UiCanvas::drawTexture(const tr::XmlNode& widget, const Rect& rect, const Re
                 float m[4];
                 sample(mask->rgba, mask->width, mask->height, dx / w * float(mask->width), dy / h * float(mask->height), m);
                 for (int c = 0; c < 4; ++c) t[c] *= m[c];
+            }
+            if (mouseMask) {
+                const float size = 256.0f * target.sy;     // pixels
+                const float mu = (float(x) + 0.5f - options_.mouseX * target.sx) / size + 0.5f;
+                const float mv = (float(y) + 0.5f - options_.mouseY * target.sy) / size + 0.5f;
+                float m[4];
+                sample(mouseMask->rgba, mouseMask->width, mouseMask->height, std::clamp(mu, 0.0f, 1.0f) * float(mouseMask->width),
+                       std::clamp(mv, 0.0f, 1.0f) * float(mouseMask->height), m);
+                for (int c = 0; c < 3; ++c) t[c] *= m[c];
             }
             target.blend(x, y, t[0] * colour[0], t[1] * colour[1], t[2] * colour[2], blend == Target::Blend::One ? 1.0f : t[3] * colour[3], blend);
         }

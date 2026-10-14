@@ -217,10 +217,10 @@ void UiWorkspace::drawCanvasPanel() {
     ImGui::Checkbox("Hidden widgets", &options_.showHidden);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("Draw widgets with visible=\"false\" inside the branch (the branch itself is always drawn)");
     ImGui::SameLine();
-    ImGui::Checkbox("Background-mask wires", &options_.backgroundMaskWires);
+    ImGui::Checkbox("Mouse highlight", &options_.mouseHighlight);
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("TRUIBackgroundMask widgets (the window wires) multiply their texture by a mask the game\n"
-                          "makes at runtime around the mouse; they are left out unless this draws them at full strength.");
+        ImGui::SetTooltip("The window wires (TRUIBackgroundMask) glow around the mouse in game (ui_mouse_mask.dds, 256 units across).\n"
+                          "On: they follow the mouse over the canvas.");
     ImGui::SameLine();
     ImGui::SetNextItemWidth(110);
     ImGui::Combo("##background", &options_.background, "Black\0Grey\0Checkerboard\0");
@@ -238,7 +238,7 @@ void UiWorkspace::drawCanvasPanel() {
         options_.screenHeight = screens[screen_][1];
         dirty_ = true;
     }
-    if (options_.showHidden != before.showHidden || options_.backgroundMaskWires != before.backgroundMaskWires || options_.background != before.background)
+    if (options_.showHidden != before.showHidden || options_.mouseHighlight != before.mouseHighlight || options_.background != before.background)
         dirty_ = true;
     if (ui_ && hasBranch_) {
         size_t visual = 0;
@@ -281,6 +281,12 @@ void UiWorkspace::drawCanvasPanel() {
     if (hovered) {
         const ImVec2 m = ImGui::GetMousePos();
         const int32_t x = int32_t((m.x - origin.x) / scale / sx), y = int32_t((m.y - origin.y) / scale / sy);    // logical units
+        // The mouse highlight follows the cursor (redrawn when it moves 4 units or more).
+        if (options_.mouseHighlight && (std::fabs(float(x) - options_.mouseX) >= 4.0f || std::fabs(float(y) - options_.mouseY) >= 4.0f)) {
+            options_.mouseX = float(x);
+            options_.mouseY = float(y);
+            dirty_ = true;
+        }
         const std::vector<int32_t> under = canvas_.pick(x, y);
         if (!under.empty()) {
             outline(canvas_.layout(under), IM_COL32(255, 255, 255, 140), 1.0f);

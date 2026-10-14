@@ -26,9 +26,9 @@
 // Colour = colorR/G/B/A (default 255) x texel. Blending per effect (effects.glm UI effects, pass states and pixel shaders read
 // 2026-10-15): PalUIDefault (texture x colour), PalUIColoredRect (colour) and PalUIMultiTex blend SRCALPHA / INVSRCALPHA;
 // TRUIAdditiveAlpha and PalUIMultiTexAdd SRCALPHA / ONE; PalUIMultiTex* and TRUIRadarMask multiply by a second map
-// (maskTextureName). UNVERIFIED: the effect of widgets that name none (drawn like PalUIDefault), the mask's coordinates (spread
-// over the widget), TRUIBackgroundMask (the "wire" lines: texture x a runtime mouse mask, ONE / ONE - not drawn unless asked),
-// scaleToFit (text: see drawText - the game's GDI glyphs reproduced with FreeType).
+// (maskTextureName); widgets that name no effect draw as PalUIDefault and TRUIBackgroundMask (the "wire" lines) as texture x the
+// mouse mask, ONE / ONE (both verified in the fountain trace, see drawTexture). UNVERIFIED: the maskTextureName masks' coordinates
+// (spread over the widget), scaleToFit (text: see drawText - the game's GDI glyphs reproduced with FreeType).
 class UiCanvas {
 public:
     struct Rect {
@@ -39,7 +39,10 @@ public:
     };
     struct Options {
         bool showHidden = false;            // draw widgets with visible="false" below the chosen branch
-        bool backgroundMaskWires = false;   // draw TRUIBackgroundMask widgets at full strength (their mouse mask is runtime)
+        // TRUIBackgroundMask widgets (the window "wires") glow only around the mouse: texture x ui_mouse_mask.dds over a 256-unit square
+        // centred on it (see drawTexture). Off: no mouse over the UI - the mask's clamped edge (1/255) leaves them invisible.
+        bool mouseHighlight = false;
+        float mouseX = 0, mouseY = 0;       // logical units
         int background = 0;                 // 0 black, 1 grey, 2 checkerboard
         // The screen the UI is drawn for, in pixels (0: the export's logical size, 1280 x 960, at one pixel per unit). Wider
         // than 1.5 the root is 1706 x 960 logical, as in the game; widgets are laid out in logical units and drawn at pixels.

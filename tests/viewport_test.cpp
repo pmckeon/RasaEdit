@@ -40,7 +40,7 @@ int main(int argc, char** argv) {
         tr::GameData data(argv[2]);
         // RASA_UIRENDER=<uiid>/<uiid>/...[;<another branch>...] (or "*" for every root widget): draws those branches of
         // data\xml\Tabula_Rasa_UI_EXPORT.xml in turn with UiCanvas into <out.rgba> and exits; prints what could not be resolved.
-        // RASA_UIHIDDEN=1 draws hidden widgets too, RASA_UIWIRES=1 the background-mask wires, RASA_UISCREEN=<w>x<h> draws for that screen
+        // RASA_UIHIDDEN=1 draws hidden widgets too, RASA_UIMOUSE=<x>,<y> puts the mouse there (logical), RASA_UISCREEN=<w>x<h> draws for that screen
         // (the output is then w x h, else the export's 1280 x 960), RASA_UIBACKGROUND=<raw rgba file of that size> draws over it.
         if (const char* uiPaths = envValue("RASA_UIRENDER")) {
             const tr::Bytes xml = tr::readFile((std::filesystem::path(argv[1]) / "data" / "xml" / "Tabula_Rasa_UI_EXPORT.xml").string());
@@ -51,7 +51,9 @@ int main(int argc, char** argv) {
             canvas.setSources(&ui, &assets, &data, argv[1]);
             UiCanvas::Options options;
             options.showHidden = envValue("RASA_UIHIDDEN") != nullptr;
-            options.backgroundMaskWires = envValue("RASA_UIWIRES") != nullptr;
+            if (const char* mouse = envValue("RASA_UIMOUSE")) {           // logical x,y: the window wires glow around it
+                options.mouseHighlight = std::sscanf(mouse, "%f,%f", &options.mouseX, &options.mouseY) == 2;
+            }
             if (const char* uiScreen = envValue("RASA_UISCREEN")) std::sscanf(uiScreen, "%dx%d", &options.screenWidth, &options.screenHeight);
             std::vector<uint8_t> rgba, background;
             if (const char* bg = envValue("RASA_UIBACKGROUND")) {
