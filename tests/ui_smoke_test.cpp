@@ -138,6 +138,26 @@ int main() {
             }
         check(server.viewport_.visible_, "server viewport drawn");
         check(ctx.scene && ctx.scene->showServer, "server viewport shows the server overlay");
+        // Radar regions: Concordia has sub-region radar maps; inside Ranja Cavern (map_region 33, a box at -550 208 -415) the
+        // client's rule picks region 33, outside it region 0; the overview draws with the region chosen by hand too.
+        if (ctx.scene) {
+            std::printf("      radar regions:");
+            for (int32_t id : ctx.radarRegions) std::printf(" %d", id);
+            std::printf("\n");
+            const ViewCamera saved = ctx.scene->camera();
+            ctx.scene->camera().position = tr::Vec3{-550.0f, 205.0f, -415.0f};
+            const int32_t inside = ctx.radarRegionAtCamera();
+            ctx.scene->camera().position = tr::Vec3{0.0f, 400.0f, 0.0f};
+            const int32_t outside = ctx.radarRegionAtCamera();
+            RadarMap* cavern = ctx.radarFor(33);
+            std::printf("      radar at Ranja Cavern %d, elsewhere %d; region 33 map %d of %d tiles\n", inside, outside,
+                        cavern ? cavern->tilesPresent() : -1, cavern ? cavern->tilesTotal() : -1);
+            check(inside == 33 && outside == 0 && cavern && cavern->tilesPresent() > 0, "radar region follows the camera (Ranja Cavern 33)");
+            server.overview_.radarChoice_ = 33;
+            frames(editor, device, 2);
+            server.overview_.radarChoice_ = -1;
+            ctx.scene->camera() = saved;
+        }
         frames(editor, device, 60);                                  // let models load
         saveViewport(ctx, device, outputPath("smoke_server.rgba").c_str());
 

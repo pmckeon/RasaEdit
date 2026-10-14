@@ -121,7 +121,11 @@ void drawMapInfoPanel(EditorContext& ctx, const char* title) {
     ImGui::SeparatorText("Files");
     ImGui::Text("lights.xml %zu bytes, audioemitters.xml %zu bytes", ctx.map->lightsXml.size(), ctx.map->audioEmittersXml.size());
     ImGui::TextWrapped("Radar: %s", ctx.map->radarArchivePath.empty() ? "(none)" : ctx.map->radarArchivePath.c_str());
-    if (ctx.radar) ImGui::Text("Radar map: context %d, %d of %d tiles", ctx.radarContextId, ctx.radar->tilesPresent(), ctx.radar->tilesTotal());
+    if (!ctx.radarRegions.empty()) {
+        std::string regions;
+        for (int32_t id : ctx.radarRegions) regions += (regions.empty() ? "" : ", ") + std::to_string(id);
+        ImGui::TextWrapped("Radar maps: context %d, regions %s", ctx.radarContextId, regions.c_str());
+    }
     ImGui::End();
 }
 
@@ -185,7 +189,8 @@ void AssetsPanel::reset(EditorContext& ctx) {
 // ------------------------------------------------------------------------------------------
 void OverviewPanel::onMapLoaded(const EditorContext& ctx) {
     fitPending_ = true;
-    backgroundMode_ = ctx.radar ? 0 : 1;
+    radarChoice_ = -1;
+    backgroundMode_ = ctx.radarRegions.empty() ? 1 : 0;
 }
 
 void OverviewPanel::draw(EditorContext& ctx, const char* title, const OverviewLayers& layers) {
@@ -193,11 +198,42 @@ void OverviewPanel::draw(EditorContext& ctx, const char* title, const OverviewLa
     if (!ctx.map) { ImGui::TextDisabled("Select a map."); ImGui::End(); return; }
     const auto& entities = ctx.map->map.entities;
 
-    // Background choice.
-    if (ctx.radar || ctx.overview) {
-        if (!ctx.radar) ImGui::BeginDisabled();
+    // Background choice. The radar region follows the camera as the game's radar does, or is chosen by hand (sub-regions -
+    // caves, interiors - have their own radar maps, often over the same ground as the main map).
+    const bool hasRadar = !ctx.radarRegions.empty();
+    const int32_t autoRegion = ctx.radarRegionAtCamera();
+    if (radarChoice_ >= 0 && std::find(ctx.radarRegions.begin(), ctx.radarRegions.end(), radarChoice_) == ctx.radarRegions.end()) radarChoice_ = -1;
+    const int32_t radarRegion = radarChoice_ >= 0 ? radarChoice_ : autoRegion;
+    RadarMap* radar = backgroundMode_ == 0 && radarRegion >= 0 ? ctx.radarFor(radarRegion) : nullptr;
+    if (hasRadar || ctx.overview) {
+        if (!hasRadar) ImGui::BeginDisabled();
         if (ImGui::RadioButton("Radar map", backgroundMode_ == 0)) backgroundMode_ = 0;
-        if (!ctx.radar) ImGui::EndDisabled();
+        if (hasRadar && ctx.radarRegions.size() > 1) {
+            ImGui::SameLine();
+            char preview[48];
+            if (radarChoice_ < 0) std::snprintf(preview, sizeof preview, "Auto: region %d", autoRegion);
+            else std::snprintf(preview, sizeof preview, "Region %d", radarChoice_);
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9);
+            if (ImGui::BeginCombo("##radarregion", preview)) {
+                if (ImGui::Selectable("Auto: follow the camera", radarChoice_ < 0)) radarChoice_ = -1;
+                for (int32_t id : ctx.radarRegions) {
+                    char label[48];
+                    std::snprintf(label, sizeof label, id == 0 ? "Region %d (main map)" : "Region %d", id);
+                    if (ImGui::Selectable(label, radarChoice_ == id)) {
+                        radarChoice_ = id;
+                        backgroundMode_ = 0;
+                        fitPending_ = true;                  // show the whole chosen map
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Which region's radar map to show. Auto follows the 3D camera like the game's radar: of the regions\n"
+                                  "the camera is in (the server's map_region volumes) and region 0, the highest region id with radar\n"
+                                  "tiles. Pick a region to see a cave or interior from anywhere; double-click a marker there to jump\n"
+                                  "the 3D view to it.");
+        }
+        if (!hasRadar) ImGui::EndDisabled();
         ImGui::SameLine();
         if (!ctx.overview) ImGui::BeginDisabled();
         if (ImGui::RadioButton("Terrain relief", backgroundMode_ == 1)) backgroundMode_ = 1;
@@ -207,13 +243,13 @@ void OverviewPanel::draw(EditorContext& ctx, const char* title, const OverviewLa
         ImGui::SameLine();
         drawMarkerLegend();
     }
-    const bool showRadar = backgroundMode_ == 0 && ctx.radar;
+    const bool showRadar = backgroundMode_ == 0 && radar;
     const bool showRelief = backgroundMode_ == 1 && ctx.overview;
 
     // World rectangle to fit: the background image, or the entities' extent.
     float minX = 1e30f, maxX = -1e30f, minZ = 1e30f, maxZ = -1e30f;
     if (showRadar) {
-        minX = ctx.radar->leftX(); maxX = ctx.radar->rightX(); minZ = ctx.radar->bottomZ(); maxZ = ctx.radar->topZ();
+        minX = radar->leftX(); maxX = radar->rightX(); minZ = radar->bottomZ(); maxZ = radar->topZ();
     } else if (ctx.overview) {
         minX = ctx.overview->minX(); maxX = ctx.overview->maxX(); minZ = ctx.overview->minZ(); maxZ = ctx.overview->maxZ();
     } else {
@@ -272,8 +308,8 @@ void OverviewPanel::draw(EditorContext& ctx, const char* title, const OverviewLa
     draw->AddRectFilled(origin, corner, IM_COL32(24, 26, 30, 255));
     if (showRadar) {
         // Radar image row 0 is the top (largest z), so it maps straight onto the screen.
-        draw->AddImage(ImTextureRef((ImTextureID)(intptr_t)ctx.radar->texture()), toScreen(ctx.radar->leftX(), ctx.radar->topZ()),
-                       toScreen(ctx.radar->rightX(), ctx.radar->bottomZ()));
+        draw->AddImage(ImTextureRef((ImTextureID)(intptr_t)radar->texture()), toScreen(radar->leftX(), radar->topZ()),
+                       toScreen(radar->rightX(), radar->bottomZ()));
     }
     if (showRelief) {
         // Image row 0 is minimum z, so the top of the drawn rectangle (maximum z) uses v = 1.
@@ -380,6 +416,18 @@ void OverviewPanel::draw(EditorContext& ctx, const char* title, const OverviewLa
         const ImVec2 p = toScreen(selectedPosition.x, selectedPosition.z);
         draw->AddCircle(p, radius + 4.0f, toU32(markerColour::selected), 16, 2.0f);
     }
+    // The 3D camera: a white arrowhead pointing where it looks.
+    if (ctx.scene) {
+        const ViewCamera& camera = ctx.scene->camera();
+        const tr::Vec3 f = camera.forward();
+        const float fl = std::sqrt(f.x * f.x + f.z * f.z);
+        const float dx = fl > 1e-4f ? f.x / fl : 0.0f, dz = fl > 1e-4f ? f.z / fl : 1.0f;
+        const ImVec2 p = toScreen(camera.position.x, camera.position.z);
+        const ImVec2 tip(p.x + dx * 11.0f, p.y - dz * 11.0f);
+        const ImVec2 left(p.x - dz * 5.0f - dx * 4.0f, p.y - dx * 5.0f + dz * 4.0f), right(p.x + dz * 5.0f - dx * 4.0f, p.y + dx * 5.0f + dz * 4.0f);
+        draw->AddTriangleFilled(tip, left, right, IM_COL32(255, 255, 255, 230));
+        draw->AddTriangle(tip, left, right, IM_COL32(0, 0, 0, 200), 1.0f);
+    }
     // Cursor read-out.
     char text[160];
     float ground = 0;
@@ -390,17 +438,34 @@ void OverviewPanel::draw(EditorContext& ctx, const char* title, const OverviewLa
     draw->AddText(ImVec2(origin.x + 6, origin.y + 4), IM_COL32(255, 255, 255, 220), text);
     draw->PopClipRect();
 
-    // Hover and click: server markers take precedence over map entities under the cursor.
+    // Hover and click: server markers take precedence over map entities under the cursor. A double-click selects and jumps the
+    // 3D view to the marker; on empty map space it moves the camera there (looking at the ground, or the map's height without
+    // terrain).
     const bool clicked = hovered && ImGui::IsMouseReleased(ImGuiMouseButton_Left) && !ImGui::IsMouseDragPastThreshold(ImGuiMouseButton_Left);
+    const bool doubleClicked = hovered && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
     if (isSelected(nearestServer)) {
         nearest = -1;
         if (layers.label) ImGui::SetTooltip("%s", layers.label(nearestServer).c_str());
         if (clicked && layers.selection) *layers.selection = nearestServer;
+        if (doubleClicked && layers.selection) {
+            *layers.selection = nearestServer;
+            if (layers.showInViewport) layers.showInViewport(nearestServer);
+        }
     } else if (nearest >= 0) {
         const ClassInfo& info = ctx.classInfo(entities[size_t(nearest)].classId);
         ImGui::SetTooltip("%s\n%s\n%.1f, %.1f, %.1f", info.known ? info.name.c_str() : "(unknown class)", info.mesh.c_str(),
                           entities[size_t(nearest)].location.x, entities[size_t(nearest)].location.y, entities[size_t(nearest)].location.z);
-        if (clicked && layers.selection) *layers.selection = Selection{SelectionKind::MapEntity, size_t(nearest)};
+        const Selection entity{SelectionKind::MapEntity, size_t(nearest)};
+        if (clicked && layers.selection) *layers.selection = entity;
+        if (doubleClicked && layers.selection) {
+            *layers.selection = entity;
+            if (layers.showInViewport) layers.showInViewport(entity);
+        }
+    } else if (doubleClicked && ctx.scene) {
+        const float fallback = ctx.scene->camera().position.y;
+        float y = fallback;
+        if (!(ctx.map->hasTerrain && ctx.map->terrain.heightAtWorld(mouseX, mouseZ, y))) y = fallback;
+        ctx.scene->focusOnPoint(tr::Vec3{mouseX, y, mouseZ}, 25.0f);
     } else if (clicked && layers.selection) {
         *layers.selection = Selection{};                   // click on empty map space deselects
     }

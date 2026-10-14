@@ -56,6 +56,7 @@ struct OverviewLayers {
     bool showRegions = false;
     std::function<std::string(const Selection&)> label;            // tooltip text for server objects
     std::function<bool(const Selection&, tr::Vec3&)> position;     // world position of a selection
+    std::function<void(const Selection&)> showInViewport;          // double-click on a marker: select it and focus the 3D view
 };
 
 class OverviewPanel {
@@ -65,6 +66,7 @@ public:
     void draw(EditorContext& ctx, const char* title, const OverviewLayers& layers);
 private:
     int backgroundMode_ = 0;                         // 0 = game radar map, 1 = terrain relief
+    int32_t radarChoice_ = -1;                       // the radar region shown: -1 = follow the camera (the client's rule)
     bool fitPending_ = true;
     bool focusPending_ = false;
     float centreX_ = 0, centreZ_ = 0, zoom_ = 0.25f;

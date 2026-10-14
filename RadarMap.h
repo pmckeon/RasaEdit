@@ -26,6 +26,10 @@ public:
     int32_t tilesPresent() const { return tilesPresent_; }
     int32_t tilesTotal() const { return tilesTotal_; }
 
+    // Whether the radar archive holds region regionId's first tile - the client's test (regionmanager.py
+    // GetUIRadarTexturePrefix: RadarFileExists('ui_radar_<template>_<region>_1.dds')).
+    static bool hasTiles(const std::string& radarArchivePath, int32_t mapTemplateId, int32_t regionId);
+
     // CPU part, exposed for testing. Missing tiles are transparent; images larger than maxSize are halved.
     static std::vector<tr::Rgba8> buildImage(const std::string& radarArchivePath, int32_t mapTemplateId, int32_t regionId,
                                              const tr::RadarInfo& info, uint32_t maxSize, uint32_t& width, uint32_t& height,

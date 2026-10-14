@@ -105,6 +105,9 @@ public:
     // pickEntities / pickServer choose which kinds of object can be hit.
     Selection pick(float ndcX, float ndcY, bool pickEntities = true, bool pickServer = true) const;
     void focusOn(const Selection& selection);
+    // Moves the camera to look at a point from about `distance` away (as focusOn does for a selection).
+    void focusOnPoint(const tr::Vec3& target, float distance) { frameTarget(target, distance); }
+    std::vector<int32_t> regionsAtCamera() const;       // the client's region list at the camera, highest priority first
     // Map entity bounds from its loaded model (placements start from the .map's stored bounds or a 1 m box; the asset preview's
     // one-entity map has none). false while the model is not loaded.
     bool fitEntityToModel(size_t entityIndex);
@@ -506,7 +509,6 @@ private:
     std::unordered_map<std::string, SDL_GPUTexture*> environmentCubes_;   // lower-case name -> cube (nullptr: failed)
     std::map<std::string, std::string> environmentMapErrors_;
     void readRegionSettings();
-    std::vector<int32_t> regionsAtCamera() const;       // the client's region list at the camera, highest priority first
     float startTimeOfDay_ = 0.5f;
     std::vector<tr::PlacedLight> mapLights_;
     std::vector<tr::LightModifier> lightModifiers_;                // lights.xml <Mods>

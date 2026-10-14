@@ -41,6 +41,11 @@ std::vector<tr::Rgba8> RadarMap::buildImage(const std::string& radarArchivePath,
     return image;
 }
 
+bool RadarMap::hasTiles(const std::string& radarArchivePath, int32_t mapTemplateId, int32_t regionId) {
+    const tr::GlmArchive archive(radarArchivePath);
+    return archive.find(tr::radarTileName(mapTemplateId, regionId, 0)) != nullptr;
+}
+
 RadarMap::RadarMap(SDL_GPUDevice* device, const std::string& radarArchivePath, int32_t mapTemplateId, int32_t regionId,
                    const tr::RadarInfo& info) : device_(device) {
     uint32_t width = 0, height = 0;

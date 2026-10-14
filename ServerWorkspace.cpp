@@ -65,6 +65,7 @@ void ServerWorkspace::drawPanels() {
     layers.showRegions = viewport_.options.showRegions;
     layers.label = [this](const Selection& s) { return serverObjectLabel(s); };
     layers.position = [this](const Selection& s, tr::Vec3& p) { return selectionPosition(s, p); };
+    layers.showInViewport = [this](const Selection& s) { viewport_.focusOn(ctx_, s); };
     overview_.draw(ctx_, "Overview###Server.Overview", layers);
     // Drawn last: on first creation the newest window becomes the selected tab of a shared dock node.
     viewport_.draw(ctx_, "Viewport###Server.Viewport", selection_, false, true, this);

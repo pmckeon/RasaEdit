@@ -55,6 +55,7 @@ void ClientWorkspace::drawPanels() {
         p = ctx_.map->map.entities[s.index].location;
         return true;
     };
+    layers.showInViewport = [this](const Selection& s) { viewport_.focusOn(ctx_, s); };
     overview_.draw(ctx_, "Overview###Client.Overview", layers);
     assets_.draw(ctx_, "Assets###Client.Assets");
     // Drawn last: on first creation the newest window becomes the selected tab of a shared dock node.

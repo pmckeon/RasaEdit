@@ -3,6 +3,8 @@
 #include "assetlibrary.h"
 #include "gamedata.h"
 #include "RadarMap.h"
+
+#include <map>
 #include "Renderer.h"
 #include "SceneView.h"
 #include "TerrainOverview.h"
@@ -96,13 +98,25 @@ public:
     std::string mapTemplateName;
     int32_t radarContextId = -1;
     std::unique_ptr<TerrainOverview> overview;          // hill-shaded terrain texture
-    std::unique_ptr<RadarMap> radar;                    // the game's own map image
+    // The game's own map images, one per map region that has radar tiles (region 0 = the main map; sub-regions such as caves
+    // and interiors have their own). radarRegions: those regions, ascending; radarFor loads one on first use (null if none).
+    std::vector<int32_t> radarRegions;
+    RadarMap* radarFor(int32_t regionId);
+    // The region whose radar the client shows at the camera (client/ui/radarwindow.py _SetupRadarTextures with
+    // regionmanager.py OnUpdateRegions): the regions the camera is in plus region 0, sorted by id ascending, the LAST with radar
+    // tiles. -1 if the map has none.
+    int32_t radarRegionAtCamera() const;
     std::unique_ptr<Renderer> renderer;
     std::unique_ptr<SceneView> scene;
     ViewSettings view;
 
     std::string statusText;
     bool statusIsError = false;
+
+private:
+    std::map<int32_t, std::unique_ptr<RadarMap>> radars_;   // loaded radar maps by region (released with the map)
+    std::map<int32_t, std::string> radarErrors_;             // regions whose radar failed to load
+public:
 
 private:
     static void SDLCALL folderDialogCallback(void* userdata, const char* const* filelist, int filter);

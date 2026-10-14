@@ -105,7 +105,9 @@ bool EditorContext::openGame(const std::string& root) {
 
         scene.reset();
         overview.reset();
-        radar.reset();
+        radars_.clear();
+        radarErrors_.clear();
+        radarRegions.clear();
         map.reset();
         currentMapName.clear();
         classInfoCache_.clear();
@@ -148,8 +150,9 @@ bool EditorContext::openMap(const std::string& name) {
             templateId = int32_t(std::stoul(file.substr(1, 8), nullptr, 16));
         }
 
-        // The game's radar map: first game context for this template that has radar data for region 0.
-        std::unique_ptr<RadarMap> newRadar;
+        // The game's radar maps: the first game context for this template that has radar data for region 0, and every region
+        // (0 and the map's regions) with radar data in that context and its first tile in the archive. Loaded on first use.
+        std::vector<int32_t> newRadarRegions;
         int32_t contextId = -1;
         std::string radarProblem;
         if (gameData && templateId >= 0 && !bundle->radarArchivePath.empty()) {
@@ -157,9 +160,19 @@ bool EditorContext::openMap(const std::string& name) {
                 for (int32_t context : gameData->contextIdsForMapTemplate(templateId)) {
                     tr::RadarInfo info;
                     if (!gameData->radarInfo(context, 0, info)) continue;
-                    newRadar = std::make_unique<RadarMap>(device, bundle->radarArchivePath, templateId, 0, info);
                     contextId = context;
                     break;
+                }
+                if (contextId >= 0) {
+                    std::vector<int32_t> candidates{0};
+                    for (const tr::MapRegion& r : bundle->map.regions) candidates.push_back(r.regionId);
+                    std::sort(candidates.begin(), candidates.end());
+                    candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+                    for (int32_t region : candidates) {
+                        tr::RadarInfo info;
+                        if (gameData->radarInfo(contextId, region, info) && RadarMap::hasTiles(bundle->radarArchivePath, templateId, region))
+                            newRadarRegions.push_back(region);
+                    }
                 }
             } catch (const std::exception& e) {
                 radarProblem = std::string("  (radar map: ") + e.what() + ")";
@@ -168,7 +181,9 @@ bool EditorContext::openMap(const std::string& name) {
 
         scene.reset();                                   // references the old bundle
         overview = std::move(newOverview);               // old textures released here (no draw list holds them)
-        radar = std::move(newRadar);
+        radars_.clear();
+        radarErrors_.clear();
+        radarRegions = std::move(newRadarRegions);
         map = std::move(bundle);
         if (renderer) {
             scene = std::make_unique<SceneView>(*renderer, *assets, *map, [this](int32_t id) { return classInfo(id).mesh; },
@@ -233,5 +248,35 @@ void EditorContext::releaseGpuResources() {
     scene.reset();
     renderer.reset();
     overview.reset();
-    radar.reset();
+    radars_.clear();
+}
+
+RadarMap* EditorContext::radarFor(int32_t regionId) {
+    const auto loaded = radars_.find(regionId);
+    if (loaded != radars_.end()) return loaded->second.get();
+    if (!map || !gameData || radarContextId < 0 || mapTemplateId < 0 || radarErrors_.count(regionId) ||
+        std::find(radarRegions.begin(), radarRegions.end(), regionId) == radarRegions.end())
+        return nullptr;
+    try {
+        tr::RadarInfo info;
+        if (!gameData->radarInfo(radarContextId, regionId, info)) throw std::runtime_error("no radar data");
+        RadarMap* radar = (radars_[regionId] = std::make_unique<RadarMap>(device, map->radarArchivePath, mapTemplateId, regionId, info)).get();
+        return radar;
+    } catch (const std::exception& e) {
+        radars_.erase(regionId);
+        radarErrors_[regionId] = e.what();
+        setStatus("Radar map of region " + std::to_string(regionId) + ": " + e.what(), true);
+        return nullptr;
+    }
+}
+
+int32_t EditorContext::radarRegionAtCamera() const {
+    if (radarRegions.empty()) return -1;
+    std::vector<int32_t> regions = scene ? scene->regionsAtCamera() : std::vector<int32_t>{0};
+    if (std::find(regions.begin(), regions.end(), 0) == regions.end()) regions.push_back(0);
+    std::sort(regions.begin(), regions.end());
+    int32_t chosen = -1;
+    for (int32_t id : regions)
+        if (std::find(radarRegions.begin(), radarRegions.end(), id) != radarRegions.end()) chosen = id;
+    return chosen;
 }
