@@ -185,6 +185,19 @@ public:
     // A creature's in-game name: generated.client.language.english.creaturenamelanguage lookup[nameId] (the client's
     // creaturenamelanguage module; Rasa.NET sends creature.name_id in CreatureInfoPacket). "" if none.
     std::string creatureName(int32_t nameId);
+    // Battle cries (client/augmentations/creature.py Recv_BattlecryNotification(packageId, typeId, seed)): the client plays
+    // generated.client.battlecrypackages lookup[(package, cry type)][0], an audio set (generated.client.audiosetdata
+    // audioSet[id][0] = its name, e.g. 1041 "Battlecry English Male Rugd Aggro"). Cry types as Rasa.NET's BattlecryType: 1 Aggro,
+    // 2 Killed Target, 3 Received Damage, 4 Received Critical Damage, 5 Help, 6 Close to Death, 7 Enter Combat, 8 Exit Combat,
+    // 9 Start Patrol, 10 Stop Patrol, 11 Resume Patrol.
+    struct BattlecryCry {
+        int32_t type = 0;
+        int32_t audioSet = 0;
+        std::string audioSetName;
+    };
+    std::vector<int32_t> battlecryPackages();                        // every package id, ascending
+    std::vector<BattlecryCry> battlecryCries(int32_t packageId);     // by type
+    std::string audioSetName(int32_t audioSetId);
     // A map region's in-game name (MapRegion.displayName), as the client builds it: regionmanager.py _BuildRegionTuple turns
     // the id into generated.client.uielement.byvalue[id] (a name such as ID_...), gameui.py DisplayRegionName maps that back
     // through uielement.bystring and reads uielementlanguage (gender-keyed (id, gender) -> [text]). "" when the region has none

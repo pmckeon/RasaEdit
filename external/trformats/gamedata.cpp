@@ -1073,6 +1073,36 @@ std::string GameData::creatureName(int32_t nameId) {
     return name && py::isString(name) ? py::asString(name) : "";
 }
 
+std::vector<int32_t> GameData::battlecryPackages() {
+    std::vector<int32_t> packages;
+    const py::Object* lookup = global("generated.client.battlecrypackages", "lookup");
+    if (lookup && lookup->kind == py::Kind::Dict)
+        for (const auto& entry : lookup->entries) packages.push_back(int32_t(py::asInt(py::item(entry.first.get(), 0))));
+    std::sort(packages.begin(), packages.end());
+    packages.erase(std::unique(packages.begin(), packages.end()), packages.end());
+    return packages;
+}
+
+std::vector<GameData::BattlecryCry> GameData::battlecryCries(int32_t packageId) {
+    std::vector<BattlecryCry> cries;
+    const py::Object* lookup = global("generated.client.battlecrypackages", "lookup");
+    if (!lookup || lookup->kind != py::Kind::Dict) return cries;
+    for (const auto& entry : lookup->entries) {
+        if (py::asInt(py::item(entry.first.get(), 0)) != packageId) continue;
+        BattlecryCry cry;
+        cry.type = int32_t(py::asInt(py::item(entry.first.get(), 1)));
+        cry.audioSet = int32_t(py::asInt(py::item(entry.second.get(), 0)));
+        cry.audioSetName = audioSetName(cry.audioSet);
+        cries.push_back(std::move(cry));
+    }
+    std::sort(cries.begin(), cries.end(), [](const BattlecryCry& a, const BattlecryCry& b) { return a.type < b.type; });
+    return cries;
+}
+
+std::string GameData::audioSetName(int32_t audioSetId) {
+    return py::asString(py::item(py::dictGet(global("generated.client.audiosetdata", "audioSet"), audioSetId), 0));
+}
+
 std::string GameData::regionDisplayName(int32_t displayName, int32_t gender) {
     const std::string name = py::asString(py::dictGet(global("generated.client.uielement", "byvalue"), displayName));
     if (name.empty()) return "";

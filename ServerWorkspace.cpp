@@ -1393,9 +1393,85 @@ void ServerWorkspace::drawMissionPanel() {
 void ServerWorkspace::reloadCreatureDefinitions() {
     creatureDefs_ = database_ ? database_->creatureDefinitions() : std::vector<CreatureDefinition>{};
     creatureDefsSaved_ = creatureDefs_;
+    classCries_ = database_ ? database_->classBattlecries() : std::map<int32_t, int32_t>{};
+    classCriesSaved_ = classCries_;
+}
+
+// Battle cries (creature_battlecry; Rasa.NET Battlecries): the creature's own package (scope 2) comes before its class's (scope
+// 1, shared by every creature of the class). Packages and their cries are the client's (battlecrypackages -> audio sets).
+void ServerWorkspace::drawBattlecry(CreatureDefinition& d) {
+    ImGui::SeparatorText("Battle cry (creature_battlecry)");
+    std::vector<int32_t> packages;
+    if (ctx_.gameData) {
+        try { packages = ctx_.gameData->battlecryPackages(); } catch (const std::exception&) {}
+    }
+    // A package's name: the words its audio sets' names share (e.g. "Battlecry English Male Rugd"), else the first set's name.
+    auto packageName = [&](int32_t package) -> std::string {
+        if (!ctx_.gameData) return "";
+        std::vector<tr::GameData::BattlecryCry> cries;
+        try { cries = ctx_.gameData->battlecryCries(package); } catch (const std::exception&) {}
+        if (cries.empty()) return "(not in the client's battlecrypackages)";
+        std::string common = cries[0].audioSetName;
+        for (const auto& cry : cries) {
+            size_t n = 0;
+            while (n < common.size() && n < cry.audioSetName.size() && common[n] == cry.audioSetName[n]) ++n;
+            common.resize(n);
+        }
+        while (!common.empty() && common.back() != ' ' && common.size() != cries[0].audioSetName.size()) common.pop_back();   // whole words
+        while (!common.empty() && common.back() == ' ') common.pop_back();
+        return common.empty() || cries.size() == 1 ? cries[0].audioSetName : common;
+    };
+    auto packageCombo = [&](const char* label, int32_t& package) {
+        const std::string preview = std::to_string(package) + "  " + packageName(package);
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 18);
+        if (ImGui::BeginCombo(label, preview.c_str())) {
+            for (int32_t p : packages) {
+                const std::string text = std::to_string(p) + "  " + packageName(p);
+                if (ImGui::Selectable(text.c_str(), p == package)) package = p;
+            }
+            ImGui::EndCombo();
+        }
+    };
+    ImGui::Checkbox("Own package (scope 2, this creature)", &d.hasBattlecry);
+    if (d.hasBattlecry) {
+        if (d.battlecryPackage == 0 && !packages.empty()) d.battlecryPackage = packages.front();
+        packageCombo("##ownpackage", d.battlecryPackage);
+    }
+    const int32_t classId = d.creature.classId;
+    int sharing = 0;
+    for (const CreatureDefinition& other : creatureDefs_) sharing += other.creature.classId == classId ? 1 : 0;
+    const auto classRow = classCries_.find(classId);
+    bool hasClass = classRow != classCries_.end();
+    char classLabel[160];
+    std::snprintf(classLabel, sizeof classLabel, "Class package (scope 1, class %d %s - %d creature(s))", classId,
+                  ctx_.classInfo(classId).name.c_str(), sharing);
+    if (ImGui::Checkbox(classLabel, &hasClass)) {
+        if (hasClass) classCries_[classId] = packages.empty() ? 1 : packages.front();
+        else classCries_.erase(classId);
+    }
+    ImGui::SetItemTooltip("Shared by every creature of this class that has no package of its own.");
+    if (hasClass) packageCombo("##classpackage", classCries_[classId]);
+    const auto now = classCries_.find(classId);
+    const int32_t effective = d.hasBattlecry ? d.battlecryPackage : now != classCries_.end() ? now->second : 0;
+    if (effective == 0) {
+        ImGui::TextWrapped("No package: silent. (Rasa.NET gives an armed human or a mission escort with no package one of its sex's three "
+                           "English human voices at random - Battlecries.HumanVoice; an escort's is then kept as its own row.)");
+        return;
+    }
+    ImGui::Text("Cries with package %d (%s):", effective, d.hasBattlecry ? "its own" : "its class's");
+    static const char* typeNames[] = {"", "Aggro", "Killed target", "Received damage", "Received critical damage", "Help", "Close to death",
+                                      "Enter combat", "Exit combat", "Start patrol", "Stop patrol", "Resume patrol"};
+    std::vector<tr::GameData::BattlecryCry> cries;
+    if (ctx_.gameData) {
+        try { cries = ctx_.gameData->battlecryCries(effective); } catch (const std::exception&) {}
+    }
+    for (const auto& cry : cries)
+        ImGui::BulletText("%s: %s (audio set %d)", cry.type >= 1 && cry.type <= 11 ? typeNames[cry.type] : "?", cry.audioSetName.c_str(), cry.audioSet);
+    if (cries.empty()) ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.4f, 1.0f), "The client has no cries for this package: it plays nothing.");
 }
 
 bool ServerWorkspace::creaturesChanged() const {
+    if (classCries_ != classCriesSaved_) return true;
     if (creatureDefs_.size() != creatureDefsSaved_.size()) return true;
     for (size_t k = 0; k < creatureDefs_.size(); ++k)
         if (!sameCreatureDefinition(creatureDefs_[k], creatureDefsSaved_[k])) return true;
@@ -1406,7 +1482,7 @@ bool ServerWorkspace::saveCreatures() {
     if (!database_ || database_->readOnly()) return false;
     WorldDatabase::SaveSummary summary;
     std::string error;
-    if (!database_->saveCreatures(creatureDefsSaved_, creatureDefs_, summary, error)) {
+    if (!database_->saveCreatures(creatureDefsSaved_, creatureDefs_, summary, error, &classCriesSaved_, &classCries_)) {
         ctx_.setStatus("Saving creatures failed, nothing was written: " + error, true);
         return false;
     }
@@ -1470,6 +1546,7 @@ void ServerWorkspace::drawCreaturePanel() {
         ImGui::SameLine();
         if (ImGui::Button("Revert")) {
             creatureDefs_ = creatureDefsSaved_;
+            classCries_ = classCriesSaved_;
             ctx_.setStatus("Creature edits reverted.", false);
         }
         if (!changed) ImGui::EndDisabled();
@@ -1582,6 +1659,7 @@ void ServerWorkspace::drawCreatureEditor(CreatureDefinition& d, bool isNew) {
     integer("Max HP", c.maxHp);
     integer("Run speed", c.runSpeed);
     integer("Walk speed", c.walkSpeed);
+    if (database_->hasTable("creature_battlecry")) drawBattlecry(d);
     ImGui::SeparatorText("Actions (creature_action)");
     const std::vector<CreatureAction>& actions = database_->creatureActions();
     for (int k = 0; k < 8; ++k) {

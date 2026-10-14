@@ -199,6 +199,15 @@ void WorldDatabase::loadCreatures() {
     vendorPrices_.clear();
     vendorItems_.clear();
     itemTemplates_.clear();
+    creatureBattlecries_.clear();
+    classBattlecries_.clear();
+    if (requireColumns("creature_battlecry", {"scope", "target_id", "package_id"})) {
+        Statement s(db_, "SELECT scope, target_id, package_id FROM creature_battlecry");
+        while (s.step()) {
+            if (s.int32(0) == 1) classBattlecries_[s.int32(1)] = s.int32(2);
+            else if (s.int32(0) == 2) creatureBattlecries_[s.int32(1)] = s.int32(2);
+        }
+    }
     if (requireColumns("npc_package", {"id", "package_id", "comment"})) {
         Statement s(db_, "SELECT id, package_id, comment FROM npc_package");
         while (s.step()) npcPackages_[s.int32(0)] = {s.int32(1), s.text(2)};
@@ -385,6 +394,7 @@ bool sameCreatureDefinition(const CreatureDefinition& a, const CreatureDefinitio
     if (a.hasVendor != b.hasVendor || (a.hasVendor && a.vendorPackageId != b.vendorPackageId)) return false;
     if (a.hasVendorPrice != b.hasVendorPrice || (a.hasVendorPrice && a.vendorPrice != b.vendorPrice)) return false;
     if (a.vendorItems != b.vendorItems) return false;
+    if (a.hasBattlecry != b.hasBattlecry || (a.hasBattlecry && a.battlecryPackage != b.battlecryPackage)) return false;
     if (a.appearance.size() != b.appearance.size()) return false;
     for (size_t k = 0; k < a.appearance.size(); ++k)
         if (a.appearance[k].slotId != b.appearance[k].slotId || a.appearance[k].classId != b.appearance[k].classId ||
@@ -591,13 +601,15 @@ std::vector<CreatureDefinition> WorldDatabase::creatureDefinitions() const {
         if (const auto it = vendors_.find(c.id); it != vendors_.end()) { d.hasVendor = true; d.vendorPackageId = it->second; }
         if (const auto it = vendorPrices_.find(c.id); it != vendorPrices_.end()) { d.hasVendorPrice = true; d.vendorPrice = it->second; }
         if (const auto it = vendorItems_.find(c.id); it != vendorItems_.end()) d.vendorItems = it->second;
+        if (const auto it = creatureBattlecries_.find(c.id); it != creatureBattlecries_.end()) { d.hasBattlecry = true; d.battlecryPackage = it->second; }
         out.push_back(std::move(d));
     }
     return out;
 }
 
 bool WorldDatabase::saveCreatures(const std::vector<CreatureDefinition>& saved, const std::vector<CreatureDefinition>& edited, SaveSummary& summary,
-                                  std::string& error) {
+                                  std::string& error, const std::map<int32_t, int32_t>* savedClassCries,
+                                  const std::map<int32_t, int32_t>* editedClassCries) {
     summary = SaveSummary{};
     if (readOnly_) {
         error = "the database was opened read-only";
@@ -755,6 +767,42 @@ bool WorldDatabase::saveCreatures(const std::vector<CreatureDefinition>& saved, 
                     s.run(db_);
                 }
                 if (b || !d.vendorItems.empty()) ++summary.updated;
+            }
+            // creature_battlecry scope 2 (key: scope, target_id).
+            const bool hadCry = b && b->hasBattlecry;
+            if (d.hasBattlecry && (!hadCry || b->battlecryPackage != d.battlecryPackage)) {
+                Statement s(db_, hadCry ? "UPDATE creature_battlecry SET package_id = ?2 WHERE scope = 2 AND target_id = ?1"
+                                        : "INSERT INTO creature_battlecry (scope, target_id, package_id) VALUES (2, ?1, ?2)");
+                s.bindInt(1, c.id);
+                s.bindInt(2, d.battlecryPackage);
+                s.run(db_);
+                ++(hadCry ? summary.updated : summary.inserted);
+            } else if (!d.hasBattlecry && hadCry) {
+                Statement s(db_, "DELETE FROM creature_battlecry WHERE scope = 2 AND target_id = ?1");
+                s.bindInt(1, c.id);
+                s.run(db_);
+                ++summary.deleted;
+            }
+        }
+        // creature_battlecry scope 1: class rows that differ.
+        if (savedClassCries && editedClassCries) {
+            for (const auto& [classId, package] : *editedClassCries) {
+                const auto before = savedClassCries->find(classId);
+                if (before != savedClassCries->end() && before->second == package) continue;
+                Statement s(db_, before != savedClassCries->end()
+                                     ? "UPDATE creature_battlecry SET package_id = ?2 WHERE scope = 1 AND target_id = ?1"
+                                     : "INSERT INTO creature_battlecry (scope, target_id, package_id) VALUES (1, ?1, ?2)");
+                s.bindInt(1, classId);
+                s.bindInt(2, package);
+                s.run(db_);
+                ++(before != savedClassCries->end() ? summary.updated : summary.inserted);
+            }
+            for (const auto& [classId, package] : *savedClassCries) {
+                if (editedClassCries->count(classId)) continue;
+                Statement s(db_, "DELETE FROM creature_battlecry WHERE scope = 1 AND target_id = ?1");
+                s.bindInt(1, classId);
+                s.run(db_);
+                ++summary.deleted;
             }
         }
         execute("COMMIT");

@@ -205,6 +205,37 @@ int main() {
             check(saved && saved->level == level + 1, "saved creature level reads back");
         }
 
+        // Battle cries: give the selected creature its own package (scope 2) and its class one (scope 1), draw, save, read back,
+        // then remove both again.
+        if (server.database_->hasTable("creature_battlecry")) {
+            CreatureDefinition* d = nullptr;
+            for (CreatureDefinition& c : server.creatureDefs_)
+                if (c.creature.id == server.creatureSelected_) d = &c;
+            if (d) {
+                const int32_t id = d->creature.id, classId = d->creature.classId;
+                const bool hadClass = server.classCries_.count(classId) != 0;
+                const int32_t oldClass = hadClass ? server.classCries_[classId] : 0;
+                d->hasBattlecry = true;
+                d->battlecryPackage = 12;                    // Thrax soldier
+                server.classCries_[classId] = 9;             // English female, cute
+                frames(editor, device, 2);
+                check(server.creaturesChanged() && server.saveCreatures(), "battle cry save succeeds");
+                const auto defs = server.database_->creatureDefinitions();
+                bool own = false;
+                for (const CreatureDefinition& c : defs) own = own || (c.creature.id == id && c.hasBattlecry && c.battlecryPackage == 12);
+                const auto& classes = server.database_->classBattlecries();
+                const auto row = classes.find(classId);
+                check(own && row != classes.end() && row->second == 9, "battle cry rows read back (own 12, class 9)");
+                for (CreatureDefinition& c : server.creatureDefs_)
+                    if (c.creature.id == id) c.hasBattlecry = false;
+                if (hadClass) server.classCries_[classId] = oldClass;
+                else server.classCries_.erase(classId);
+                check(server.saveCreatures() && !server.creaturesChanged() &&
+                          (server.database_->classBattlecries().count(classId) != 0) == hadClass,
+                      "battle cry rows removed again");
+            }
+        }
+
         // Missions panel: select the first mission, draw its tree, edit an objective comment and save.
         check(showTab("Missions###Server.Missions"), "missions panel exists");
         check(server.missions_.loaded(), "mission tables loaded");

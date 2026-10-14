@@ -20,6 +20,7 @@
 #include "trformats.h"
 
 #include <cstdint>
+#include <map>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -287,6 +288,10 @@ struct CreatureDefinition {
     bool hasVendorPrice = false;
     int32_t vendorPrice = 0;
     std::vector<int32_t> vendorItems;                // item template ids, in row order
+    // creature_battlecry scope 2 (this creature row): the client battle cry package it cries with, before its class's row
+    // (scope 1, kept apart: WorldDatabase::classBattlecries). Rasa.NET Battlecries.PackageOf.
+    bool hasBattlecry = false;
+    int32_t battlecryPackage = 0;
 };
 
 struct ItemTemplateInfo {                            // itemtemplate + itemtemplate_itemclass (read-only)
@@ -379,10 +384,15 @@ public:
     const ItemTemplateInfo* itemTemplate(int32_t templateId) const;                 // nullptr if unknown
     const std::vector<CreatureAction>& creatureActions() const { return actions_; }  // sorted by id
     std::vector<CreatureDefinition> creatureDefinitions() const;                    // every creature, sorted by id
-    // Writes the creature definitions that differ (creature, creature_stat, creature_appearance) in one transaction; new
-    // creatures are those whose id is not in `saved`. Creatures are never deleted. Reloads the creature tables on success.
+    // creature_battlecry scope 1: entity class id -> battle cry package (every creature of the class; empty without the table).
+    const std::map<int32_t, int32_t>& classBattlecries() const { return classBattlecries_; }
+    // Writes the creature definitions that differ (creature, creature_stat, creature_appearance, the NPC / vendor rows, the
+    // creature's own battle cry) in one transaction; new creatures are those whose id is not in `saved`. Creatures are never
+    // deleted. With savedClassCries / editedClassCries, the class battle cry rows (scope 1) that differ are written in the same
+    // transaction. Reloads the creature tables on success.
     bool saveCreatures(const std::vector<CreatureDefinition>& saved, const std::vector<CreatureDefinition>& edited, SaveSummary& summary,
-                       std::string& error);
+                       std::string& error, const std::map<int32_t, int32_t>* savedClassCries = nullptr,
+                       const std::map<int32_t, int32_t>* editedClassCries = nullptr);
 
     // Schema checks (the Rasa.NET world schema grows with upstream development; newer tables / columns are optional).
     bool hasTable(const std::string& table) const;
@@ -413,6 +423,8 @@ private:
     std::unordered_map<int32_t, int32_t> vendorPrices_;
     std::unordered_map<int32_t, std::vector<int32_t>> vendorItems_;
     std::unordered_map<int32_t, ItemTemplateInfo> itemTemplates_;
+    std::unordered_map<int32_t, int32_t> creatureBattlecries_;              // creature_battlecry scope 2: creature id -> package
+    std::map<int32_t, int32_t> classBattlecries_;                            // scope 1: class id -> package
     std::vector<CreatureAction> actions_;
     std::unordered_set<int32_t> npcClasses_;
     std::unordered_set<int32_t> vendorClasses_;
