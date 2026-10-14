@@ -3268,6 +3268,24 @@ void SceneView::refreshEntity(size_t entityIndex) {
                          liveParticles_.end());
 }
 
+void SceneView::reloadMapLights() {
+    mapLights_.clear();
+    lightModifiers_.clear();
+    mapLightsError_.clear();
+    if (map_.lightsXml.empty()) return;
+    try {
+        mapLights_ = tr::readLights(map_.lightsXml);
+        lightModifiers_ = tr::readLightModifiers(map_.lightsXml);
+        for (const tr::PlacedLight& light : mapLights_)
+            if (!light.globeMap.empty() && !globeIndex_.count(tr::toLowerAscii(light.globeMap))) {
+                loadGlobeMaps();
+                break;
+            }
+    } catch (const std::exception& e) {
+        mapLightsError_ = e.what();
+    }
+}
+
 void SceneView::rebuildEntities() {
     placements_.clear();
     placements_.reserve(map_.map.entities.size());

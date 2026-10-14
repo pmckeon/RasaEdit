@@ -51,13 +51,16 @@ void ClientWorkspace::onMapLoaded() {
 // ------------------------------------------------------------------------------------------
 ClientWorkspace::MapEdit ClientWorkspace::snapshot() const {
     if (!ctx_.map) return MapEdit{};
-    return MapEdit{ctx_.map->map.entities, ctx_.map->map.generatedAbvs};
+    return MapEdit{ctx_.map->map.entities, ctx_.map->map.generatedAbvs, ctx_.map->lightsXml};
 }
 
 void ClientWorkspace::restore(const MapEdit& edit) {
     if (!ctx_.map) return;
     ctx_.map->map.entities = edit.entities;
     ctx_.map->map.generatedAbvs = edit.abvs;
+    const bool lightsDiffer = ctx_.map->lightsXml != edit.lights;
+    ctx_.map->lightsXml = edit.lights;
+    if (lightsDiffer) lightsChanged();
     entitiesChanged();
 }
 
@@ -107,7 +110,44 @@ void ClientWorkspace::entitiesChanged() {
     rebuildEntityFilter();
 }
 
+namespace {
+
+std::vector<float> parseNumbers(const std::string& s) {
+    std::vector<float> out;
+    const char* p = s.c_str();
+    while (*p) {
+        char* end = nullptr;
+        const float v = std::strtof(p, &end);
+        if (end == p) { ++p; continue; }
+        out.push_back(v);
+        p = end;
+    }
+    return out;
+}
+
+}  // namespace
+
+void ClientWorkspace::lightsChanged() {
+    if (ctx_.scene) ctx_.scene->reloadMapLights();
+    if (selection_.kind == SelectionKind::MapLight && (!ctx_.scene || selection_.index >= ctx_.scene->mapLights().size())) selection_ = Selection{};
+}
+
+void ClientWorkspace::setLightProperty(size_t light, const std::string& name, const std::string& value, const std::string& type) {
+    if (!ctx_.map) return;
+    tr::LightsDocument doc(ctx_.map->lightsXml);
+    if (doc.property(light, name) == value) return;
+    if (!doc.setProperty(light, name, value, type)) return;
+    ctx_.map->lightsXml = doc.bytes();
+    lightsChanged();
+}
+
 tr::Vec3* ClientWorkspace::selectedPosition() {
+    if (selectedLight() >= 0 && ctx_.map) {
+        const std::vector<float> p = parseNumbers(tr::LightsDocument(ctx_.map->lightsXml).property(size_t(selectedLight()), "Position"));
+        if (p.size() < 3) return nullptr;
+        lightPosition_ = tr::Vec3{p[0], p[1], p[2]};
+        return &lightPosition_;
+    }
     const int k = selectedEntity();
     return ctx_.map && k >= 0 && size_t(k) < ctx_.map->map.entities.size() ? &ctx_.map->map.entities[size_t(k)].location : nullptr;
 }
@@ -120,22 +160,60 @@ float* ClientWorkspace::selectedRotation() {
 
 // Rotation about the world's vertical axis by the yaw handle - the server's yaw convention (CreateFromYawPitchRoll(r, 0, 0):
 // q = (0, sin r/2, 0, cos r/2)), applied before the entity's own rotation so any tilt it has is kept.
+namespace {
+
+tr::Quat yawRotated(const tr::Quat& q, float yaw) {
+    const float h = yaw * 0.5f;
+    const tr::Quat r{0, std::sin(h), 0, std::cos(h)};
+    return tr::Quat{r.w * q.x + r.x * q.w + r.y * q.z - r.z * q.y, r.w * q.y - r.x * q.z + r.y * q.w + r.z * q.x,
+                    r.w * q.z + r.x * q.y - r.y * q.x + r.z * q.w, r.w * q.w - r.x * q.x - r.y * q.y - r.z * q.z};
+}
+
+}  // namespace
+
 void ClientWorkspace::contentChanged() {
+    if (selectedLight() >= 0 && ctx_.map) {
+        // Lights: Position from the dragged proxy; yaw into WorldOrientation (spot / plane) or LocalOrientation (point), x y z w.
+        const size_t light = size_t(selectedLight());
+        const float p[3] = {lightPosition_.x, lightPosition_.y, lightPosition_.z};
+        tr::LightsDocument doc(ctx_.map->lightsXml);
+        const std::vector<float> current = parseNumbers(doc.property(light, "Position"));
+        if (current.size() < 3 || current[0] != p[0] || current[1] != p[1] || current[2] != p[2])
+            doc.setProperty(light, "Position", tr::LightsDocument::formatVector(p, 3));
+        if (yawHandle_ != 0.0f) {
+            const std::string key = !doc.property(light, "WorldOrientation").empty() ? "WorldOrientation" : "LocalOrientation";
+            const std::vector<float> q = parseNumbers(doc.property(light, key));
+            const tr::Quat rotated = yawRotated(q.size() >= 4 ? tr::Quat{q[0], q[1], q[2], q[3]} : tr::Quat{0, 0, 0, 1}, yawHandle_);
+            const float v[4] = {rotated.x, rotated.y, rotated.z, rotated.w};
+            doc.setProperty(light, key, tr::LightsDocument::formatVector(v, 4));
+            yawHandle_ = 0;
+        }
+        if (doc.bytes() != ctx_.map->lightsXml) {
+            ctx_.map->lightsXml = doc.bytes();
+            lightsChanged();
+        }
+        return;
+    }
     const int k = selectedEntity();
     if (!ctx_.map || k < 0 || size_t(k) >= ctx_.map->map.entities.size()) return;
     tr::MapEntity& e = ctx_.map->map.entities[size_t(k)];
     if (yawHandle_ != 0.0f) {
-        const float h = yawHandle_ * 0.5f;
-        const tr::Quat r{0, std::sin(h), 0, std::cos(h)};
-        const tr::Quat q = e.orientation;
-        e.orientation = tr::Quat{r.w * q.x + r.x * q.w + r.y * q.z - r.z * q.y, r.w * q.y - r.x * q.z + r.y * q.w + r.z * q.x,
-                                 r.w * q.z + r.x * q.y - r.y * q.x + r.z * q.w, r.w * q.w - r.x * q.x - r.y * q.y - r.z * q.z};
+        e.orientation = yawRotated(e.orientation, yawHandle_);
         yawHandle_ = 0;
     }
     entityChanged(size_t(k));
 }
 
 void ClientWorkspace::deleteSelected() {
+    if (selectedLight() >= 0 && ctx_.map) {
+        beginEdit();
+        tr::LightsDocument doc(ctx_.map->lightsXml);
+        doc.remove(size_t(selectedLight()));               // with its <Mod> blocks
+        ctx_.map->lightsXml = doc.bytes();
+        selection_ = Selection{};
+        lightsChanged();
+        return;
+    }
     const int k = selectedEntity();
     if (!ctx_.map || k < 0 || size_t(k) >= ctx_.map->map.entities.size()) return;
     beginEdit();
@@ -157,6 +235,24 @@ uint64_t ClientWorkspace::newEntityId() const {
 }
 
 void ClientWorkspace::duplicateSelected() {
+    if (selectedLight() >= 0 && ctx_.map && ctx_.scene) {
+        // New ID: one more than the largest (light modifiers attach by ID); the copy 2 m east, with the original's modifiers.
+        uint64_t largest = 0;
+        for (const tr::PlacedLight& l : ctx_.scene->mapLights()) largest = std::max(largest, l.id);
+        beginEdit();
+        tr::LightsDocument doc(ctx_.map->lightsXml);
+        const size_t source = size_t(selectedLight());
+        const size_t copy = doc.duplicate(source, largest + 1, doc.property(source, "Name") + " copy");
+        std::vector<float> p = parseNumbers(doc.property(copy, "Position"));
+        if (p.size() >= 3) {
+            p[0] += 2.0f;
+            doc.setProperty(copy, "Position", tr::LightsDocument::formatVector(p.data(), 3));
+        }
+        ctx_.map->lightsXml = doc.bytes();
+        lightsChanged();
+        selection_ = Selection{SelectionKind::MapLight, copy};
+        return;
+    }
     const int k = selectedEntity();
     if (!ctx_.map || k < 0 || size_t(k) >= ctx_.map->map.entities.size()) return;
     beginEdit();
@@ -216,32 +312,49 @@ std::filesystem::path mapFilePath(const tr::MapBundle& map) {
 
 // Writes the map in place (the client reads loose .map files): the first save copies the original to <name>.map.rasaedit-original;
 // the new file is written beside it and moved over the old one, then read back and compared.
+// Writes a file in place: the first write keeps the original as <file>.rasaedit-original; the data goes to a temporary file
+// beside it, which then replaces the old one.
+bool ClientWorkspace::writeFileWithBackup(const std::string& pathString, const tr::Bytes& data, std::string& error) {
+    namespace fs = std::filesystem;
+    const fs::path path(pathString);
+    std::error_code ec;
+    fs::path backup = path;
+    backup += ".rasaedit-original";
+    if (fs::exists(path, ec) && !fs::exists(backup, ec)) fs::copy_file(path, backup, ec);
+    if (ec) { error = "cannot keep the original as " + backup.string() + ": " + ec.message(); return false; }
+    fs::path temp = path;
+    temp += ".rasaedit-new";
+    std::FILE* f = std::fopen(temp.string().c_str(), "wb");
+    if (!f) { error = "cannot write " + temp.string(); return false; }
+    const size_t written = std::fwrite(data.data(), 1, data.size(), f);
+    std::fclose(f);
+    if (written != data.size()) { error = "short write to " + temp.string(); return false; }
+    fs::rename(temp, path, ec);
+    if (ec) { error = "cannot replace " + path.string() + ": " + ec.message(); return false; }
+    return true;
+}
+
 bool ClientWorkspace::saveMap() {
     if (!ctx_.map) return false;
     namespace fs = std::filesystem;
     const fs::path path = mapFilePath(*ctx_.map);
+    const bool mapChanged = !(ctx_.map->map.entities.size() == saved_.entities.size() && ctx_.map->map.generatedAbvs.size() == saved_.abvs.size() &&
+                              tr::writeMap(ctx_.map->map) == [&] { tr::MapFile m = ctx_.map->map; m.entities = saved_.entities; m.generatedAbvs = saved_.abvs; return tr::writeMap(m); }());
+    const bool lightsChanged = ctx_.map->lightsXml != saved_.lights;
+    std::string error;
     try {
-        const tr::Bytes data = tr::writeMap(ctx_.map->map);
-        const tr::MapFile check = tr::readMap(data);
-        if (check.entities.size() != ctx_.map->map.entities.size()) throw std::runtime_error("the written map does not read back");
-        fs::path backup = path;
-        backup += ".rasaedit-original";
-        std::error_code ec;
-        if (!fs::exists(backup, ec)) fs::copy_file(path, backup, ec);
-        if (ec) throw std::runtime_error("cannot keep the original as " + backup.string() + ": " + ec.message());
-        fs::path temp = path;
-        temp += ".rasaedit-new";
-        {
-            std::FILE* f = std::fopen(temp.string().c_str(), "wb");
-            if (!f) throw std::runtime_error("cannot write " + temp.string());
-            const size_t written = std::fwrite(data.data(), 1, data.size(), f);
-            std::fclose(f);
-            if (written != data.size()) throw std::runtime_error("short write to " + temp.string());
+        if (mapChanged) {
+            const tr::Bytes data = tr::writeMap(ctx_.map->map);
+            const tr::MapFile check = tr::readMap(data);
+            if (check.entities.size() != ctx_.map->map.entities.size()) throw std::runtime_error("the written map does not read back");
+            if (!writeFileWithBackup(path.string(), data, error)) throw std::runtime_error(error);
         }
-        fs::rename(temp, path, ec);
-        if (ec) throw std::runtime_error("cannot replace " + path.string() + ": " + ec.message());
+        if (lightsChanged) {
+            tr::readLights(ctx_.map->lightsXml);             // must still parse
+            if (!writeFileWithBackup((path.parent_path() / "lights.xml").string(), ctx_.map->lightsXml, error)) throw std::runtime_error(error);
+        }
     } catch (const std::exception& e) {
-        ctx_.setStatus(std::string("Saving the map failed, the file is unchanged: ") + e.what(), true);
+        ctx_.setStatus(std::string("Saving failed: ") + e.what(), true);
         return false;
     }
     undoStack_.clear();
@@ -249,7 +362,8 @@ bool ClientWorkspace::saveMap() {
     cleanUndoDepth_ = 0;
     cleanReachable_ = true;
     saved_ = snapshot();
-    ctx_.setStatus("Saved " + path.string() + " (" + std::to_string(ctx_.map->map.entities.size()) + " entities). The game reads it on the next map load.",
+    ctx_.setStatus(std::string("Saved") + (mapChanged ? " " + path.filename().string() : "") + (lightsChanged ? " lights.xml" : "") + " in " +
+                       path.parent_path().string() + ". The game reads them on the next map load.",
                    false);
     return true;
 }
@@ -268,9 +382,9 @@ void ClientWorkspace::drawEditMenu() {
     if (ImGui::MenuItem("Undo", "Ctrl+Z", false, !undoStack_.empty())) undo();
     if (ImGui::MenuItem("Redo", "Ctrl+Y", false, !redoStack_.empty())) redo();
     ImGui::Separator();
-    const bool selected = ctx_.map && selectedEntity() >= 0;
-    if (ImGui::MenuItem("Duplicate Entity", "Ctrl+D", false, selected)) duplicateSelected();
-    if (ImGui::MenuItem("Delete Entity", "Del", false, selected)) deleteSelected();
+    const bool selected = ctx_.map && (selectedEntity() >= 0 || selectedLight() >= 0);
+    if (ImGui::MenuItem("Duplicate", "Ctrl+D", false, selected)) duplicateSelected();
+    if (ImGui::MenuItem("Delete", "Del", false, selected)) deleteSelected();
     ImGui::Separator();
     if (ImGui::MenuItem("Save Map", "Ctrl+S", false, ctx_.map && hasUnsavedChanges())) saveMap();
     if (ImGui::MenuItem("Revert Map Changes", nullptr, false, hasUnsavedChanges())) revertMap();
@@ -282,7 +396,7 @@ void ClientWorkspace::handleShortcuts() {
         ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Z, ImGuiInputFlags_RouteGlobal))
         redo();
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_S, ImGuiInputFlags_RouteGlobal) && hasUnsavedChanges()) saveMap();
-    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_D, ImGuiInputFlags_RouteGlobal) && selectedEntity() >= 0) duplicateSelected();
+    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_D, ImGuiInputFlags_RouteGlobal) && (selectedEntity() >= 0 || selectedLight() >= 0)) duplicateSelected();
 }
 
 void ClientWorkspace::drawPanels() {
@@ -435,40 +549,93 @@ void ClientWorkspace::drawLightsPanel() {
 }
 
 void ClientWorkspace::drawLightInspector(size_t index) {
-    const tr::PlacedLight& light = ctx_.scene->mapLights()[index];
-    ImGui::Text("Light  %s", light.name.empty() ? "(unnamed)" : light.name.c_str());
-    ImGui::Text("Kind   %s%s%s", lightKindName(light.kind), light.enabled ? "" : ", disabled", light.castsShadows ? ", casts shadows" : "");
+    const tr::PlacedLight light = ctx_.scene->mapLights()[index];          // a copy: edits reload the list
+    const tr::LightsDocument doc(ctx_.map->lightsXml);
+    const float fieldWidth = ImGui::GetFontSize() * 12;
+    auto noteIfActivated = [&]() { if (ImGui::IsItemActivated()) noteEdit(); };
+    auto setFloat = [&](const char* name, float v) { setLightProperty(index, name, tr::LightsDocument::formatNumber(v), "float"); };
+    ImGui::Text("Kind   %s", lightKindName(light.kind));
     ImGui::Text("ID     %llu", static_cast<unsigned long long>(light.id));
+    char name[128];
+    std::snprintf(name, sizeof name, "%s", light.name.c_str());
+    ImGui::SetNextItemWidth(fieldWidth);
+    if (ImGui::InputText("Name", name, sizeof name)) setLightProperty(index, "Name", name, "string");
+    noteIfActivated();
+    bool enabled = light.enabled, shadows = light.castsShadows;
+    if (ImGui::Checkbox("Enabled", &enabled)) { beginEdit(); setLightProperty(index, "Enabled", enabled ? "true" : "false", "bool"); }
+    ImGui::SameLine();
+    if (ImGui::Checkbox("Casts shadows", &shadows)) { beginEdit(); setLightProperty(index, "CastsShadows", shadows ? "true" : "false", "bool"); }
+    ImGui::SetItemTooltip("Placed-light shadows are not drawn by the editor (see CLAUDE.md, Placed-light shadows).");
     ImGui::SeparatorText("Placement");
-    ImGui::Text("Position     %.2f, %.2f, %.2f", light.position.x, light.position.y, light.position.z);
+    float position[3] = {light.position.x, light.position.y, light.position.z};
+    ImGui::SetNextItemWidth(fieldWidth * 1.4f);
+    if (ImGui::DragFloat3("Position", position, 0.05f, 0, 0, "%.2f")) setLightProperty(index, "Position", tr::LightsDocument::formatVector(position, 3), "string");
+    noteIfActivated();
     const tr::Quat& q = light.worldOrientation;
-    ImGui::Text("Orientation  x %.3f  y %.3f  z %.3f  w %.3f", q.x, q.y, q.z, q.w);
+    ImGui::TextDisabled("Orientation  x %.3f  y %.3f  z %.3f  w %.3f (Ctrl+wheel in the viewport turns it about the vertical)", q.x, q.y, q.z, q.w);
     if (light.kind == tr::PlacedLight::Kind::Spot) {
         const tr::Vec3 d = normalized(light.direction());
-        ImGui::Text("Axis         %.3f, %.3f, %.3f", d.x, d.y, d.z);
+        ImGui::TextDisabled("Axis         %.3f, %.3f, %.3f", d.x, d.y, d.z);
     }
     ImGui::SeparatorText("Light");
-    ImGui::ColorButton("##colour", ImVec4(light.colour.x, light.colour.y, light.colour.z, 1), ImGuiColorEditFlags_NoTooltip);
-    ImGui::SameLine();
-    ImGui::Text("Colour  %.3f, %.3f, %.3f   intensity %.2f", light.colour.x, light.colour.y, light.colour.z, light.intensity);
-    ImGui::Text("Range %.2f m, falloff %.0f %%", light.range, light.falloffPercent * 100.0f);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Full strength to (1 - FalloffPercent) x Range, then a linear fade to the range\n"
+    const std::vector<float> colourValues = parseNumbers(doc.property(index, "Color"));
+    float colour[3] = {light.colour.x, light.colour.y, light.colour.z};
+    if (ImGui::ColorEdit3("Colour", colour, ImGuiColorEditFlags_Float)) {
+        const float rgba[4] = {colour[0], colour[1], colour[2], colourValues.size() >= 4 ? colourValues[3] : 1.0f};
+        setLightProperty(index, "Color", tr::LightsDocument::formatVector(rgba, 4), "string");
+    }
+    noteIfActivated();
+    float intensity = light.intensity, range = light.range, falloff = light.falloffPercent;
+    ImGui::SetNextItemWidth(fieldWidth);
+    if (ImGui::DragFloat("Intensity", &intensity, 0.01f, 0.0f, 100.0f, "%.3f")) setFloat("Intensity", intensity);
+    noteIfActivated();
+    ImGui::SetNextItemWidth(fieldWidth);
+    if (ImGui::DragFloat("Range (m)", &range, 0.1f, 0.0f, 1000.0f, "%.2f")) setFloat("Range", range);
+    noteIfActivated();
+    ImGui::SetNextItemWidth(fieldWidth);
+    if (ImGui::SliderFloat("Falloff", &falloff, 0.0f, 1.0f, "%.3f")) setFloat("FalloffPercent", falloff);
+    noteIfActivated();
+    ImGui::SetItemTooltip("FalloffPercent: full strength to (1 - falloff) x Range, then a linear fade to the range\n"
                           "(LightFalloff = (1 - FalloffPercent) x LightRange, tabula_rasa.exe FUN_00875360 / FUN_00879150).");
-    if (light.kind == tr::PlacedLight::Kind::Spot) ImGui::Text("Cone %.1f deg, penumbra %.1f deg (full angles)", light.coneAngle, light.penumbraAngle);
-    if (light.kind == tr::PlacedLight::Kind::Plane)
-        ImGui::Text("Width %.2f, length %.2f; falloff %.2f %.2f %.2f", light.width, light.length, light.falloffPercentVec.x,
-                    light.falloffPercentVec.y, light.falloffPercentVec.z);
-    ImGui::Text("Globe map  %s", light.globeMap.empty() ? "(none)" : light.globeMap.c_str());
+    if (light.kind == tr::PlacedLight::Kind::Spot) {
+        float cone = light.coneAngle, penumbra = light.penumbraAngle;
+        ImGui::SetNextItemWidth(fieldWidth);
+        if (ImGui::DragFloat("Cone (deg)", &cone, 0.2f, 0.0f, 179.0f, "%.1f")) setFloat("ConeAngle", cone);
+        noteIfActivated();
+        ImGui::SetNextItemWidth(fieldWidth);
+        if (ImGui::DragFloat("Penumbra (deg)", &penumbra, 0.2f, 0.0f, 179.0f, "%.1f")) setFloat("PenumbraAngle", penumbra);
+        noteIfActivated();
+    }
+    if (light.kind == tr::PlacedLight::Kind::Plane) {
+        float width = light.width, length = light.length;
+        ImGui::SetNextItemWidth(fieldWidth);
+        if (ImGui::DragFloat("Width", &width, 0.1f, 0.0f, 1000.0f, "%.2f")) setFloat("Width", width);
+        noteIfActivated();
+        ImGui::SetNextItemWidth(fieldWidth);
+        if (ImGui::DragFloat("Length", &length, 0.1f, 0.0f, 1000.0f, "%.2f")) setFloat("Length", length);
+        noteIfActivated();
+    }
+    char globe[128];
+    std::snprintf(globe, sizeof globe, "%s", light.globeMap.c_str());
+    ImGui::SetNextItemWidth(fieldWidth * 1.4f);
+    if (ImGui::InputText("Globe map", globe, sizeof globe, ImGuiInputTextFlags_EnterReturnsTrue)) {
+        beginEdit();
+        setLightProperty(index, "GlobeMapFile", globe, "string");
+    }
+    ImGui::SetItemTooltip("A cube map .dds the light projects around itself (e.g. globe_vfx_crystal.dds); empty = none. Enter applies.");
     const size_t tracks = ctx_.scene->mapLightModifierTracks(light);
     if (tracks > 0) {
         const tr::PlacedLight now = ctx_.scene->displayedMapLight(index);
-        ImGui::Text("Modifiers  %zu track(s); now: colour %.2f %.2f %.2f, intensity %.2f", tracks, now.colour.x, now.colour.y,
-                    now.colour.z, now.intensity);
+        ImGui::TextDisabled("Modifiers  %zu track(s) (kept, edited in lights.xml only); now: colour %.2f %.2f %.2f, intensity %.2f", tracks,
+                            now.colour.x, now.colour.y, now.colour.z, now.intensity);
     } else {
         ImGui::TextDisabled("Modifiers  none");
     }
     ImGui::Spacing();
+    if (ImGui::Button("Duplicate")) duplicateSelected();
+    ImGui::SameLine();
+    if (ImGui::Button("Delete")) deleteSelected();
+    ImGui::SameLine();
     if (ImGui::Button("Show in viewport")) viewport_.focusOn(ctx_, selection_);
 }
 

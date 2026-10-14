@@ -429,6 +429,28 @@ int main() {
             check(saved && !client.hasUnsavedChanges() && reread.entities.size() == count && reread.entities[0].location.x == edited.location.x &&
                       reread.entities[0].orientation.y == edited.orientation.y && backup,
                   "map saved to a copy, read back with the edits, original kept");
+            // Lights: move light 0, duplicate it; save writes lights.xml (copied into the test folder first) and keeps the original.
+            fs::copy_file(fs::path(realFolder) / "lights.xml", copyFolder / "lights.xml", ec);
+            const size_t lightCount = ctx.scene->mapLights().size();
+            if (lightCount > 0) {
+                client.selection_ = Selection{SelectionKind::MapLight, 0};
+                const tr::Vec3 lightBefore = ctx.scene->mapLights()[0].position;
+                client.beginEdit();
+                tr::Vec3* lp = client.selectedPosition();
+                if (lp) lp->x += 4.0f;
+                client.contentChanged();
+                client.duplicateSelected();
+                const bool duplicated = ctx.scene->mapLights().size() == lightCount + 1 && client.selection_.index == lightCount;
+                const bool lightSaved = client.saveMap();
+                std::vector<tr::PlacedLight> reread;
+                try { reread = tr::readLights(tr::readFile((copyFolder / "lights.xml").string())); } catch (const std::exception&) {}
+                const bool lightBackup = fs::exists(copyFolder / "lights.xml.rasaedit-original", ec);
+                std::printf("      lights: %zu -> %zu read back, light 0 x %.2f -> %.2f, backup %d\n", lightCount, reread.size(), lightBefore.x,
+                            reread.empty() ? 0.0f : reread[0].position.x, lightBackup ? 1 : 0);
+                check(lp && duplicated && lightSaved && reread.size() == lightCount + 1 && std::fabs(reread[0].position.x - (lightBefore.x + 4.0f)) < 1e-3f &&
+                          lightBackup,
+                      "light moved, duplicated, saved to a copy and read back");
+            }
             ctx.map->folder = realFolder;
         }
 

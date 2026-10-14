@@ -894,6 +894,48 @@ int main(int argc, char** argv) {
             }
             std::printf("map round trip: %zu of %zu maps byte-identical\n", identical, maps);
         }
+        // RASA_LIGHTSEDITTEST=1: for every map's lights.xml - tr::LightsDocument finds as many lights as readLights; moving light 0,
+        // duplicating it (with its modifiers) and removing the copy read back as expected; an untouched document is byte-identical.
+        if (envValue("RASA_LIGHTSEDITTEST")) {
+            size_t files = 0, passed = 0;
+            std::error_code ec;
+            for (const auto& dir : std::filesystem::directory_iterator(std::filesystem::path(argv[1]) / "data" / "maps", ec)) {
+                const auto path = dir.path() / "lights.xml";
+                if (!std::filesystem::exists(path, ec)) continue;
+                ++files;
+                try {
+                    const tr::Bytes xml = tr::readFile(path.string());
+                    tr::LightsDocument doc(xml);
+                    const auto lights = tr::readLights(xml);
+                    bool ok = doc.bytes() == xml && doc.count() == lights.size();
+                    if (ok && doc.count() > 0) {
+                        const size_t modsBefore = tr::readLightModifiers(xml).size();
+                        const float p[3] = {lights[0].position.x + 3.0f, lights[0].position.y, lights[0].position.z - 2.0f};
+                        doc.setProperty(0, "Position", tr::LightsDocument::formatVector(p, 3));
+                        const auto moved = tr::readLights(doc.bytes());
+                        ok = moved.size() == lights.size() && std::fabs(moved[0].position.x - p[0]) < 1e-4f && std::fabs(moved[0].position.z - p[2]) < 1e-4f;
+                        const size_t copy = doc.duplicate(0, 999999999999ull, "RasaEdit copy");
+                        const auto duplicated = tr::readLights(doc.bytes());
+                        const auto modsCopy = tr::readLightModifiers(doc.bytes());
+                        size_t copyMods = 0, origMods = 0;
+                        for (const auto& m : modsCopy) {
+                            if (m.lightId == 999999999999ull) ++copyMods;
+                            if (m.lightId == lights[0].id && lights[0].id != 0) ++origMods;
+                        }
+                        ok = ok && copy == lights.size() && duplicated.size() == lights.size() + 1 && duplicated.back().name == "RasaEdit copy" &&
+                             duplicated.back().id == 999999999999ull && copyMods == origMods && modsCopy.size() == modsBefore + copyMods;
+                        doc.remove(copy);
+                        const auto removed = tr::readLights(doc.bytes());
+                        ok = ok && removed.size() == lights.size() && tr::readLightModifiers(doc.bytes()).size() == modsBefore;
+                    }
+                    if (ok) ++passed;
+                    else std::printf("lights edit test FAILED: %s\n", dir.path().filename().string().c_str());
+                } catch (const std::exception& e) {
+                    std::printf("lights edit test ERROR: %s: %s\n", dir.path().filename().string().c_str(), e.what());
+                }
+            }
+            std::printf("lights edit test: %zu of %zu lights.xml files passed\n", passed, files);
+        }
         if (const char* frames = envValue("RASA_PROFILE")) {
             const int count = std::max(1, std::atoi(frames));
             struct Times { double load, particles, lights, queue, record, gpu, total; };

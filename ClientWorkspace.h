@@ -52,7 +52,13 @@ private:
     struct MapEdit {
         std::vector<tr::MapEntity> entities;
         std::vector<tr::MapGeneratedAbv> abvs;
+        tr::Bytes lights;                            // the map's lights.xml text
     };
+    int selectedLight() const { return selection_.kind == SelectionKind::MapLight ? int(selection_.index) : -1; }
+    void setLightProperty(size_t light, const std::string& name, const std::string& value, const std::string& type);
+    void lightsChanged();                            // after the lights.xml text changed
+    tr::Vec3 lightPosition_;                         // selectedPosition() for a light: synced from its Position, written back
+    bool writeFileWithBackup(const std::string& path, const tr::Bytes& data, std::string& error);
     MapEdit snapshot() const;
     void restore(const MapEdit& edit);
     void noteEdit();                                 // one undo step per edited inspector field

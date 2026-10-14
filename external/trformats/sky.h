@@ -146,6 +146,35 @@ struct LightModifier {
     std::vector<LightModifierTrack> tracks;
 };
 std::vector<LightModifier> readLightModifiers(const Bytes& data);
+
+// A map's lights.xml edited as text, so everything the editor does not model (property order, formatting, unknown properties,
+// the <Mods> keys) stays as it was. Light n is the n-th <Light> element of <Lights> - the same order readLights returns them in.
+// Changing a property rewrites only that property's value="..."; duplicating copies the <Light> block (and the light's <Mod>
+// blocks, by ID) to the end of its section; removing deletes the block and its <Mod> blocks. Numbers are written like the
+// shipped files ("%.7f", vectors ", "-separated).
+class LightsDocument {
+public:
+    explicit LightsDocument(const Bytes& xml);
+    size_t count() const { return lights_.size(); }
+    std::string property(size_t light, const std::string& name) const;              // "" if absent
+    // Replaces the property's value, or adds <property name value type> before the light's </PropertyObject>. false if the light
+    // has no PropertyObject.
+    bool setProperty(size_t light, const std::string& name, const std::string& value, const std::string& type = "string");
+    size_t duplicate(size_t light, uint64_t newId, const std::string& newName);       // returns the copy's index
+    void remove(size_t light);
+    Bytes bytes() const { return Bytes(text_.begin(), text_.end()); }
+    static std::string formatNumber(float v);
+    static std::string formatVector(const float* v, size_t n);
+
+private:
+    struct Span {
+        size_t begin = 0, end = 0;                   // whole lines: indentation to the newline after </Light>
+    };
+    void scan();
+    std::vector<Span> modsOf(uint64_t id) const;     // <Mod LightID="id"> blocks (none for id 0)
+    std::string text_;
+    std::vector<Span> lights_;
+};
 float lightModifierWeight(const LightModifierTrack& track, float elapsedSeconds);   // looping, as above
 
 // overrides: property name -> value, applied over every light's own properties (as the engine sets a contact point's

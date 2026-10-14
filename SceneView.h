@@ -118,6 +118,8 @@ public:
     // the affected entities' particle systems, which advanceParticles restarts at the new place.
     void refreshEntity(size_t entityIndex);
     void rebuildEntities();
+    // After the map's lights.xml text changed (Client workspace light editing): the lights, their modifiers and globe maps again.
+    void reloadMapLights();
     // The local bounds of a map entity's loaded model (false while loading or without a model) - a new class's bounds.
     bool entityModelBounds(size_t entityIndex, tr::Bounds& bounds) const;
     // Diagnostic: world skin matrix (placement x skin(time)) of every skeleton bone of an animated map entity's model, by bone

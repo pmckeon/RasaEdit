@@ -337,6 +337,158 @@ std::vector<PlacedLight> readLights(const Bytes& data, const std::map<std::strin
     return out;
 }
 
+// ------------------------------------------------------------------------------------------
+// LightsDocument
+// ------------------------------------------------------------------------------------------
+LightsDocument::LightsDocument(const Bytes& xml) : text_(xml.begin(), xml.end()) { scan(); }
+
+namespace {
+
+size_t lineStart(const std::string& s, size_t at) {
+    while (at > 0 && s[at - 1] != '\n') --at;
+    return at;
+}
+
+size_t lineEnd(const std::string& s, size_t at) {         // just past the newline (or the end)
+    const size_t nl = s.find('\n', at);
+    return nl == std::string::npos ? s.size() : nl + 1;
+}
+
+std::string escapeXml(const std::string& v) {
+    std::string out;
+    for (char c : v) {
+        if (c == '&') out += "&amp;";
+        else if (c == '<') out += "&lt;";
+        else if (c == '>') out += "&gt;";
+        else if (c == '"') out += "&quot;";
+        else out += c;
+    }
+    return out;
+}
+
+}  // namespace
+
+void LightsDocument::scan() {
+    lights_.clear();
+    const size_t open = text_.find("<Lights>");
+    if (open == std::string::npos) return;
+    const size_t close = text_.find("</Lights>", open);
+    const size_t limit = close == std::string::npos ? text_.size() : close;
+    size_t at = open + 8;
+    for (;;) {
+        size_t start = text_.find("<Light ", at);
+        const size_t startBare = text_.find("<Light>", at);
+        if (startBare < start) start = startBare;
+        if (start == std::string::npos || start >= limit) break;
+        const size_t end = text_.find("</Light>", start);
+        if (end == std::string::npos || end >= limit) break;
+        lights_.push_back(Span{lineStart(text_, start), lineEnd(text_, end + 8)});
+        at = end + 8;
+    }
+}
+
+std::string LightsDocument::property(size_t light, const std::string& name) const {
+    if (light >= lights_.size()) return "";
+    const Span& s = lights_[light];
+    const std::string key = "<property name=\"" + name + "\"";
+    const size_t p = text_.find(key, s.begin);
+    if (p == std::string::npos || p >= s.end) return "";
+    const size_t v = text_.find("value=\"", p);
+    if (v == std::string::npos || v >= s.end) return "";
+    const size_t e = text_.find('"', v + 7);
+    return e == std::string::npos ? "" : text_.substr(v + 7, e - v - 7);
+}
+
+bool LightsDocument::setProperty(size_t light, const std::string& name, const std::string& value, const std::string& type) {
+    if (light >= lights_.size()) return false;
+    const Span s = lights_[light];
+    const std::string escaped = escapeXml(value);
+    const std::string key = "<property name=\"" + name + "\"";
+    const size_t p = text_.find(key, s.begin);
+    if (p != std::string::npos && p < s.end) {
+        const size_t v = text_.find("value=\"", p);
+        const size_t e = v == std::string::npos ? std::string::npos : text_.find('"', v + 7);
+        if (v == std::string::npos || e == std::string::npos || e >= s.end) return false;
+        text_.replace(v + 7, e - v - 7, escaped);
+    } else {
+        const size_t closeObject = text_.find("</PropertyObject>", s.begin);
+        if (closeObject == std::string::npos || closeObject >= s.end) return false;
+        // Indent like the previous property line.
+        const size_t previous = text_.rfind("<property ", closeObject);
+        const size_t indentStart = previous == std::string::npos ? lineStart(text_, closeObject) : lineStart(text_, previous);
+        const std::string indent = text_.substr(indentStart, (previous == std::string::npos ? closeObject : previous) - indentStart);
+        const std::string newline = text_.find("\r\n") != std::string::npos ? "\r\n" : "\n";
+        const std::string line = indent + "<property name=\"" + name + "\" value=\"" + escaped + "\" type=\"" + type + "\" />" + newline;
+        text_.insert(lineStart(text_, closeObject), line);
+    }
+    scan();
+    return true;
+}
+
+std::vector<LightsDocument::Span> LightsDocument::modsOf(uint64_t id) const {
+    std::vector<Span> out;
+    if (id == 0) return out;
+    const std::string key = "<Mod LightID=\"" + std::to_string(id) + "\"";
+    for (size_t at = text_.find(key); at != std::string::npos; at = text_.find(key, at + key.size())) {
+        const size_t end = text_.find("</Mod>", at);
+        if (end == std::string::npos) break;
+        out.push_back(Span{lineStart(text_, at), lineEnd(text_, end + 6)});
+    }
+    return out;
+}
+
+size_t LightsDocument::duplicate(size_t light, uint64_t newId, const std::string& newName) {
+    if (light >= lights_.size()) return size_t(-1);
+    const uint64_t oldId = std::strtoull(property(light, "ID").c_str(), nullptr, 10);
+    std::vector<std::string> mods;
+    for (const Span& m : modsOf(oldId)) {
+        std::string block = text_.substr(m.begin, m.end - m.begin);
+        const std::string from = "LightID=\"" + std::to_string(oldId) + "\"", to = "LightID=\"" + std::to_string(newId) + "\"";
+        block.replace(block.find(from), from.size(), to);
+        mods.push_back(block);
+    }
+    const std::string copy = text_.substr(lights_[light].begin, lights_[light].end - lights_[light].begin);
+    text_.insert(lights_.back().end, copy);
+    scan();
+    const size_t index = lights_.size() - 1;
+    setProperty(index, "ID", std::to_string(newId));
+    setProperty(index, "Name", newName);
+    if (!mods.empty()) {
+        const size_t closeMods = text_.find("</Mods>");
+        if (closeMods != std::string::npos) {
+            size_t at = lineStart(text_, closeMods);
+            for (const std::string& m : mods) {
+                text_.insert(at, m);
+                at += m.size();
+            }
+        }
+        scan();
+    }
+    return index;
+}
+
+void LightsDocument::remove(size_t light) {
+    if (light >= lights_.size()) return;
+    const uint64_t id = std::strtoull(property(light, "ID").c_str(), nullptr, 10);
+    std::vector<Span> spans = modsOf(id);
+    spans.push_back(lights_[light]);
+    std::sort(spans.begin(), spans.end(), [](const Span& a, const Span& b) { return a.begin > b.begin; });   // back to front
+    for (const Span& s : spans) text_.erase(s.begin, s.end - s.begin);
+    scan();
+}
+
+std::string LightsDocument::formatNumber(float v) {
+    char buffer[32];
+    std::snprintf(buffer, sizeof buffer, "%.7f", double(v));
+    return buffer;
+}
+
+std::string LightsDocument::formatVector(const float* v, size_t n) {
+    std::string out;
+    for (size_t k = 0; k < n; ++k) out += (k ? ", " : "") + formatNumber(v[k]);
+    return out;
+}
+
 std::vector<LightModifier> readLightModifiers(const Bytes& data) {
     const XmlNode root = XmlParser(data).document();
     std::vector<LightModifier> out;
