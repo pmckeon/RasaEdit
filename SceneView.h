@@ -371,6 +371,12 @@ private:
         int32_t current = -1;           // index in ServerPlacement::idles; -1 = not started
         uint32_t random = 1;            // Park-Miller state
         float delay = 0;                // seconds, drawn once per sequence (objectanimationmgr.py: one delay per PlayObjectAnimation)
+        // The last pose's palettes (base skeleton, its posed bones, each part's), reused while the pose is unchanged.
+        float cacheTime = -1;
+        const tr::Animation* cacheAnimation = nullptr;
+        size_t cacheParts = 0;
+        std::vector<Mat4> baseSkin, posed;
+        std::vector<std::pair<const Model*, std::vector<Mat4>>> partSkins;
     };
     struct ServerPlacement {
         Selection selection;

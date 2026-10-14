@@ -2129,13 +2129,31 @@ bool SceneView::poseIdle(const ServerPlacement& s) {
         t = s.idleType == 4 ? animation->duration : std::min(now - q.start, animation->duration);
     }
     const Model& base = *s.model;
-    skinOverride_[&base] = renderer_.addBones(skinMatrices(base.skeleton, *animation, t, nullptr, &idlePosed_, &idleTracks(base, *animation)));
-    for (const AvatarDraw& part : s.avatarParts) {
-        const Model* m = part.model;
-        if (!m || !m->loaded || !m->avatarPose || m->skeleton.bones.empty() || skinOverride_.count(m)) continue;
-        skinOverride_[m] = renderer_.addBones(skinMatrices(m->skeleton, *animation, t, nullptr, nullptr, &idleTracks(*m, *animation), &idlePosed_,
-                                                           &poseBoneIndices(*m, base)));
+    // The palettes are kept while the pose does not change (the clock stopped, or the same time drawn twice); parts that finish
+    // loading invalidate them.
+    size_t loadedParts = 0;
+    for (const AvatarDraw& part : s.avatarParts)
+        if (part.model && part.model->loaded) ++loadedParts;
+    if (q.cacheTime != t || q.cacheAnimation != animation || q.cacheParts != loadedParts) {
+        q.baseSkin = skinMatrices(base.skeleton, *animation, t, nullptr, &q.posed, &idleTracks(base, *animation));
+        q.partSkins.clear();
+        for (const AvatarDraw& part : s.avatarParts) {
+            const Model* m = part.model;
+            if (!m || !m->loaded || !m->avatarPose || m->skeleton.bones.empty()) continue;
+            bool seen = false;
+            for (const auto& p : q.partSkins) seen = seen || p.first == m;
+            if (!seen)
+                q.partSkins.emplace_back(m, skinMatrices(m->skeleton, *animation, t, nullptr, nullptr, &idleTracks(*m, *animation), &q.posed,
+                                                         &poseBoneIndices(*m, base)));
+        }
+        q.cacheTime = t;
+        q.cacheAnimation = animation;
+        q.cacheParts = loadedParts;
     }
+    idlePosed_ = q.posed;
+    skinOverride_[&base] = renderer_.addBones(q.baseSkin);
+    for (const auto& p : q.partSkins)
+        if (!skinOverride_.count(p.first)) skinOverride_[p.first] = renderer_.addBones(p.second);
     return true;
 }
 
