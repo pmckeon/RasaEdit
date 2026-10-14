@@ -938,7 +938,7 @@ WorldContent WorldDatabase::loadMap(int32_t mapContextId) {
             r.mapContextId = s.int32(1);
             r.regionId = s.int32(2);
             r.area = AreaShape{s.int32(3), s.vec3(4), s.real(7), s.real(8), s.real(9), s.real(10), s.real(11)};
-            r.underground = s.integer(12) != 0;
+            r.underground = s.int32(12);
             r.enabled = s.integer(13) != 0;
             r.comment = s.text(14);
             content.regions.push_back(r);
@@ -1499,7 +1499,7 @@ bool WorldDatabase::save(const WorldContent& saved, const WorldContent& edited, 
             s.bindReal(8, r.area.halfZ);
             s.bindReal(9, r.area.minY);
             s.bindReal(10, r.area.maxY);
-            s.bindInt(11, r.underground ? 1 : 0);
+            s.bindInt(11, r.underground);
             s.bindInt(12, r.enabled ? 1 : 0);
             s.bindText(13, r.comment);
             s.bindInt(14, r.id);

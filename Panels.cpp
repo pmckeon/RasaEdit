@@ -406,7 +406,7 @@ void OverviewPanel::draw(EditorContext& ctx, const char* title, const OverviewLa
                 drawArea(server.missionAreas[k].area, toU32(markerColour::missionArea), Selection{SelectionKind::MissionArea, k});
         if (layers.showRegions)
             for (size_t k = 0; k < server.regions.size(); ++k)
-                drawArea(server.regions[k].area, toU32(server.regions[k].underground ? markerColour::regionUnderground : markerColour::region), Selection{SelectionKind::Region, k});
+                drawArea(server.regions[k].area, toU32(server.regions[k].underground == 1 ? markerColour::regionUnderground : markerColour::region), Selection{SelectionKind::Region, k});
     }
 
     if (hasSelectedPosition) {

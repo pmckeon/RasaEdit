@@ -153,6 +153,22 @@ int main() {
             std::printf("      radar at Ranja Cavern %d, elsewhere %d; region 33 map %d of %d tiles\n", inside, outside,
                         cavern ? cavern->tilesPresent() : -1, cavern ? cavern->tilesTotal() : -1);
             check(inside == 33 && outside == 0 && cavern && cavern->tilesPresent() > 0, "radar region follows the camera (Ranja Cavern 33)");
+            // The in-game switch at the cave mouth (2026-10-14 capture, Debug Tracker positions where the player stood still): the
+            // name and radar say Concordia Wilderness at x -489.92 / -484.42 / -481.37 and Ranja Cavern at -478.72 / -475.07.
+            struct Spot { float x, y, z; int32_t region; };
+            const Spot spots[] = {{-489.92090f, 213.91177f, -405.16742f, 0}, {-484.42346f, 214.04274f, -404.67984f, 0},
+                                  {-481.37015f, 214.71899f, -404.62796f, 0}, {-478.71671f, 214.82982f, -404.46054f, 33},
+                                  {-475.07239f, 214.95740f, -403.85135f, 33}};
+            bool allMatch = true;
+            for (const Spot& spot : spots) {
+                ctx.scene->camera().position = tr::Vec3{spot.x, spot.y, spot.z};
+                const int32_t got = ctx.radarRegionAtCamera();
+                float ground = 0;
+                ctx.map->terrain.heightAtWorld(spot.x, spot.z, ground);
+                std::printf("      x %.2f y %.2f: terrain %.2f -> region %d (game %d)\n", spot.x, spot.y, ground, got, spot.region);
+                allMatch = allMatch && got == spot.region;
+            }
+            check(allMatch, "radar region switches at the cave mouth as in game");
             server.overview_.radarChoice_ = 33;
             frames(editor, device, 2);
             server.overview_.radarChoice_ = -1;

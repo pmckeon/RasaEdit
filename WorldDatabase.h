@@ -192,7 +192,10 @@ struct MapRegion {
     int32_t mapContextId = 0;
     int32_t regionId = 0;
     AreaShape area;
-    bool underground = false;
+    // map_region.underground (Rasa.NET MapRegionEntry): 0 any, 1 underground only, 2 surface only. "Underground" is the
+    // player standing on navmesh flagged as lying under the terrain (Rasa.NavMesh NavMeshBuilder.IsUnderTerrain: most of the
+    // polygon's corners more than 2 m below the heightmap) - it keeps a cavern's rectangle off the hillside above it.
+    int32_t underground = 0;
     bool enabled = true;
     std::string comment;
 };

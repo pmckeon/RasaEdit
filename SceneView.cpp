@@ -485,10 +485,21 @@ void SceneView::readRegionSettings() {
 std::vector<int32_t> SceneView::regionsAtCamera() const {
     // regionmanager.py OnUpdateRegions: the regions the player is in (server map_region volumes), then region 0
     // (DEFAULT_REGION_ID) appended, stably sorted by MapRegion priority, highest first.
+    // A volume counts as Rasa.NET's RegionManager decides (Structures/MapRegion.Contains): enabled, the height band, the shape, and
+    // its underground mode - 1 only underground, 2 only on the surface, "underground" being navmesh more than 2 m below the terrain
+    // (NavMeshBuilder.IsUnderTerrain, NavMeshFlags.UndergroundDepth). Here the camera is tested against the terrain (no navmesh;
+    // the camera stands for the player - APPROXIMATE). Verified at Ranja Cavern (region 33, underground only): in game the name and
+    // radar switch at the cave mouth (x -482 .. -476), not at the box edge (x -445).
     std::vector<int32_t> inside;
+    float ground = 0;
+    const bool underground = map_.hasTerrain && map_.terrain.heightAtWorld(camera_.position.x, camera_.position.z, ground) &&
+                             camera_.position.y < ground - 2.0f;
     if (serverContent_)
-        for (const MapRegion& r : serverContent_->regions)
-            if (r.enabled && r.regionId != 0 && insideArea(r.area, camera_.position)) inside.push_back(r.regionId);
+        for (const MapRegion& r : serverContent_->regions) {
+            if (!r.enabled || r.regionId == 0 || !insideArea(r.area, camera_.position)) continue;
+            if ((r.underground == 1 && !underground) || (r.underground == 2 && underground)) continue;
+            inside.push_back(r.regionId);
+        }
     inside.push_back(0);
     const auto priority = [&](int32_t id) { const auto it = regionPriority_.find(id); return it == regionPriority_.end() ? 0 : it->second; };
     std::stable_sort(inside.begin(), inside.end(), [&](int32_t a, int32_t b) { return priority(a) > priority(b); });
@@ -1332,7 +1343,8 @@ void SceneView::loadModel(const std::string& name, Model& model) {
             if (refraction) glowUvSet = 1;                 // TRRefract: the normal map is on UV set 1 (vertex shader: v4)
             // TR* deferred materials (stage 3): which maps fill slots 1 and 2, and their UV sets (vertex shader array element =
             // the *TexCoord parameters, e.g. vsDiffDetDecEnvDeferredArray[DetailTexCoord x 3 + DecalTexCoord]).
-            const TrDescription trDesc = (!additive && !translucent && !water) ? trDescription(effect) : TrDescription{};
+            const TrDescription trDesc = (!additive && !translucent && !water) ? trDescription(effect) : TrDescription{};
+
             auto parameterInt = [&](const char* key, int fallback) {
                 for (const tr::GeoParameter& gp : piece.parameters)
                     if (gp.key == key) return std::atoi(gp.value.c_str());
@@ -3515,7 +3527,7 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
         s.area = true;
         s.shape = content->regions[k].area;
         s.position = s.shape.position;
-        s.colour = content->regions[k].underground ? markerColour::regionUnderground : markerColour::region;
+        s.colour = content->regions[k].underground == 1 ? markerColour::regionUnderground : markerColour::region;
         serverPlacements_.push_back(s);
     }
     for (size_t k = 0; k < content->missionAreas.size(); ++k) {

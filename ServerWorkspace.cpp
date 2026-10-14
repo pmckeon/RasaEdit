@@ -448,7 +448,8 @@ void ServerWorkspace::drawInspectorContent() {
             else ImGui::Text("Circle, radius %.1f m", a->radius);
             ImGui::Text("Height %.0f .. %.0f", a->minY, a->maxY);
             if (selection_.kind == SelectionKind::Region)
-                ImGui::Text("%s, %s", serverContent_.regions[i].underground ? "underground" : "surface", serverContent_.regions[i].enabled ? "enabled" : "disabled");
+                ImGui::Text("%s, %s", serverContent_.regions[i].underground == 1 ? "underground only" : serverContent_.regions[i].underground == 2 ? "surface only" : "anywhere",
+                            serverContent_.regions[i].enabled ? "enabled" : "disabled");
             break;
         }
         default: break;
@@ -1356,8 +1357,9 @@ void ServerWorkspace::drawServerObjectEditor() {
             ImGui::TextDisabled("id %lld", static_cast<long long>(r.id));
             integer("Region id", r.regionId);
             area(r.area, true);
-            flag("Underground", r.underground);
-            ImGui::SameLine();
+            choice("Where", r.underground, {"anywhere", "underground only", "surface only"});
+            ImGui::SetItemTooltip("map_region.underground: Rasa.NET counts the volume only for a player underground (on navmesh more than 2 m\n"
+                                  "below the terrain - a cave or tunnel) or only on the surface. The editor tests the camera against the terrain.");
             flag("Enabled", r.enabled);
             text("Comment", r.comment);
             break;
