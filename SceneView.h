@@ -184,7 +184,6 @@ public:
     bool materialMaps = true;               // normal and gloss maps (Pal* materials); off for comparison
     bool environmentMaps = true;
     bool showStateEffects = true;           // server objects' use-state particles and lights (special-FX packages)
-    bool animateSkins = true;               // play blended skinned pieces of animated map objects (GPU skinning)
     std::string hiddenGroup;                // debug: skip model pieces of this GPCE group; "!<group>" draws only it
     int onlyEntity = -1;                    // debug: draw only this map entity (-1 = all)            // environment cube reflections (Pal*Env*); off for comparison
     int entityFirst = -1, entityLast = -1;  // debug: draw only map entities in [first, last) (-1 = all)
@@ -196,10 +195,15 @@ public:
     bool showSun = true;                    // the sky's sun/moon
     bool showShadows = true;                // sun shadows
     const std::vector<tr::PlacedLight>& mapLights() const { return mapLights_; }
-    // Light modifier time in seconds (advanced by advanceLights; the game's tracks loop), and the switch.
+    // World animation clock in seconds (advanceLights): light modifiers, object and material animations, creature idles. With
+    // `animate` off the clock and the particle systems stand still (everything keeps its current pose). animateLights off
+    // (diagnostic) draws placed lights without their modifiers.
     float lightTime = 0;
+    bool animate = true;
     bool animateLights = true;
-    void advanceLights(float dt) { lightTime += std::clamp(dt, 0.0f, 0.1f); }
+    void advanceLights(float dt) {
+        if (animate) lightTime += std::clamp(dt, 0.0f, 0.1f);
+    }
     const std::string& mapLightsError() const { return mapLightsError_; }
     // The frame lighting for the current sky, time and toggles (also used by queueDraws).
     SceneLighting lighting() const;
@@ -313,13 +317,13 @@ private:
         bool avatarPose = false;               // a creature's idle pose ("%" key): posed per placement (ServerPlacement::idles)
         tr::GeoModel poseSkeleton;             // avatar parts: the base body's bones they are posed on (empty: own bones)
         mutable std::vector<Mat4> frameSkin;   // currentSkin's cache
-        mutable uint64_t frameSkinFrame = 0;
+        mutable float frameSkinTime = -1;      // lightTime of frameSkin (-1: none)
     };
     // Per-piece matrices of an animated model at time t (loops over the animation's duration); empty if not animated.
     std::vector<Mat4> animatedPieceMatrices(const Model& model, float time) const;
     // Before drawing a piece: GPU skinning on (its model's bone palette at lightTime, uploaded once per frame) or off.
     void setPieceSkin(const ModelPiece& piece);
-    // The model's skin matrices this frame: animated objects at lightTime (frame 0 with animateSkins off), else as loaded.
+    // The model's skin matrices this frame: animated objects at lightTime (held while the clock is stopped), else as loaded.
     const std::vector<Mat4>& currentSkin(const Model& model) const;
     // AnisoMaterial::normalMatrix for a piece drawn with this placement (entity world, without per-piece animation).
     Mat4 anisoNormalMatrix(const Model* model, const ModelPiece& piece, const Mat4& placementWorld, const Mat4& pieceWorld) const;

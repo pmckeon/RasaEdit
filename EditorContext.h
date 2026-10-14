@@ -33,6 +33,7 @@ struct ViewSettings {
     bool showParticles = true;   // particle systems (.pfx) on models' contact points
     bool showClutter = true;     // terrain clutter (tribbles: grass, ferns, flowers, debris)
     bool gameDistances = true;   // map entities culled by distance per culling layer, as the game does
+    bool animate = true;         // world animation: light modifiers, object / material animations, creature idles, particles
     bool showPlaceholders = true;
     float drawDistance = 1200.0f;
     float flySpeed = 20.0f;      // metres per second

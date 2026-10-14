@@ -417,6 +417,7 @@ void ViewportPanel::applyOptions(const ViewSettings& view, SceneView& scene) con
     scene.showParticles = view.showParticles;
     scene.showClutter = view.showClutter;
     scene.gameDistances = view.gameDistances;
+    scene.animate = view.animate;
     scene.showPlaceholders = view.showPlaceholders;
     scene.showServer = options.showServer;
     scene.showMissionAreas = options.showMissionAreas;
@@ -459,6 +460,11 @@ void ViewportPanel::draw(EditorContext& ctx, const char* title, Selection& selec
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Particle systems (.pfx) on models' contact points, within %.0f m: %zu running, %zu particles", scene.particleDistance,
                           scene.liveParticleSystems(), scene.liveParticles());
+    ImGui::SameLine();
+    ImGui::Checkbox("Animation", &ctx.view.animate);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Play the world's animation: moving objects (holograms, rotating lights, water), creatures' idles, light\n"
+                          "flicker and particles. Off stops everything where it is.");
     ImGui::SameLine();
     ImGui::Checkbox("Clutter", &ctx.view.showClutter);
     if (ImGui::IsItemHovered())

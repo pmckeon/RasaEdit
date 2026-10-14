@@ -1738,7 +1738,7 @@ void SceneView::advanceParticles(float dt) {
         liveParticles_.clear();
         return;
     }
-    dt = std::clamp(dt, 0.0f, 0.1f);
+    dt = animate ? std::clamp(dt, 0.0f, 0.1f) : 0.0f;     // paused: the systems keep their particles where they are
     // Drop systems the camera has left behind (with some slack so they do not flicker at the edge).
     const float keep = particleDistance * 1.25f;
     liveParticles_.erase(std::remove_if(liveParticles_.begin(), liveParticles_.end(), [&](const LiveParticles& l) {
@@ -1830,10 +1830,10 @@ bool SceneView::animatedUvTransforms(const Model& model, const ModelPiece& piece
 
 const std::vector<Mat4>& SceneView::currentSkin(const Model& model) const {
     if (model.animation.duration <= 0.0f || model.skeleton.bones.empty()) return model.restSkin;
-    if (model.frameSkinFrame != frameNumber_) {
-        const float t = animateSkins ? std::fmod(std::max(lightTime, 0.0f), model.animation.duration) : 0.0f;
+    if (model.frameSkinTime != lightTime) {          // recomputed only while the clock runs
+        const float t = std::fmod(std::max(lightTime, 0.0f), model.animation.duration);
         model.frameSkin = skinMatrices(model.skeleton, model.animation, t, nullptr, nullptr, &model.boneTracks);
-        model.frameSkinFrame = frameNumber_;
+        model.frameSkinTime = lightTime;
     }
     return model.frameSkin;
 }
@@ -1923,10 +1923,11 @@ const std::vector<int>& SceneView::poseBoneIndices(const Model& part, const Mode
 // animation ends the next is drawn by weighted random over the family's frequencies (characteranimationmgr.py
 // UpdateAnimations -> PlayAnimationFamily(chain=1, randStartFrame=0) -> ChainAnimationFamily, _SelectAnimation). The editor uses
 // its own random stream (Park-Miller, seeded by the placement) on the light clock, so the order is not the game's; a clock that
-// runs backwards restarts the sequence. Fills skinOverride_ (the base model's and each part's palette) and idlePosed_ (the base
-// skeleton's posed bones, for accessory sockets). False: draw the models' stored first frame.
+// runs backwards restarts the sequence (with the clock stopped - SceneView::animate off - the creature holds its pose). Fills
+// skinOverride_ (the base model's and each part's palette) and idlePosed_ (the base skeleton's posed bones, for accessory sockets).
+// False: draw the models' stored first frame.
 bool SceneView::poseIdle(const ServerPlacement& s) {
-    if (!animateSkins || s.idles.empty() || !s.model || !s.model->avatarPose || s.model->skeleton.bones.empty()) return false;
+    if (s.idles.empty() || !s.model || !s.model->avatarPose || s.model->skeleton.bones.empty()) return false;
     IdleSequence& q = s.idle;
     int32_t total = 0;
     for (const tr::GameData::FamilyAnimation& a : s.idles) total += std::max(a.frequency, 0);

@@ -733,12 +733,11 @@ int main(int argc, char** argv) {
         // RASA_SELECT=<map entity index>: draw that entity highlighted, as the editor shows a selection.
         Selection highlighted{};
         if (const char* group = envValue("RASA_HIDEGROUP")) scene.hiddenGroup = group;   // skip model pieces of one GPCE group
-        if (envValue("RASA_NOSKINANIM")) scene.animateSkins = false;   // keep blended skinned pieces in frame 0
         if (const char* only = envValue("RASA_ONLY")) scene.onlyEntity = std::atoi(only);   // draw one map entity alone
         if (const char* range = envValue("RASA_ENTITYRANGE")) std::sscanf(range, "%d,%d", &scene.entityFirst, &scene.entityLast);   // bisecting
         if (const char* sel = envValue("RASA_SELECT")) highlighted = Selection{SelectionKind::MapEntity, size_t(std::atoi(sel))};
-        // RASA_SKINTIMING=1: time 20 frames of queueDraws with the light clock advancing (object animations re-skinned each
-        // frame) against the same with skin playback off.
+        // RASA_SKINTIMING=1: time 20 frames of queueDraws with the animation clock advancing (object animations re-skinned each
+        // frame) against the same with the clock stopped (SceneView::animate off).
         // RASA_SKINDUMP=<entity index>: per skinned piece of the entity's model, its palette (GSKN bone list) as world skin
         // matrices (3 rows of 4, like the game's gWorldMatrixArray) at RASA_LIGHTTIME - for comparison with an apitrace capture.
         if (const char* dumpEntity = envValue("RASA_SKINDUMP")) {
@@ -760,16 +759,16 @@ int main(int argc, char** argv) {
         }
         if (envValue("RASA_SKINTIMING")) {
             for (int pass = 0; pass < 3; ++pass) {        // on, off, on: the first pass also pays one-time costs
-                scene.animateSkins = pass != 1;
+                scene.animate = pass != 1;
                 const auto start = std::chrono::steady_clock::now();
                 for (int f = 0; f < 20; ++f) {
-                    scene.lightTime += 1.0f / 30.0f;
+                    scene.advanceLights(1.0f / 30.0f);
                     scene.queueDraws(highlighted);
                 }
                 const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() / 20.0;
-                std::printf("skin timing: %s %.2f ms per frame\n", pass != 1 ? "skins on " : "skins off", ms);
+                std::printf("skin timing: %s %.2f ms per frame\n", pass != 1 ? "playing" : "stopped", ms);
             }
-            scene.animateSkins = true;
+            scene.animate = true;
         }
         scene.queueDraws(highlighted);
         std::printf("draws queued: %zu (entities drawn %zu), particle vertices %zu\n", renderer.queuedDraws(), scene.drawnEntities(), renderer.queuedParticleVertices());
