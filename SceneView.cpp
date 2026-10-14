@@ -459,6 +459,11 @@ void SceneView::setRegionSkies(const std::vector<std::pair<int32_t, std::string>
             it = skies_.end() - 1;
         }
     }
+    // The skies' layer models (queueSky) load with the map's models.
+    for (const SkyChoice& c : skies_)
+        if (c.loaded)
+            for (const tr::SkyLayer& layer : c.sky.layers)
+                if (layer.enabled && !layer.geoFilename.empty() && assets_.exists(layer.geoFilename)) objectModelFor(layer.geoFilename);
 }
 
 namespace {
@@ -1408,7 +1413,7 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 v.binormalX = binormal.x; v.binormalY = binormal.y; v.binormalZ = binormal.z;
                 v.colour = refraction ? packColour(255, 255, 255, uint8_t(gv.colour >> 24))    // TRRefract uses the vertex alpha only
                          : vertexColour || palDeferred ? packColour(uint8_t(gv.colour >> 16), uint8_t(gv.colour >> 8), uint8_t(gv.colour),     // ARGB
-                                                     additive || translucent || trDesc.kind1 == 1 ? uint8_t(gv.colour >> 24) : 255)
+                                                     additive || translucent || trDesc.kind1 == 1 || effect.rfind("tremissive", 0) == 0 ? uint8_t(gv.colour >> 24) : 255)
                                         : packColour(255, 255, 255, 255);
                 v.texU = gv.uv.x;
                 v.texV = gv.uv.y;
@@ -1544,6 +1549,7 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 part.environment = palDeferred && effect.find("env") != std::string::npos;
                 part.hueUnweighted = effect.rfind("paldiffalpha", 0) == 0 && part.hued;
                 part.hairCutout = hair;
+                part.skyEmissive = effect.rfind("tremissive", 0) == 0;
                 part.animBone = rigidBone;
                 if (aniso) {
                     if (!palette.empty() && palette.front() >= 0) part.anisoNormalBone = palette.front();
@@ -2162,6 +2168,72 @@ void SceneView::queueBillboards(const Model& model, const Mat4& placementWorld, 
     }
 }
 
+// Sky layers (decoded 2026-10-14 in tabula_rasa.exe): a .sky's SkyLayers become TRasa::SkyLayer objects, each with a body of its
+// GeoFilename model (FUN_00531910 -> FUN_005daf60, FUN_00822f30 copies the layer data in) drawn in the Sky phase (TRasa::SkyPhase,
+// FUN_0087fa90: Sky.fx - SRCALPHA / INVSRCALPHA, no depth writes, alpha test > 1/255, no fog, stencil EQUAL 255, i.e. only the
+// background). Per frame (FUN_008223b0 -> FUN_00885af0, time = fraction of the day): rotation = RotsPerDay turns about the
+// normalised RotationAxis combined with the initial yaw / pitch / roll (the editor uses the same rotation as its layer lights,
+// tr::skyLayerDirection, whose roll sign was fitted to the game's sun); position = the given position (taken as the camera's -
+// the argument comes through a virtual call, NOT traced; the layer models are 0.2 to 100 m across, scale 1) + the offset keys
+// (FUN_00885f90). Colour (FUN_00886000): MatDiffuse = (2 x (base + key.rgb) [x 2 x the fog colour with UseFogColor], key.a) and
+// MatEmissive = (1, 1, 1, 1), both through the parameter setter that multiplies Diffuse / Emissive semantics by gModulateScale
+// 0.5 (FUN_0057ea60 -> FUN_005bd040); base = DiffuseColor (FUN_00823470) - and the engine adds the GREEN base to blue too (reads
+// + 0x68 twice), so the moon's (0.5, 0.5, 0) base is grey. Pieces: TREmissive* (psNormal: texture x vertex colour x
+// MatDiffuse.rgb x 4 + (MatEmissive - 0.5) x 2, opaque - the material's AlphaBlendEnable is false) and TRAdditive* (sun, moon,
+// stars, sunset: their own additive shaders with MatDiffuse.a = the key alpha). Not drawn: other effects (e.g. the
+// TRDiffMapVertColor fog ring of sky_concordia_fog_ring.geo), cloud textures (CloudTexture1 / 2 are empty in every shipped
+// sky), the detail / decal layers of TREmissiveDiffMapDetMapDecMapVertColor, and the transition fade between skies.
+void SceneView::queueSky() {
+    const size_t active = activeSkyIndex();
+    if (!showSkyDome || !skyLighting || active >= skies_.size() || !skies_[active].loaded) return;
+    const tr::Sky& sky = skies_[active].sky;
+    const float t = timeOfDay;
+    const tr::Vec3 fog{frameLighting_.fogColour.x, frameLighting_.fogColour.y, frameLighting_.fogColour.z};
+    for (const tr::SkyLayer& layer : sky.layers) {
+        if (!layer.enabled || layer.geoFilename.empty()) continue;
+        Model* model = objectModelFor(layer.geoFilename);
+        if (!model || !model->loaded) continue;
+        // Rotation: the layer's basis vectors through the same rotation as its lights.
+        const tr::Vec3 ex = tr::skyLayerDirection(layer, tr::Vec3{1, 0, 0}, t);
+        const tr::Vec3 ey = tr::skyLayerDirection(layer, tr::Vec3{0, 1, 0}, t);
+        const tr::Vec3 ez = tr::skyLayerDirection(layer, tr::Vec3{0, 0, 1}, t);
+        const tr::Vec3 offset = tr::sampleLayerOffset(layer, t);
+        Mat4 world = identityMatrix();
+        world.row0 = Vec4f{ex.x, ey.x, ez.x, camera_.position.x + offset.x};
+        world.row1 = Vec4f{ex.y, ey.y, ez.y, camera_.position.y + offset.y};
+        world.row2 = Vec4f{ex.z, ey.z, ez.z, camera_.position.z + offset.z};
+        const tr::SkyColourKey key = tr::sampleLayerColour(layer, t);
+        // MatDiffuse as the shader sees it (x gModulateScale 0.5): (base + key) [x 2 fog]; blue takes the green base (engine).
+        tr::Vec3 diffuse{layer.baseColour.x + key.colour.x, layer.baseColour.y + key.colour.y, layer.baseColour.y + key.colour.z};
+        if (layer.useFogColour) diffuse = tr::Vec3{diffuse.x * 2 * fog.x, diffuse.y * 2 * fog.y, diffuse.z * 2 * fog.z};
+        const Vec4f emissiveTint{diffuse.x * 4, diffuse.y * 4, diffuse.z * 4, key.alpha};
+        const std::vector<Mat4> animatedMatrices = animatedPieceMatrices(*model, lightTime);
+        for (const ModelPiece& piece : model->pieces) {
+            if (!hiddenGroup.empty() && (hiddenGroup[0] == '!' ? piece.group != hiddenGroup.substr(1) : piece.group == hiddenGroup)) continue;
+            const Mat4 pieceWorld = piece.animBone >= 0 && size_t(piece.animBone) < animatedMatrices.size()
+                                        ? multiply(world, animatedMatrices[size_t(piece.animBone)]) : world;
+            struct SkinScope {
+                Renderer& renderer;
+                ~SkinScope() { renderer.clearSkin(); }
+            } skinScope{renderer_};
+            setPieceSkin(piece);
+            if (piece.skyEmissive && !piece.additive) {
+                renderer_.drawSkyEmissive(piece.mesh, pieceWorld, emissiveTint, showTextures ? piece.texture : nullptr, !piece.twoSided);
+            } else if (piece.aniso && showTextures && showEffects) {
+                AnisoMaterial m = piece.anisoMaterial;
+                m.diffuseAlpha.w = key.alpha;            // MatDiffuse.a = the key alpha (gModulateScale leaves alpha alone)
+                m.normalMatrix = anisoNormalMatrix(model, piece, world, pieceWorld);
+                UvTransforms uv{m.transform0u, m.transform0v, m.transform1u, m.transform1v, m.transform2u, m.transform2v};
+                if (animatedUvTransforms(*model, piece, lightTime, uv)) {
+                    m.transform0u = uv.u0; m.transform0v = uv.v0; m.transform1u = uv.u1; m.transform1v = uv.v1;
+                    m.transform2u = uv.u2; m.transform2v = uv.v2;
+                }
+                renderer_.drawAnisoAdditive(piece.mesh, pieceWorld, m, !piece.twoSided, true);
+            }
+        }
+    }
+}
+
 // ------------------------------------------------------------------------------------------
 // Creature idles
 // ------------------------------------------------------------------------------------------
@@ -2596,6 +2668,8 @@ void SceneView::queueDraws(const Selection& selection) {
             }
         }
     }
+
+    queueSky();
 
     // Server content (World database).
     const Vec4f highlight = markerColour::selected;

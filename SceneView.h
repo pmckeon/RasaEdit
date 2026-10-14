@@ -202,6 +202,7 @@ public:
     float lightColourGamma = 1;             // experiment: placed light colours raised to this power (2.2 = sRGB -> linear)
     float ambientScale = 1;                 // debug/experiment: multiplies the sky's hemisphere light           // debug: draw 0.2 x light like the game's /dl_showlight
     bool showSun = true;                    // the sky's sun/moon
+    bool showSkyDome = true;                // the sky's layer models (dome, sun / moon discs, stars, clouds, horizon)
     bool showShadows = true;                // sun shadows
     const std::vector<tr::PlacedLight>& mapLights() const { return mapLights_; }
     // World animation clock in seconds (advanceLights): light modifiers, object and material animations, creature idles. With
@@ -241,6 +242,7 @@ private:
         SDL_GPUTexture* normalMap = nullptr;
         SDL_GPUTexture* glossMap = nullptr;
         SDL_GPUTexture* palDecal = nullptr;     // Pal*Dec* decal map (DecalTexture on UV set DecalTexCoord, in texU2)
+        bool skyEmissive = false;               // TREmissive* piece: drawn as a sky layer by queueSky (unlit, MatDiffuse x 4)
         bool environment = false;              // Pal*Env* material: reflects the region's environment cube by gloss.b
         bool hueUnweighted = false;            // alpha-tested Pal*Hue: Hue added without the diffuse-alpha weight
         // The material's stored Hue parameter (w = 1 when set): what a map entity's pieces keep when the entity is not hued.
@@ -431,6 +433,7 @@ private:
     const tr::Animation* idleAnimation(const std::string& name);
     const std::vector<int>& idleTracks(const Model& model, const tr::Animation& animation);
     bool poseIdle(const ServerPlacement& s);
+    void queueSky();                        // the active sky's layers (TRasa::SkyLayer bodies), see the comment at queueSky
     void queueBillboards(const Model& model, const Mat4& placementWorld, const std::vector<Mat4>& animatedMatrices, const SceneLighting& light);
     SceneLighting frameLighting_;           // this frame's lighting (queueDraws)
     // The rigid bodies of a server placement that carry their own model lights and particle systems, as map entities' models do:

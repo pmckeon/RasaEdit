@@ -22,7 +22,7 @@ cbuffer VertexUniforms : register(b0, space1)
     // 0))^2), and the runtime state has FOGENABLE on with FOGCOLOR 0.
     row_major float4x4 anisoNormal;   // the 3 x 3 applied to the vertex normal
     float4 eyePosition;               // xyz
-    float4 anisoFog;                  // x start, y density, z 1 = fog on
+    float4 anisoFog;                  // x start, y density, z 1 = fog on; w 1 = sky layer: put at the far plane (z = w)
 };
 
 // GPU skinning (Renderer::setSkin): per vertex up to 4 bones of the model's skeleton and their weights (SV_VertexID indexes it;
@@ -40,7 +40,8 @@ cbuffer FragmentUniforms : register(b0, space3)
 {
     float4 tint;              // multiplied with the vertex colour and the texture
     float4 lightDirection;    // xyz: towards the light (world space); w: 1 = lit, 0 = unlit
-    float4 options;           // x: > 0 = alpha test, discard texture alpha below x; y: 1 = alpha-blended particle, 2 = translucent (lit, texture alpha);
+    float4 options;           // x: > 0 = alpha test, discard texture alpha below x; y: 1 = alpha-blended particle, 2 = translucent (lit, texture alpha),
+                              // 3 = sky layer (TREmissive*, unlit, alpha x texture alpha);
                               // z: 1 = additive, 2 = lit additive (forward-phase pieces); w: 1 = aniso additive
     float4 hue;               // rgb - 0.5 added to the texel weighted by its alpha (the game's "Hue" effects); w: 1 = on, 2 = on and not
                               // weighted (alpha-tested Pal*Hue effects: their alpha is the cut-out)
@@ -157,6 +158,8 @@ VertexOutput vsMain(VertexInput input, uint vertexId : SV_VertexID)
     }
     const float4 world = mul(model, float4(position, 1.0));
     output.position = mul(viewProjection, world);
+    if (anisoFog.w > 0.5)
+        output.position.z = output.position.w;      // sky layer: passes the LESS_OR_EQUAL test only on background pixels
     output.normal = mul((float3x3)model, normal);
     output.tangent = mul((float3x3)model, tangent);
     output.binormal = mul((float3x3)model, binormal);
@@ -234,7 +237,7 @@ float3 trApplySlot(float3 albedo, uint kind, float4 map, float vertexAlpha)
 float4 psMain(VertexOutput input) : SV_Target0
 {
     const bool particle = options.y > 0.5 && options.y < 1.5;
-    if ((fogRange.z > 0.5 || fogRange.w > 1.5) && (options.w > 0.5 || options.z > 0.5 || particle))
+    if ((fogRange.z > 0.5 || fogRange.w > 1.5) && (options.w > 0.5 || options.z > 0.5 || particle || options.y > 2.5))
         return float4(0, 0, 0, options.y > 0.5 ? 0 : 1);   // debug views: additive / forward effects are not in the G-buffer
     if (options.w > 0.5)
     {
@@ -290,6 +293,8 @@ float4 psMain(VertexOutput input) : SV_Target0
         const float visibility = applyFog(float3(1, 1, 1), length(cameraPosition.xyz - input.world), float4(0, 0, 0, fogColour.w), fogRange).x;
         return float4(base.rgb, base.a * texel.a * visibility);
     }
+    if (options.y > 2.5)
+        return float4(base.rgb, base.a * texel.a);   // sky layer, TREmissive* psNormal: texture x vertex colour x MatDiffuse x 4 (tint)
     if (lightDirection.w < 0.5)
         return base;
     // Two-sided: the normal is turned towards the camera (mesh winding and thin geometry are not relied on).

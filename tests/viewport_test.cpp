@@ -75,6 +75,7 @@ int main(int argc, char** argv) {
             if (const char* t = envValue("RASA_TIME")) scene.timeOfDay = float(std::atof(t));
             if (const char* k = envValue("RASA_SKY")) { scene.skyIndex = size_t(std::atoi(k)); scene.skyByRegion = false; }
             if (envValue("RASA_NOSKY")) scene.skyLighting = false;
+            if (envValue("RASA_NOSKYDOME")) scene.showSkyDome = false;
             if (envValue("RASA_NOFOG")) scene.showFog = false;
             if (envValue("RASA_NOSUN")) scene.showSun = false;
             if (envValue("RASA_NOSHADOWS")) scene.showShadows = false;

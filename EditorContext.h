@@ -38,6 +38,7 @@ struct ViewSettings {
     float drawDistance = 1200.0f;
     float flySpeed = 20.0f;      // metres per second
     bool skyLighting = true;     // light from the map region's .sky (the time of day and sky choice are per map, in SceneView)
+    bool skyDome = true;         // the sky's layer models (dome, sun and moon, stars, horizon)
     bool fog = true;
     bool sun = true;             // the sky's sun/moon
     bool shadows = true;         // sun shadows (shadow map around the camera)

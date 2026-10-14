@@ -239,7 +239,14 @@ public:
     void drawAdditive(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, SDL_GPUTexture* texture, bool lit = false,
                       SDL_GPUTexture* detail = nullptr, bool detailUv1 = false, bool cullBack = false);
     // The game's TRAdditiveAnisoSpec* effects (holograms): additive, with detail/decal layers and a view-angle light ramp.
-    void drawAnisoAdditive(const GpuMesh& mesh, const Mat4& model, const AnisoMaterial& material, bool cullBack = false);
+    void drawAnisoAdditive(const GpuMesh& mesh, const Mat4& model, const AnisoMaterial& material, bool cullBack = false, bool sky = false);
+    // Sky layers (TRasa::SkyLayer bodies in the Sky phase, see SceneView::queueSky): drawn after the opaque geometry and before
+    // water / translucent / additive pieces, only on background pixels - the game's Sky.fx pass tests stencil EQUAL 255; here
+    // the vertex shader puts the sky at the far plane (z = w) and the LESS_OR_EQUAL depth test passes only where the depth
+    // buffer still holds its clear value. drawSkyEmissive: the TREmissive* forward shader (psNormal): rgb = texture x vertex colour x
+    // tint.rgb (= MatDiffuse x 4; MatEmissive's term is 0), alpha = texture alpha x vertex alpha x tint.a (MatDiffuse.a), unlit, no
+    // fog, blended SRCALPHA / INVSRCALPHA without alpha test (the device state at the game's dome draw, fountain trace call 37333047).
+    void drawSkyEmissive(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, SDL_GPUTexture* texture, bool cullBack);
     void drawTerrain(const GpuMesh& mesh, const TerrainMaterial& material);
     // Particle quads (world-space triangle list, see ParticleSim.h). blendType as tr::particleBlendType: 0 additive (the
     // game's SRCALPHA/ONE/ADD), 3 subtractive (reverse subtract); 1 multiply and 2 diffuse are alpha blended. Unlit,
@@ -294,6 +301,7 @@ private:
         TrMaterial tr;                           // TR* deferred material (tr.active)
         bool trHairCutout = false;               // TRHair: kill where the normal map's alpha < 0.5
         bool castsShadow = true;                 // drawn into the sun shadow map (see setShadowCasting)
+        bool sky = false;                        // sky layer: at the far plane (drawSkyEmissive / drawAnisoAdditive(..., sky))
     };
     SDL_GPUShader* createShader(const unsigned char* dxil, size_t dxilSize, const unsigned char* spirv, size_t spirvSize,
                                 const char* entryPoint, SDL_GPUShaderStage stage, uint32_t samplers, uint32_t storageBuffers = 0);
@@ -408,4 +416,5 @@ private:
     bool shadowCasting_ = true;
     std::vector<DrawItem> translucentDraws_;
     std::vector<DrawItem> additiveDraws_;
+    std::vector<DrawItem> skyDraws_;
 };

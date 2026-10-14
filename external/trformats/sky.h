@@ -54,6 +54,20 @@ struct SkyAlphaKey {
     float alpha = 1;
 };
 
+// A layer's keyed colour (the AlphaKeyFrames list of ColorKeyFrame objects: Color r, g, b, a - a = Alpha in every shipped key):
+// the engine adds rgb to the layer's base colour and uses a as its alpha (TRasa::SkyLayer, see sampleLayerColour).
+struct SkyColourKey {
+    float time = 0;
+    Vec3 colour;
+    float alpha = 1;
+};
+
+// OffsetKeyFrames: X, Y, Z added to the layer's position (the camera's) - FUN_00885af0 / FUN_00885f90.
+struct SkyOffsetKey {
+    float time = 0;
+    Vec3 offset;
+};
+
 struct SkyLayer {
     bool enabled = true;
     std::string geoFilename;
@@ -61,7 +75,12 @@ struct SkyLayer {
     float rotationsPerDay = 0;
     float initialPitch = 0, initialYaw = 0, initialRoll = 0;     // radians
     bool useFogColour = false;
+    // DiffuseColor (packed, written b, g, r, a like the light keys' Diffuse; = Diffuse r, g, b, a): the base colour
+    // (FUN_00823470 reads bytes 2, 1, 0, 3 x 1/255 into the layer's + 0x64 .. + 0x70).
+    Vec3 baseColour{1, 1, 1};
     std::vector<SkyAlphaKey> alphaKeys;
+    std::vector<SkyColourKey> colourKeys;
+    std::vector<SkyOffsetKey> offsetKeys;
     std::vector<SkyLight> lights;
 };
 
@@ -144,5 +163,8 @@ float sampleLayerAlpha(const SkyLayer& layer, float time);                    //
 // A layer-space direction rotated into the world at time: initial yaw/pitch/roll, then RotsPerDay turns about the
 // rotation axis per day (order UNVERIFIED; the sun's light points straight down at time 0.5 with these rules).
 Vec3 skyLayerDirection(const SkyLayer& layer, const Vec3& direction, float time);
+// The keyed colour at a time of day (cyclic linear interpolation like the engine's FUN_00885af0; no keys: (0, 0, 0) alpha 1).
+SkyColourKey sampleLayerColour(const SkyLayer& layer, float time);
+Vec3 sampleLayerOffset(const SkyLayer& layer, float time);     // no keys: 0
 
 }  // namespace tr

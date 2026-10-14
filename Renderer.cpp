@@ -556,6 +556,7 @@ void Renderer::beginFrame(const Mat4& viewProjection, const tr::Vec3& cameraPosi
     draws_.clear();
     translucentDraws_.clear();
     additiveDraws_.clear();
+    skyDraws_.clear();
     refractDraws_.clear();
     waterDraws_.clear();
     bones_.clear();
@@ -623,7 +624,16 @@ void Renderer::drawAdditive(const GpuMesh& mesh, const Mat4& model, const Vec4f&
     additiveDraws_.push_back(item);
 }
 
-void Renderer::drawAnisoAdditive(const GpuMesh& mesh, const Mat4& model, const AnisoMaterial& material, bool cullBack) {
+void Renderer::drawSkyEmissive(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, SDL_GPUTexture* texture, bool cullBack) {
+    if (!mesh.vertices || mesh.indexCount == 0) return;
+    DrawItem item{&mesh, model, tint, false, texture ? texture : white_, false, nullptr, true, Vec4f{0, 0, 0, 0}, black_};
+    item.sky = true;                             // blended SRCALPHA / INVSRCALPHA, no depth writes (the translucent pipelines)
+    item.cullBlended = cullBack;
+    item.castsShadow = false;
+    skyDraws_.push_back(item);
+}
+
+void Renderer::drawAnisoAdditive(const GpuMesh& mesh, const Mat4& model, const AnisoMaterial& material, bool cullBack, bool sky) {
     if (!mesh.vertices || mesh.indexCount == 0) return;
     DrawItem item{&mesh, model, material.diffuseAlpha, false, material.diffuse ? material.diffuse : white_, false, nullptr, true, Vec4f{0, 0, 0, 0},
                   black_};
@@ -644,7 +654,8 @@ void Renderer::drawAnisoAdditive(const GpuMesh& mesh, const Mat4& model, const A
     item.skinVertices = currentSkin_;
     item.boneBase = currentBoneBase_;
     item.skinNormals = currentSkinNormals_;
-    additiveDraws_.push_back(item);
+    item.sky = sky;
+    (sky ? skyDraws_ : additiveDraws_).push_back(item);
 }
 
 void Renderer::drawWater(const GpuMesh& mesh, const Mat4& model, const WaterMaterial& material) {
@@ -866,6 +877,7 @@ void Renderer::record(SDL_GPUCommandBuffer* /*caller's command buffer: the scene
 
     SDL_GPUGraphicsPipeline* bound = nullptr;
     for (const DrawItem& item : draws_) recordItem(commands, pass, item, bound);
+    for (const DrawItem& item : skyDraws_) recordItem(commands, pass, item, bound);   // the Sky phase: after opaque, background only
     if (water) {
         // Water after the opaque geometry, before translucent / additive pieces and particles (the game's order in the
         // fountain trace: StretchRect of the frame after the sky phase, the water draws, then the glowstick's fins etc.).
@@ -1078,7 +1090,7 @@ void Renderer::recordItem(SDL_GPUCommandBuffer*& commands, SDL_GPURenderPass*& p
     // Terrain: TRTerrainClient's deferred passes set no CULLMODE, so PalGlobalEffect's CCW baseline culls its back faces
     // (seen from below, e.g. from Manhattan's subway, the game shows no terrain).
     SDL_GPUGraphicsPipeline* pipeline = item.terrain ? (cullBackFaces ? culledTerrainPipeline_ : terrainPipeline_) : item.additive ? (cullBackFaces && item.cullBlended ? culledAdditivePipeline_ : additivePipeline_) : item.translucent ? (cullBackFaces && item.cullBlended ? culledTranslucentPipeline_ : translucentPipeline_)
-                                        : item.mesh->lines ? linePipeline_ : cullBackFaces && item.lit && !item.twoSided ? culledTrianglePipeline_ : trianglePipeline_;
+                                        : item.mesh->lines ? linePipeline_ : cullBackFaces && (item.lit || item.sky) && !item.twoSided ? culledTrianglePipeline_ : trianglePipeline_;
     if (pipeline != bound) {
         SDL_BindGPUGraphicsPipeline(pass, pipeline);
         bound = pipeline;
@@ -1094,6 +1106,7 @@ void Renderer::recordItem(SDL_GPUCommandBuffer*& commands, SDL_GPURenderPass*& p
         vertexUniforms.eyePosition = cameraPosition_;
         vertexUniforms.anisoFog = Vec4f{lighting_.fogStart, lighting_.fogDensity, lighting_.fog ? 1.0f : 0.0f, 0};
     }
+    if (item.sky) vertexUniforms.anisoFog.w = 1.0f;          // scene.hlsl: at the far plane
     SDL_PushGPUVertexUniformData(commands, 0, &vertexUniforms, sizeof vertexUniforms);
     if (!item.terrain) bindSkin(pass, item.skinVertices);
     if (item.terrain) {
@@ -1127,7 +1140,7 @@ void Renderer::recordItem(SDL_GPUCommandBuffer*& commands, SDL_GPURenderPass*& p
                                                           {item.glossMap ? item.glossMap : black_, linearSampler_},
                                                           {environment_ ? environment_ : blackCube_, clampSampler_}};
         SDL_BindGPUFragmentSamplers(pass, 0, samplers, 10);
-        SceneFragmentUniforms u{item.tint, towardsLight_, Vec4f{item.alphaTest ? item.alphaReference : 0.0f, item.translucent ? 2.0f : 0.0f, item.additive ? (item.forwardLit ? 2.0f : 1.0f) : 0.0f, item.aniso ? (item.anisoPlain ? 2.0f : 1.0f) : 0.0f},
+        SceneFragmentUniforms u{item.tint, towardsLight_, Vec4f{item.alphaTest ? item.alphaReference : 0.0f, item.sky && !item.aniso ? 3.0f : item.translucent ? 2.0f : 0.0f, item.additive ? (item.forwardLit ? 2.0f : 1.0f) : 0.0f, item.aniso ? (item.anisoPlain ? 2.0f : 1.0f) : 0.0f},
                                 item.hue, lightingUniforms(lighting_, cameraPosition_, shadowMatrix_, shadowsActive_, float(shadowSize)), item.specular, item.layers,
                                 Vec4f{item.normalMap ? 1.0f : 0.0f, item.glossMap ? 1.0f : 0.0f, item.environment && environment_ ? 1.0f : 0.0f,
                                       item.trHairCutout ? 1.0f : 0.0f},

@@ -253,12 +253,27 @@ Sky readSky(const Bytes& data) {
             layer.initialYaw = number(p, "InitialYaw");
             layer.initialRoll = number(p, "InitialRoll");
             layer.useFogColour = flag(p, "UseFogColor");
+            if (p.count("DiffuseColor")) layer.baseColour = packedColour(p, "DiffuseColor");
             if (const XmlNode* frames = l.child("AlphaKeyFrames"))
                 for (const XmlNode& f : frames->children) {
                     const Properties k = properties(&f);
                     layer.alphaKeys.push_back(SkyAlphaKey{number(k, "Time"), number(k, "Alpha", 1)});
+                    SkyColourKey key;
+                    key.time = number(k, "Time");
+                    const auto colour = k.find("Color");
+                    const std::vector<float> v = colour == k.end() ? std::vector<float>{} : numbers(colour->second);
+                    if (v.size() >= 3) key.colour = Vec3{v[0], v[1], v[2]};
+                    key.alpha = v.size() >= 4 ? v[3] : number(k, "Alpha", 1);
+                    layer.colourKeys.push_back(key);
+                }
+            if (const XmlNode* frames = l.child("OffsetKeyFrames"))
+                for (const XmlNode& f : frames->children) {
+                    const Properties k = properties(&f);
+                    layer.offsetKeys.push_back(SkyOffsetKey{number(k, "Time"), Vec3{number(k, "X"), number(k, "Y"), number(k, "Z")}});
                 }
             std::sort(layer.alphaKeys.begin(), layer.alphaKeys.end(), [](const SkyAlphaKey& a, const SkyAlphaKey& b) { return a.time < b.time; });
+            std::sort(layer.colourKeys.begin(), layer.colourKeys.end(), [](const SkyColourKey& a, const SkyColourKey& b) { return a.time < b.time; });
+            std::sort(layer.offsetKeys.begin(), layer.offsetKeys.end(), [](const SkyOffsetKey& a, const SkyOffsetKey& b) { return a.time < b.time; });
             if (const XmlNode* lights = l.child("Lights"))
                 for (const XmlNode& light : lights->children) layer.lights.push_back(readLight(light));
             sky.layers.push_back(std::move(layer));
@@ -420,6 +435,26 @@ SkyFogKey sampleSkyFog(const Sky& sky, float time) {
     out.endDistance = d.y;
     out.used = keys.front()->used;
     return out;
+}
+
+SkyColourKey sampleLayerColour(const SkyLayer& layer, float time) {
+    SkyColourKey out;
+    out.time = time;
+    if (layer.colourKeys.empty()) return out;
+    std::vector<const SkyColourKey*> keys;
+    for (const SkyColourKey& k : layer.colourKeys) keys.push_back(&k);
+    const V3 c = cyclic<SkyColourKey, V3>(keys, time, [](const SkyColourKey& k) { return V3{k.colour.x, k.colour.y, k.colour.z}; });
+    out.colour = Vec3{c.x, c.y, c.z};
+    out.alpha = cyclic<SkyColourKey, V3>(keys, time, [](const SkyColourKey& k) { return V3{k.alpha, 0, 0}; }).x;
+    return out;
+}
+
+Vec3 sampleLayerOffset(const SkyLayer& layer, float time) {
+    if (layer.offsetKeys.empty()) return Vec3{};
+    std::vector<const SkyOffsetKey*> keys;
+    for (const SkyOffsetKey& k : layer.offsetKeys) keys.push_back(&k);
+    const V3 o = cyclic<SkyOffsetKey, V3>(keys, time, [](const SkyOffsetKey& k) { return V3{k.offset.x, k.offset.y, k.offset.z}; });
+    return Vec3{o.x, o.y, o.z};
 }
 
 float sampleLayerAlpha(const SkyLayer& layer, float time) {

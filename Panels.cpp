@@ -424,6 +424,7 @@ void ViewportPanel::applyOptions(const ViewSettings& view, SceneView& scene) con
     scene.showRegions = options.showRegions;
     scene.drawDistance = view.drawDistance;
     scene.skyLighting = view.skyLighting;
+    scene.showSkyDome = view.skyDome;
     scene.showFog = view.fog;
     scene.showMapLights = view.mapLights;
     scene.showSun = view.sun;
@@ -501,6 +502,11 @@ void ViewportPanel::draw(EditorContext& ctx, const char* title, Selection& selec
 
     // Second row: sky lighting (the region's .sky), its time of day, fog and the map's placed lights.
     ImGui::Checkbox("Sky", &ctx.view.skyLighting);
+    ImGui::SameLine();
+    ImGui::Checkbox("Dome", &ctx.view.skyDome);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("The sky's layer models, as the game draws them behind everything: dome, sun and moon, stars, clouds,\n"
+                          "distant mountains. Rotated and coloured by the time of day.");
     ImGui::SameLine();
     if (!ctx.view.skyLighting || scene.skies().empty()) ImGui::BeginDisabled();
     ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16);
