@@ -2729,9 +2729,11 @@ void SceneView::queueDraws(const Selection& selection) {
     if (showEntities && showParticles) {
         const tr::Vec3 right = camera_.right(), up = camera_.up();
         for (const LiveParticles& l : liveParticles_) {
-            const tr::Vec3 centre = l.server ? serverPlacements_[l.placement].position : placements_[l.placement].centre;
-            const float radius = l.server ? 5.0f : placements_[l.placement].radius;
-            if (!visible(centre, radius + 30.0f)) continue;          // effects reach beyond the model's bounds
+            // In view by where its particles are (columns and beams reach far above their emitter - the control-point flag's
+            // beam vanished when looking up past the pole).
+            tr::Vec3 centre;
+            float radius = 0;
+            if (!l.instance->worldBounds(centre, radius) || !visible(centre, radius)) continue;
             const tr::ParticleSystem& system = l.instance->system();
             for (size_t g = 0; g < system.groups.size(); ++g) {
                 particleScratch_.clear();
@@ -2773,7 +2775,17 @@ void SceneView::queueDraws(const Selection& selection) {
         }
         const tr::Vec3 d = subtract(s.position, camera_.position);
         if (!selected && dot(d, d) > maxDistance2) continue;
-        if (!visible(s.position, std::max(s.ringRadius, 3.0f))) continue;
+        // In view: the marker / ring, or any loaded model drawn at the placement (its own and the use-state accessories - e.g. the
+        // Alia Das waypoint's field column, tens of metres tall, which vanished when only its foot was tested).
+        bool inView = visible(s.position, std::max(s.ringRadius, 3.0f));
+        auto modelInView = [&](const Model* m) {
+            if (inView || !m || !m->loaded) return;
+            const tr::Vec3 centre = transformPoint(s.world, scaled(add(m->bounds.min, m->bounds.max), 0.5f));
+            inView = visible(centre, length(subtract(m->bounds.max, m->bounds.min)) * 0.5f);
+        };
+        modelInView(s.model);
+        for (const Model* accessory : s.accessories) modelInView(accessory);
+        if (!inView) continue;
         const bool hasModel = s.model && s.model->loaded && (s.model->hasSolid || s.model->effectOnly) && (selected || !serverModelCulled(s));
         if (hasModel) {
             const Vec4f tint = modelTint(selected);

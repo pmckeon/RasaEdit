@@ -323,6 +323,27 @@ void ParticleInstance::update(float dt) {
     for (size_t g = 0; g < system_->groups.size(); ++g) apply(system_->groups[g].op, g, dt);
 }
 
+bool ParticleInstance::worldBounds(tr::Vec3& centre, float& radius) const {
+    tr::Vec3 lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
+    float largest = 0;
+    bool any = false;
+    for (size_t g = 0; g < particles_.size() && g < system_->groups.size(); ++g) {
+        const bool objectFrame = system_->groups[g].referenceFrame == 0;
+        for (const Particle& p : particles_[g]) {
+            const tr::Vec3 c = objectFrame ? transformPoint(world_, p.position) : p.position;
+            lo = tr::Vec3{std::min(lo.x, c.x), std::min(lo.y, c.y), std::min(lo.z, c.z)};
+            hi = tr::Vec3{std::max(hi.x, c.x), std::max(hi.y, c.y), std::max(hi.z, c.z)};
+            largest = std::max(largest, std::fabs(p.size));
+            any = true;
+        }
+    }
+    if (!any) return false;
+    centre = tr::Vec3{(lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f, (lo.z + hi.z) * 0.5f};
+    const tr::Vec3 half{(hi.x - lo.x) * 0.5f, (hi.y - lo.y) * 0.5f, (hi.z - lo.z) * 0.5f};
+    radius = std::sqrt(half.x * half.x + half.y * half.y + half.z * half.z) + largest;
+    return true;
+}
+
 void ParticleInstance::buildQuads(size_t group, const tr::Vec3& cameraRight, const tr::Vec3& cameraUp, std::vector<MeshVertex>& out) const {
     const tr::ParticleGroup& g = system_->groups[group];
     if (g.primitive < 2 || g.primitive > 4) return;

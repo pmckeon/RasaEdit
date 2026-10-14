@@ -42,6 +42,8 @@ public:
 
     void update(float dt);
     size_t particleCount() const;
+    // World-space bounding sphere of the live particles (positions, grown by the largest size); false when there are none.
+    bool worldBounds(tr::Vec3& centre, float& radius) const;
     const tr::ParticleSystem& system() const { return *system_; }
     const Mat4& world() const { return world_; }
     // Appends group g's quads as world-space triangles (6 vertices per particle).
