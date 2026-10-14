@@ -115,6 +115,8 @@ public:
     std::vector<std::pair<std::string, Mat4>> debugWorldSkinMatrices(size_t entityIndex, float time) const;
     // Diagnostic: server placements whose bodies (serverBodies) carry model lights or particle systems: position, lights, systems.
     std::vector<std::string> debugServerBodyEffects() const;
+    // Diagnostic: the figures drawn for a server selection (a spawn pool draws one per creature it can spawn): position, model.
+    std::vector<std::string> debugServerFigures(const Selection& selection) const;
     // Diagnostic: the idle pose of the server placement nearest (x, z) at lightTime - its base skeleton's bones, posed world
     // positions (placement x posed bone), and which animation of its sequence plays.
     std::vector<std::string> debugServerPose(float x, float z);

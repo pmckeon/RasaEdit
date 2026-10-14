@@ -2055,6 +2055,18 @@ std::vector<SceneView::ServerBody> SceneView::serverBodies(const ServerPlacement
     return bodies;
 }
 
+std::vector<std::string> SceneView::debugServerFigures(const Selection& selection) const {
+    std::vector<std::string> out;
+    for (const ServerPlacement& s : serverPlacements_) {
+        if (!sameSelection(s.selection, selection)) continue;
+        char line[256];
+        std::snprintf(line, sizeof line, "  %.2f %.2f %.2f  model %p, %zu avatar parts", s.position.x, s.position.y, s.position.z,
+                      static_cast<const void*>(s.model), s.avatarParts.size());
+        out.push_back(line);
+    }
+    return out;
+}
+
 std::vector<std::string> SceneView::debugServerBodyEffects() const {
     std::vector<std::string> lines;
     for (size_t k = 0; k < serverPlacements_.size(); ++k) {
@@ -3326,32 +3338,65 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
     auto yawPlacement = [](const tr::Vec3& position, float rotation) {
         return placementMatrix(position, tr::Quat{0, std::sin(rotation * 0.5f), 0, std::cos(rotation * 0.5f)}, 1.0f);
     };
+    // A creature's figure: its class mesh, or the assembled avatar with its idles and accessories.
+    auto dressCreature = [&](ServerPlacement& s, const Creature* creature) {
+        s.model = creature ? modelFor(meshForClass(creature->classId)) : nullptr;
+        if (!creature || !avatarFor) return;
+        const AvatarLook look = avatarFor(*creature);
+        // "%": built for GPU skinning so the idle sequence can pose it per frame (poseIdle).
+        const std::string pose = look.poseAnimation.empty() ? std::string() : "%" + look.poseAnimation;
+        if (!look.baseMesh.empty()) s.model = modelFor(look.baseMesh, pose);
+        s.skinHue = hueFromAbgr(look.skinColour);
+        for (const AvatarPart& part : look.parts)
+            s.avatarParts.push_back(AvatarDraw{modelFor(part.mesh, pose, look.baseMesh), part.swapsetId, hueFromAbgr(part.colour)});
+        s.idles = look.idles;
+        for (const AvatarAccessory& a : look.accessories)
+            s.bodyAccessories.push_back(ServerPlacement::BodyAccessory{objectModelFor(a.mesh), uint32_t(a.connectionPoint), hueFromAbgr(a.colour)});
+    };
+    // Spawn pools: one figure per creature the pool can spawn at most. Rasa.NET (SpawnPoolManager.CreateListOfCreatures) makes,
+    // slot by slot, a random count between min_count and max_count of each slot's creature (slots with creature 0 or max 0
+    // skipped, 64 in all at most) and puts each at a random walkable point within the pool's radius (SpawnPoint; radius 0: the
+    // point +- 2 m when the pool spawns several). The editor cannot repeat those draws: it shows max_count of every slot, the
+    // first figure at the pool's point (raw, as stored) and the others spread evenly over the radius (a sunflower spiral; 2 m for
+    // radius 0) at the terrain height when that is within 3 m of the pool's (as SnapToGround's navmesh rule), else the pool's.
+    // Every figure selects the pool; the ring and facing arrow belong to the first.
     for (size_t k = 0; k < content->spawnPools.size(); ++k) {
         const SpawnPool& pool = content->spawnPools[k];
-        const Creature* creature = database ? database->creature(pool.slot1.creatureId) : nullptr;
-        const bool npc = creature && database->classIsNpc(creature->classId);
-        const bool vendor = creature && database->classIsVendor(creature->classId);
+        std::vector<const Creature*> spawned;
+        for (int slot = 0; slot < 6 && spawned.size() < 64; ++slot) {
+            const SpawnSlot& entry = spawnSlot(pool, slot);
+            if (entry.creatureId == 0 || entry.maxCount <= 0 || entry.minCount < 0 || entry.maxCount < entry.minCount) continue;
+            const Creature* creature = database ? database->creature(entry.creatureId) : nullptr;
+            if (!creature) continue;                    // the server skips a missing creature too
+            for (int32_t n = 0; n < entry.maxCount && spawned.size() < 64; ++n) spawned.push_back(creature);
+        }
+        const Creature* first = spawned.empty() ? (database ? database->creature(pool.slot1.creatureId) : nullptr) : spawned.front();
+        const bool npc = first && database->classIsNpc(first->classId);
+        const bool vendor = first && database->classIsVendor(first->classId);
         ServerPlacement s;
         s.selection = Selection{SelectionKind::SpawnPool, k};
         s.position = pool.position;
         s.world = yawPlacement(pool.position, pool.rotation);
-        s.model = creature ? modelFor(meshForClass(creature->classId)) : nullptr;
-        if (creature && avatarFor) {
-            const AvatarLook look = avatarFor(*creature);
-            // "%": built for GPU skinning so the idle sequence can pose it per frame (poseIdle).
-            const std::string pose = look.poseAnimation.empty() ? std::string() : "%" + look.poseAnimation;
-            if (!look.baseMesh.empty()) s.model = modelFor(look.baseMesh, pose);
-            s.skinHue = hueFromAbgr(look.skinColour);
-            for (const AvatarPart& part : look.parts)
-                s.avatarParts.push_back(AvatarDraw{modelFor(part.mesh, pose, look.baseMesh), part.swapsetId, hueFromAbgr(part.colour)});
-            s.idles = look.idles;
-            for (const AvatarAccessory& a : look.accessories)
-                s.bodyAccessories.push_back(ServerPlacement::BodyAccessory{objectModelFor(a.mesh), uint32_t(a.connectionPoint), hueFromAbgr(a.colour)});
-        }
+        dressCreature(s, first);
         s.colour = vendor ? markerColour::vendor : npc ? markerColour::npc : markerColour::hostileCreature;
         s.ringRadius = std::max(pool.radius, 1.5f);
         s.facing = true;
         serverPlacements_.push_back(s);
+        const float spread = pool.radius > 0 ? pool.radius : 2.0f;
+        for (size_t n = 1; n < spawned.size(); ++n) {
+            const float r = spread * std::sqrt(float(n) / float(spawned.size() - 1));
+            const float angle = pool.rotation + float(n) * 2.3999632f;         // golden angle
+            tr::Vec3 p{pool.position.x + r * std::sin(angle), pool.position.y, pool.position.z + r * std::cos(angle)};
+            const float ground = groundHeight(p.x, p.z, p.y);
+            if (std::fabs(ground - p.y) <= 3.0f) p.y = ground;
+            ServerPlacement extra;
+            extra.selection = s.selection;
+            extra.position = p;
+            extra.world = yawPlacement(p, pool.rotation);
+            dressCreature(extra, spawned[n]);
+            extra.colour = s.colour;
+            serverPlacements_.push_back(extra);
+        }
     }
     for (size_t k = 0; k < content->teleporters.size(); ++k) {
         const Teleporter& t = content->teleporters[k];

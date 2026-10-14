@@ -779,6 +779,11 @@ int main(int argc, char** argv) {
         scene.advanceParticles(0.0f);
         for (float t = 0; t < particleSeconds; t += 1.0f / 30.0f) scene.advanceParticles(1.0f / 30.0f);
         std::printf("particle systems running: %zu, %zu particles\n", scene.liveParticleSystems(), scene.liveParticles());
+        if (const char* pool = envValue("RASA_POOLFIGURES")) {   // <spawn pool index in the map's content>: its figures
+            const std::vector<std::string> lines = scene.debugServerFigures(Selection{SelectionKind::SpawnPool, size_t(std::atoi(pool))});
+            std::printf("spawn pool %s: %zu figures\n", pool, lines.size());
+            for (const std::string& line : lines) std::printf("%s\n", line.c_str());
+        }
         if (const char* pose = envValue("RASA_POSEDUMP")) {     // x,z: the idle pose of the nearest posed server placement
             float x = 0, z = 0;
             std::sscanf(pose, "%f,%f", &x, &z);
