@@ -1465,8 +1465,44 @@ void ServerWorkspace::drawBattlecry(CreatureDefinition& d) {
     if (ctx_.gameData) {
         try { cries = ctx_.gameData->battlecryCries(effective); } catch (const std::exception&) {}
     }
-    for (const auto& cry : cries)
-        ImGui::BulletText("%s: %s (audio set %d)", cry.type >= 1 && cry.type <= 11 ? typeNames[cry.type] : "?", cry.audioSetName.c_str(), cry.audioSet);
+    // Each cry with its audio set's sounds; Play previews one (the game picks among them in the engine, seeded by the server).
+    static const char* selectionNames[] = {"", "random", "sequential", "simultaneous"};
+    for (const auto& cry : cries) {
+        ImGui::PushID(cry.type);
+        std::vector<tr::GameData::AudioSetSound> sounds;
+        int32_t selection = 0;
+        try {
+            sounds = ctx_.gameData->audioSetSounds(cry.audioSet);
+            selection = ctx_.gameData->audioSetSelectionType(cry.audioSet);
+        } catch (const std::exception&) {}
+        const std::string header = std::string(cry.type >= 1 && cry.type <= 11 ? typeNames[cry.type] : "?") + ": " + cry.audioSetName + "  (" +
+                                   std::to_string(sounds.size()) + " sound" + (sounds.size() == 1 ? "" : "s") +
+                                   (selection >= 1 && selection <= 3 ? std::string(", ") + selectionNames[selection] : "") + ")";
+        if (ImGui::TreeNode(header.c_str())) {
+            for (size_t k = 0; k < sounds.size(); ++k) {
+                const tr::GameData::AudioSetSound& s = sounds[k];
+                ImGui::PushID(int(k));
+                const bool exists = ctx_.assets && ctx_.assets->exists(s.file);
+                if (!exists) ImGui::BeginDisabled();
+                if (cryPlayer_.playing(s.file)) {
+                    if (ImGui::SmallButton("Stop")) cryPlayer_.stop();
+                } else if (ImGui::SmallButton("Play")) {
+                    try {
+                        if (!cryPlayer_.play(s.file, ctx_.assets->read(s.file))) ctx_.setStatus("Cannot play " + cryPlayer_.error(), true);
+                    } catch (const std::exception& e) {
+                        ctx_.setStatus("Cannot play " + s.file + ": " + e.what(), true);
+                    }
+                }
+                if (!exists) ImGui::EndDisabled();
+                ImGui::SameLine();
+                if (exists) ImGui::TextUnformatted(s.file.c_str());
+                else ImGui::TextDisabled("%s (not in the archives)", s.file.c_str());
+                ImGui::PopID();
+            }
+            ImGui::TreePop();
+        }
+        ImGui::PopID();
+    }
     if (cries.empty()) ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.4f, 1.0f), "The client has no cries for this package: it plays nothing.");
 }
 

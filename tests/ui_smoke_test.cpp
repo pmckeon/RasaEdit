@@ -234,6 +234,32 @@ int main() {
                           (server.database_->classBattlecries().count(classId) != 0) == hadClass,
                       "battle cry rows removed again");
             }
+            // Every battle cry's sounds are in the archives; one decodes (loaded with SDL_mixer, not played).
+            size_t sounds = 0, missing = 0;
+            std::string example;
+            for (int32_t package : ctx.gameData->battlecryPackages())
+                for (const auto& cry : ctx.gameData->battlecryCries(package))
+                    for (const auto& s : ctx.gameData->audioSetSounds(cry.audioSet)) {
+                        ++sounds;
+                        if (!ctx.assets->exists(s.file)) {
+                            ++missing;
+                            std::printf("      missing battle cry sound %s (package %d, set %d)\n", s.file.c_str(), package, cry.audioSet);
+                        } else if (example.empty()) {
+                            example = s.file;
+                        }
+                    }
+            bool decodes = false;
+            if (!example.empty() && MIX_Init()) {
+                const tr::Bytes file = ctx.assets->read(example);
+                SDL_IOStream* io = SDL_IOFromConstMem(file.data(), file.size());
+                MIX_Audio* audio = io ? MIX_LoadAudio_IO(nullptr, io, true, true) : nullptr;
+                SDL_AudioSpec spec{};
+                decodes = audio && MIX_GetAudioFormat(audio, &spec) && spec.freq > 0;
+                if (audio) MIX_DestroyAudio(audio);
+                MIX_Quit();
+            }
+            std::printf("      battle cry sounds: %zu, %zu missing; %s decodes %d\n", sounds, missing, example.c_str(), decodes ? 1 : 0);
+            check(sounds > 0 && missing == 0 && decodes, "battle cry sounds present and playable");
         }
 
         // Missions panel: select the first mission, draw its tree, edit an objective comment and save.

@@ -1099,6 +1099,27 @@ std::vector<GameData::BattlecryCry> GameData::battlecryCries(int32_t packageId) 
     return cries;
 }
 
+std::vector<GameData::AudioSetSound> GameData::audioSetSounds(int32_t audioSetId) {
+    std::vector<AudioSetSound> sounds;
+    const py::Object* members = global("generated.client.audiosetdata", "audioSetMember");
+    const py::Object* table = global("generated.client.audiosetdata", "sound");
+    if (!members || members->kind != py::Kind::Dict) return sounds;
+    for (const auto& entry : members->entries) {
+        if (py::asInt(py::item(entry.first.get(), 0)) != audioSetId) continue;
+        AudioSetSound s;
+        s.soundId = int32_t(py::asInt(py::item(entry.first.get(), 1)));
+        const py::Object* sound = py::dictGet(table, s.soundId);
+        s.file = py::asString(py::item(sound, 0));
+        s.description = py::asString(py::item(sound, 1));
+        sounds.push_back(std::move(s));
+    }
+    return sounds;
+}
+
+int32_t GameData::audioSetSelectionType(int32_t audioSetId) {
+    return int32_t(py::asInt(py::item(py::dictGet(global("generated.client.audiosetdata", "audioSet"), audioSetId), 3), 0));
+}
+
 std::string GameData::audioSetName(int32_t audioSetId) {
     return py::asString(py::item(py::dictGet(global("generated.client.audiosetdata", "audioSet"), audioSetId), 0));
 }

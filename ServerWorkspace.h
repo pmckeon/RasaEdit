@@ -1,6 +1,7 @@
 #pragma once
 
 #include "MissionEditor.h"
+#include "SoundPlayer.h"
 #include "Panels.h"
 #include "Workspace.h"
 #include "WorldDatabase.h"
@@ -105,6 +106,7 @@ private:
     std::vector<CreatureDefinition> creatureDefsSaved_;
     std::map<int32_t, int32_t> classCries_, classCriesSaved_;     // creature_battlecry scope 1 (class id -> package)
     void drawBattlecry(CreatureDefinition& d);
+    SoundPlayer cryPlayer_;                                       // battle cry previews
     int32_t creatureSelected_ = 0;                    // creature id shown in the editor (0: none)
     char creatureListFilter_[64] = "";
     bool creatureMapOnly_ = false;

@@ -198,6 +198,17 @@ public:
     std::vector<int32_t> battlecryPackages();                        // every package id, ascending
     std::vector<BattlecryCry> battlecryCries(int32_t packageId);     // by type
     std::string audioSetName(int32_t audioSetId);
+    // An audio set's sounds (client/audiomgr.py Initialize: audiosetdata.audioSetMember[(set, sound)] -> AddAudioSetMember;
+    // sound[id] = (file, description, a float - 0.6 for most, not named by the scripts)), in table order. Which one the game
+    // plays is chosen in the engine (selection type: audioSet[id][3], 1 Random / 2 Sequential / 3 Simultaneous; battle cries
+    // pass a seed from the server).
+    struct AudioSetSound {
+        int32_t soundId = 0;
+        std::string file;
+        std::string description;
+    };
+    std::vector<AudioSetSound> audioSetSounds(int32_t audioSetId);
+    int32_t audioSetSelectionType(int32_t audioSetId);           // 0 if unknown
     // A map region's in-game name (MapRegion.displayName), as the client builds it: regionmanager.py _BuildRegionTuple turns
     // the id into generated.client.uielement.byvalue[id] (a name such as ID_...), gameui.py DisplayRegionName maps that back
     // through uielement.bystring and reads uielementlanguage (gender-keyed (id, gender) -> [text]). "" when the region has none
