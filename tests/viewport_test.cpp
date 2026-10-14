@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <cstdlib>
 #include <map>
 #include <memory>
@@ -868,6 +869,31 @@ int main(int argc, char** argv) {
         // RASA_PROFILE=<frames>: the editor's per-frame work at this camera (Editor: loadPending(0.010); ViewportPanel::render:
         // advanceParticles, advanceLights, queueDraws, record + submit) for that many 60 Hz frames, the camera turning 0.5 degrees
         // per frame as when looking around; per section the mean and worst time and the frames that took over twice the median.
+        // RASA_MAPROUNDTRIP=1: every map under <game root>/data/maps read and written back (tr::writeMap) must be byte-identical.
+        if (envValue("RASA_MAPROUNDTRIP")) {
+            size_t maps = 0, identical = 0;
+            std::error_code ec;
+            for (const auto& dir : std::filesystem::directory_iterator(std::filesystem::path(argv[1]) / "data" / "maps", ec)) {
+                for (const auto& file : std::filesystem::directory_iterator(dir.path(), ec)) {
+                    if (tr::toLowerAscii(file.path().extension().string()) != ".map") continue;
+                    ++maps;
+                    try {
+                        const tr::Bytes original = tr::readFile(file.path().string());
+                        const tr::Bytes written = tr::writeMap(tr::readMap(original));
+                        if (written == original) ++identical;
+                        else {
+                            size_t at = 0;
+                            while (at < written.size() && at < original.size() && written[at] == original[at]) ++at;
+                            std::printf("map round trip DIFFERS: %s (sizes %zu / %zu, first difference at %zu)\n", file.path().filename().string().c_str(),
+                                        original.size(), written.size(), at);
+                        }
+                    } catch (const std::exception& e) {
+                        std::printf("map round trip FAILED: %s: %s\n", file.path().filename().string().c_str(), e.what());
+                    }
+                }
+            }
+            std::printf("map round trip: %zu of %zu maps byte-identical\n", identical, maps);
+        }
         if (const char* frames = envValue("RASA_PROFILE")) {
             const int count = std::max(1, std::atoi(frames));
             struct Times { double load, particles, lights, queue, record, gpu, total; };

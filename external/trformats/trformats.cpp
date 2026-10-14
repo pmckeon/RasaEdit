@@ -835,6 +835,7 @@ MapFile readMap(const Bytes& data) {
     } else {                                                              // Entities, loader 10
         const int32_t entitySize = r.i32();
         if (entitySize < 60) throw FormatError("map: entity record smaller than 60 bytes");
+        m.entityRecordSize = entitySize;
         const int32_t count = readCount(r, size_t(entitySize), "entity");
         m.entities.reserve(size_t(count));
         for (int32_t k = 0; k < count; ++k) {
@@ -851,6 +852,7 @@ MapFile readMap(const Bytes& data) {
             e.flags = r.i32();
             e.cullLayer = r.i32();
             const int32_t particles = r.i32();
+            e.recordTail = r.bytes(size_t(entitySize) - (r.tell() - start));
             r.seek(start + size_t(entitySize));
             readParticles(r, particles, e);
             if (r.i32() != 0) {                                           // isWater (2.37+)
@@ -915,10 +917,144 @@ MapFile readMap(const Bytes& data) {
     }
     // PointLights and AudioEmitters read nothing (lights.xml / audioemitters.xml).
     m.bytesConsumed = r.tell();
+    if (m.bytesConsumed < data.size()) m.trailing.assign(data.begin() + std::ptrdiff_t(m.bytesConsumed), data.end());
     return m;
 }
 
 MapFile readMap(const std::string& path) { return readMap(readFile(path)); }
+
+namespace {
+
+struct ByteWriter {
+    Bytes out;
+    void raw(const void* p, size_t n) {
+        const uint8_t* b = static_cast<const uint8_t*>(p);
+        out.insert(out.end(), b, b + n);
+    }
+    void u8(uint8_t v) { out.push_back(v); }
+    void u16(uint16_t v) { raw(&v, 2); }        // little-endian (x86), as ByteReader reads
+    void u32(uint32_t v) { raw(&v, 4); }
+    void i32(int32_t v) { raw(&v, 4); }
+    void f32(float v) { raw(&v, 4); }           // the bits as read, so unchanged values round-trip exactly
+    void vec3(const Vec3& v) { f32(v.x); f32(v.y); f32(v.z); }
+    void quatWxyz(const Quat& q) { f32(q.w); f32(q.x); f32(q.y); f32(q.z); }
+    void hue(const HueColour& c) { u8(c.red); u8(c.green); u8(c.blue); u8(c.alpha); }
+    void bytes(const Bytes& b) { out.insert(out.end(), b.begin(), b.end()); }
+};
+
+void writeParticles(ByteWriter& w, const MapEntity& e) {
+    for (const MapParticle& p : e.particles) {
+        w.i32(p.assetId);
+        w.i32(p.connectionPoint);
+        w.vec3(p.direction);
+        w.u8(p.type);
+    }
+}
+
+}  // namespace
+
+Bytes writeMap(const MapFile& m) {
+    if (m.majorVersion != 2 || m.minorVersion < 43 || m.minorVersion > 45)
+        throw FormatError("writeMap: map format " + std::to_string(m.majorVersion) + "." + std::to_string(m.minorVersion) + " not supported");
+    ByteWriter w;
+    w.u16(m.minorVersion);
+    w.u16(m.majorVersion);
+    w.i32(m.templateVersion);
+    w.i32(m.status);
+    w.i32(int32_t(m.terrainIds.size()));
+    for (int32_t id : m.terrainIds) w.i32(id);
+    w.i32(m.terrainVis.detailLevel);
+    w.i32(m.terrainVis.algorithm);
+    w.f32(m.terrainVis.maxDistance);
+    w.f32(m.terrainVis.fadeDistance);
+    if (m.minorVersion >= 45) {
+        w.i32(int32_t(m.entities.size()));
+        for (const MapEntity& e : m.entities) {
+            w.i32(e.classId);
+            w.u32(entityIdLow(e.entityId));
+            w.u32(entityIdHigh(e.entityId));
+            w.vec3(e.location);
+            w.quatWxyz(e.orientation);
+            w.hue(e.hue1);
+            w.hue(e.hue2);
+            w.f32(e.scale);
+            w.i32(e.flags);
+            w.i32(e.cullLayer);
+            w.i32(int32_t(e.particles.size()));
+            writeParticles(w, e);
+            w.vec3(e.bounds.min);
+            w.vec3(e.bounds.max);
+        }
+    } else {
+        // Loader 10: i32 record size, then the count.
+        const int32_t recordSize = m.entityRecordSize >= 60 ? m.entityRecordSize : 60;
+        w.i32(recordSize);
+        w.i32(int32_t(m.entities.size()));
+        for (const MapEntity& e : m.entities) {
+            const size_t start = w.out.size();
+            w.i32(e.classId);
+            w.u32(entityIdLow(e.entityId));
+            w.u32(entityIdHigh(e.entityId));
+            w.vec3(e.location);
+            w.quatWxyz(e.orientation);
+            w.hue(e.hue1);
+            w.f32(e.scale);
+            w.i32(e.flags);
+            w.i32(e.cullLayer);
+            w.i32(int32_t(e.particles.size()));
+            Bytes tail = e.recordTail;
+            tail.resize(size_t(recordSize) - (w.out.size() - start), 0);
+            w.bytes(tail);
+            writeParticles(w, e);
+            w.i32(e.hasWater ? 1 : 0);
+            if (e.hasWater) {
+                w.i32(e.waterVersion);
+                w.bytes(e.waterData);
+            }
+        }
+    }
+    w.i32(int32_t(m.generatedAbvs.size()));
+    for (const MapGeneratedAbv& a : m.generatedAbvs) {
+        w.u32(entityIdLow(a.entityId));
+        w.u32(entityIdHigh(a.entityId));
+        w.u8(a.shape);
+        w.vec3(a.extents);
+    }
+    w.i32(m.dayLengthSeconds);
+    w.i32(m.startingSkyTime);
+    w.i32(int32_t(m.cameraScripts.size()));
+    for (const MapCameraScript& s : m.cameraScripts) {
+        w.i32(s.id);
+        w.i32(s.returnTimeMs);
+        w.i32(int32_t(s.keyframes.size()));
+        for (const MapCameraKeyframe& kf : s.keyframes) {
+            w.i32(kf.frameNumber);
+            w.vec3(kf.position);
+            w.quatWxyz(kf.rotation);
+            w.f32(kf.focalLength);
+            w.i32(kf.arriveTimeMs);
+            w.i32(kf.holdTimeMs);
+        }
+    }
+    const bool regionV3 = m.minorVersion >= 44;
+    w.i32(int32_t(m.regions.size()));
+    for (const MapRegion& g : m.regions) {
+        w.i32(g.regionId);
+        w.i32(g.priority);
+        w.i32(g.enabledFlags);
+        w.i32(g.ambient);
+        w.i32(g.music);
+        if (!regionV3) {
+            w.i32(g.music2);
+            w.i32(g.music3);
+        }
+        w.i32(g.environmentMap);
+        w.i32(g.sky);
+        w.i32(g.displayName);
+    }
+    w.bytes(m.trailing);
+    return w.out;
+}
 
 // ------------------------------------------------------------------------------------------
 // .vis

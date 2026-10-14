@@ -351,6 +351,7 @@ struct MapEntity {
     bool hasWater = false;                // 2.43/2.44 only
     int32_t waterVersion = 0;
     Bytes waterData;                      // UNKNOWN layout (172 bytes for version 1, 44 for version 2)
+    Bytes recordTail;                     // 2.43/2.44: the record's bytes after the 60 parsed ones (UNKNOWN; kept for writeMap)
 };
 
 inline uint32_t entityIdLow(uint64_t id) { return static_cast<uint32_t>(id & 0xFFFFFFFF); }
@@ -411,12 +412,17 @@ struct MapFile {
     int32_t startingSkyTime = 0;
     std::vector<MapCameraScript> cameraScripts;
     std::vector<MapRegion> regions;
+    int32_t entityRecordSize = 0;         // 2.43/2.44: the file's entity record size (>= 60)
+    Bytes trailing;                       // bytes after the parsed sections (none in the shipped maps; kept for writeMap)
     size_t bytesConsumed = 0;
     size_t fileSize = 0;
 };
 
 MapFile readMap(const Bytes& data);
 MapFile readMap(const std::string& path);
+// The inverse of readMap: the same layout for the map's own version. A map read and written back unchanged is byte-identical
+// (checked on every shipped map: viewport_test RASA_MAPROUNDTRIP=1). New entities in a 2.43/2.44 map get a zero-filled record tail.
+Bytes writeMap(const MapFile& map);
 
 // ------------------------------------------------------------------------------------------
 // .vis (as read by the client's BodyContainerAABSP / PVS deserializers)
