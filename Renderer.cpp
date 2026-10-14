@@ -537,7 +537,9 @@ void Renderer::beginFrame(const Mat4& viewProjection, const tr::Vec3& cameraPosi
         const tr::Vec3 forward = scaled(toward, -1.0f);
         const tr::Vec3 right = normalized(cross(std::fabs(forward.y) > 0.99f ? tr::Vec3{0, 0, 1} : tr::Vec3{0, 1, 0}, forward));
         const tr::Vec3 up = cross(forward, right);
-        const tr::Vec3 ahead = add(cameraPosition, scaled(normalized(lighting.cameraForward), shadowAhead));
+        const tr::Vec3 level{lighting.cameraForward.x, 0, lighting.cameraForward.z};
+        const float levelLength = std::sqrt(level.x * level.x + level.z * level.z);
+        const tr::Vec3 ahead = levelLength > 1e-4f ? add(cameraPosition, scaled(level, shadowAhead / levelLength)) : cameraPosition;
         const float cx = dot(ahead, right), cy = dot(ahead, up);
         const float cz = dot(cameraPosition, forward);
         const tr::Vec3 centre = add(add(scaled(right, cx), scaled(up, cy)), scaled(forward, cz));

@@ -263,11 +263,12 @@ public:
     static constexpr uint32_t shadowSize = 2048;
     // The game's sun shadow map (fitted to 3,868 frames of an apitrace capture at Alia Das, tabula_rasa.3.trace, 2026-10-14, with
     // Client.Graphics.ShadowDistance 100): orthographic, 2048 x 2048, half width 35.84 m (constant in every frame), depth range
-    // 400 m (|row 2| = 0.0025), centred in the light's plane on the camera + 27.9 m along its view direction (27.4 - 28.4 as the
-    // stepped sun direction changes; residual < 0.15 m), not texel-snapped.
+    // 400 m (|row 2| = 0.0025), centred in the light's plane on the camera + 27.7 m along its HORIZONTAL view direction (pitch
+    // ignored: fitted over both Alia Das captures, a level camera and one pitched up 39 degrees - median residual 0.34 m, max 0.89
+    // as the stepped sun direction changes; the projected 3D view direction leaves 6 - 8 m), not texel-snapped.
     static constexpr float shadowExtent = 35.84f;   // half width in metres
     static constexpr float shadowDepth = 400.0f;
-    static constexpr float shadowAhead = 27.9f;     // centre: metres ahead of the camera
+    static constexpr float shadowAhead = 27.7f;     // centre: metres ahead of the camera, horizontally
     void record(SDL_GPUCommandBuffer* commands);
     size_t queuedDraws() const { return draws_.size() + translucentDraws_.size() + additiveDraws_.size() + particleBatches_.size(); }
     size_t queuedParticleVertices() const { return particleVertices_.size(); }
