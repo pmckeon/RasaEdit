@@ -1670,8 +1670,20 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 if (part.forwardLit)
                     for (const tr::GeoParameter& gp : piece.parameters) {
                         if (gp.key == "DetailTexture" && !water) part.detail = texture(gp.value);
-                        if (gp.key == "DetailTexCoord") part.detailUv1 = std::atoi(gp.value.c_str()) == 1;
+                        if (gp.key == "DetailTexCoord") part.detailSet = std::clamp(std::atoi(gp.value.c_str()), 0, 2);
                         if (gp.key == "MatDiffuse") part.matDiffuseAlpha = parseColour(gp.value).w;
+                        for (int slot = 0; slot < 3; ++slot) {
+                            if (gp.key != "TexCoordTransform" + std::to_string(slot)) continue;
+                            float e[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+                            std::istringstream values(gp.value);
+                            for (float& x : e) values >> x;
+                            // MATRIX_COLUMNS in the forward vertex shaders too (u row e0 e4 e8, v row e1 e5 e9).
+                            const Vec4f u{e[0], e[4], e[8], 0}, v{e[1], e[5], e[9], 0};
+                            TrMaterial& m = part.forwardUv;
+                            if (slot == 0) { m.transform0u = u; m.transform0v = v; }
+                            if (slot == 1) { m.transform1u = u; m.transform1v = v; }
+                            if (slot == 2) { m.transform2u = u; m.transform2v = v; }
+                        }
                     }
                 // Effects whose (non-debug) passes set CULLMODE = NONE, from the compiled effects in effects.glm (fx_2_0
                 // state tables, 2026-10-10): every other model effect keeps PalGlobalEffect's CCW (back faces culled).
@@ -1714,7 +1726,7 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                     if (track.parameter == "TexCoordTransform3") part.uvTrack3 = int(t);
                 }
                 if ((part.uvTrack0 >= 0 || part.uvTrack1 >= 0 || part.uvTrack2 >= 0 || part.uvTrack3 >= 0) &&
-                    (part.aniso || part.refract || part.trMaterial.active || part.waterShader))
+                    (part.aniso || part.refract || part.trMaterial.active || part.waterShader || part.forwardLit))
                     model.materialAnimated = true;
                 model.pieces.push_back(part);
                 if (additive) continue;
@@ -1761,6 +1773,11 @@ void SceneView::loadModel(const std::string& name, Model& model) {
         // Position sets a different node; the templates' Position is their authoring location (point_bane_rotatingligh
         // t_orange: 243, 9, 113, 90 m from the Bootcamp lamp whose light shows at the lamp in game), so it is not used -
         // how the attach (FUN_0088c610) parents the nodes is not fully traced. Light Mods are not applied.
+        // WorldOrientation is that authoring node's rotation and is not used either: the rotation is the contact point's
+        // x LocalOrientation. Checked 2026-10-15 at Bootcamp's medical tent (prop_hum_lamp_v02, hps_lit1 rotation
+        // (0.5, -0.5, 0.5, 0.5) -> spot_hum_int_owhite_florescent.ltmp, WorldOrientation 90 degrees about x): the contact
+        // point alone aims the spot down, and the game's /dl_showlight (session image 268) shows the tent lit from above;
+        // with WorldOrientation applied too the spot shone sideways.
         for (const tr::GeoContactPoint& cp : geo.contactPoints) {
             for (size_t k = 0; k < cp.values.size(); ++k) {
                 if (tr::toLowerAscii(cp.values[k].key) != "lsys") continue;
@@ -1784,7 +1801,7 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 const Mat4 frame = contactPointFrame(geo, *target);
                 for (tr::PlacedLight light : lights) {
                     light.position = transformPoint(frame, light.offset);
-                    light.worldOrientation = multiplyQuat(target->rotation, light.worldOrientation);
+                    light.worldOrientation = multiplyQuat(target->rotation, light.localOrientation);
                     model.lights.push_back(light);
                     model.lightBones.push_back(target->bone);
                 }
@@ -2554,6 +2571,16 @@ void SceneView::queueDraws(const Selection& selection) {
         Renderer& renderer;
         ~SkinScope() { renderer.clearSkin(); }
     };
+    // A forward-phase piece's TexCoordTransforms: the stored ones, replaced by the model animation's material tracks.
+    auto forwardTransforms = [&](const Model* model, const ModelPiece& piece) {
+        TrMaterial m = piece.forwardUv;
+        UvTransforms uv{m.transform0u, m.transform0v, m.transform1u, m.transform1v, m.transform2u, m.transform2v};
+        if (model && animatedUvTransforms(*model, piece, lightTime, uv)) {
+            m.transform0u = uv.u0; m.transform0v = uv.v0; m.transform1u = uv.u1; m.transform1v = uv.v1;
+            m.transform2u = uv.u2; m.transform2v = uv.v2;
+        }
+        return m;
+    };
     auto drawEffect = [&](const Model* model, const ModelPiece& piece, const Mat4& world, const Mat4& placementWorld) {   // model: material tracks
         SkinScope skinScope{renderer_};
         setPieceSkin(piece);
@@ -2567,9 +2594,11 @@ void SceneView::queueDraws(const Selection& selection) {
             }
             renderer_.drawAnisoAdditive(piece.mesh, world, m, !piece.twoSided);
         }
-        else if (piece.forwardLit)
+        else if (piece.forwardLit) {
+            const TrMaterial uv = forwardTransforms(model, piece);
             renderer_.drawAdditive(piece.mesh, world, scaledTint(Vec4f{1, 1, 1, piece.matDiffuseAlpha}, piece.colourScale), showTextures ? piece.texture : nullptr,
-                                   true, showTextures ? piece.detail : nullptr, piece.detailUv1, !piece.twoSided);
+                                   true, showTextures ? piece.detail : nullptr, piece.detailSet, !piece.twoSided, &uv);
+        }
         else renderer_.drawAdditive(piece.mesh, world, scaledTint(Vec4f{1, 1, 1, 1}, piece.colourScale), showTextures ? piece.texture : nullptr, false, nullptr,
                                     false, !piece.twoSided);
     };
@@ -2627,9 +2656,12 @@ void SceneView::queueDraws(const Selection& selection) {
                 }
                 renderer_.drawWater(piece.mesh, world, m);
             } else if (piece.water) renderer_.drawTranslucent(piece.mesh, world, waterTint(selected));
-            else if (piece.translucent)
+            else if (piece.translucent) {
+                const TrMaterial uv = forwardTransforms(&model, piece);
                 renderer_.drawTranslucent(piece.mesh, world, scaledTint(Vec4f{tint.x, tint.y, tint.z, tint.w * piece.matDiffuseAlpha}, piece.colourScale),
-                                          showTextures ? piece.texture : nullptr, showTextures ? piece.detail : nullptr, piece.detailUv1, !piece.twoSided);
+                                          showTextures ? piece.texture : nullptr, showTextures ? piece.detail : nullptr, piece.detailSet, !piece.twoSided,
+                                          piece.forwardLit ? &uv : nullptr);
+            }
             else {
                 Vec4f hue = !showTextures || !piece.hued ? Vec4f{0, 0, 0, 0} : entityHue.w > 0.5f ? entityHue : piece.materialHue;
                 if (hue.w > 0.5f && piece.hueUnweighted) hue.w = 2.0f;
@@ -2794,7 +2826,8 @@ void SceneView::queueDraws(const Selection& selection) {
                 }
                 if (piece.translucent) {
                     renderer_.drawTranslucent(piece.mesh, drawWorld, scaledTint(Vec4f{tint.x, tint.y, tint.z, tint.w * piece.matDiffuseAlpha}, piece.colourScale),
-                                              showTextures ? piece.texture : nullptr, showTextures ? piece.detail : nullptr, piece.detailUv1, !piece.twoSided);
+                                              showTextures ? piece.texture : nullptr, showTextures ? piece.detail : nullptr, piece.detailSet, !piece.twoSided,
+                                              piece.forwardLit ? &piece.forwardUv : nullptr);   // avatar parts: no material tracks
                     return;
                 }
                 Vec4f hue = !showTextures || !piece.hued ? Vec4f{0, 0, 0, 0} : piece.flesh ? s.skinHue : partHue;

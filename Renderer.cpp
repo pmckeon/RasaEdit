@@ -597,11 +597,17 @@ void Renderer::drawRefract(const GpuMesh& mesh, const Mat4& model, const Refract
 }
 
 void Renderer::drawTranslucent(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, SDL_GPUTexture* texture, SDL_GPUTexture* detail,
-                               bool detailUv1, bool cullBack) {
+                               int detailSet, bool cullBack, const TrMaterial* uvTransforms) {
     if (!mesh.vertices || mesh.indexCount == 0) return;
     DrawItem item{&mesh, model, tint, true, texture ? texture : white_, false, nullptr, true, Vec4f{0, 0, 0, 0}, black_};
     item.detail = detail;
-    item.layers = Vec4f{detailUv1 ? 1.0f : 0.0f, 0, detail ? 1.0f : 0.0f, 0};
+    item.layers = Vec4f{float(detailSet), 0, detail ? 1.0f : 0.0f, 0};
+    if (uvTransforms) {
+        item.forwardUv = true;                   // tr.active stays false
+        item.tr.transform0u = uvTransforms->transform0u; item.tr.transform0v = uvTransforms->transform0v;
+        item.tr.transform1u = uvTransforms->transform1u; item.tr.transform1v = uvTransforms->transform1v;
+        item.tr.transform2u = uvTransforms->transform2u; item.tr.transform2v = uvTransforms->transform2v;
+    }
     item.cullBlended = cullBack;
     item.skinVertices = currentSkin_;
     item.boneBase = currentBoneBase_;
@@ -626,14 +632,20 @@ void Renderer::drawFadingForward(const GpuMesh& mesh, const Mat4& model, const V
 }
 
 void Renderer::drawAdditive(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, SDL_GPUTexture* texture, bool lit, SDL_GPUTexture* detail,
-                            bool detailUv1, bool cullBack) {
+                            int detailSet, bool cullBack, const TrMaterial* uvTransforms) {
     if (!mesh.vertices || mesh.indexCount == 0) return;
     DrawItem item{&mesh, model, tint, false, texture ? texture : white_, false, nullptr, true, Vec4f{0, 0, 0, 0}, black_};
     item.additive = true;
     item.forwardLit = lit;
     item.cullBlended = cullBack;
     item.detail = detail;
-    item.layers = Vec4f{detailUv1 ? 1.0f : 0.0f, 0, detail ? 1.0f : 0.0f, 0};
+    item.layers = Vec4f{float(detailSet), 0, detail ? 1.0f : 0.0f, 0};
+    if (uvTransforms) {
+        item.forwardUv = true;                   // tr.active stays false
+        item.tr.transform0u = uvTransforms->transform0u; item.tr.transform0v = uvTransforms->transform0v;
+        item.tr.transform1u = uvTransforms->transform1u; item.tr.transform1v = uvTransforms->transform1v;
+        item.tr.transform2u = uvTransforms->transform2u; item.tr.transform2v = uvTransforms->transform2v;
+    }
     item.skinVertices = currentSkin_;
     item.boneBase = currentBoneBase_;
     item.skinNormals = currentSkinNormals_;
@@ -1164,7 +1176,7 @@ void Renderer::recordItem(SDL_GPUCommandBuffer*& commands, SDL_GPURenderPass*& p
                                 Vec4f{item.normalMap ? 1.0f : 0.0f, item.glossMap ? 1.0f : 0.0f, item.environment && environment_ ? 1.0f : 0.0f,
                                       item.trHairCutout ? 1.0f : 0.0f},
                                 Vec4f{item.tr.flags.x, item.tr.flags.y, environment_ ? item.tr.flags.z : 0.0f,
-                                      float(item.tr.active ? (uint32_t(item.tr.flags.w) | 0x1) : 0u)},
+                                      float(item.tr.active ? (uint32_t(item.tr.flags.w) | 0x1) : item.forwardUv ? 0x20u : 0u)},
                                 item.tr.specular, item.tr.emissive, item.tr.transform0u, item.tr.transform0v, item.tr.transform1u,
                                 item.tr.transform1v, item.tr.transform2u, item.tr.transform2v};
         u.lightDirection.w = item.lit ? 1.0f : 0.0f;

@@ -122,7 +122,8 @@ int main(int argc, char** argv) {
                             b.inverseBindT.x, b.inverseBindT.y, b.inverseBindT.z, x.x, x.y, x.z, y.x, y.y, y.z, z.x, z.y, z.z, det);
             }
             for (const tr::GeoContactPoint& c : geo.contactPoints) {
-                std::printf("contact point %u bone %d at (%.3f %.3f %.3f):", c.id, c.bone, c.position.x, c.position.y, c.position.z);
+                std::printf("contact point %u bone %d at (%.3f %.3f %.3f) rotation (%.3f %.3f %.3f %.3f):", c.id, c.bone, c.position.x, c.position.y, c.position.z,
+                            c.rotation.x, c.rotation.y, c.rotation.z, c.rotation.w);
                 for (const tr::GeoParameter& kv : c.values) std::printf(" %s=%s", kv.key.c_str(), kv.value.c_str());
                 std::printf("\n");
             }
@@ -220,8 +221,8 @@ int main(int argc, char** argv) {
                 const tr::MapEntity& e = map.map.entities[k];
                 const float dx = e.location.x - x, dz = e.location.z - z;
                 if (dx * dx + dz * dz > radius * radius) continue;
-                std::printf("near %zu %s at %.1f %.1f %.1f scale %.2f\n", k, data.classMeshName(e.classId).c_str(), e.location.x, e.location.y, e.location.z,
-                            e.scale);
+                std::printf("near %zu %s at %.1f %.1f %.1f scale %.2f orientation %.3f %.3f %.3f %.3f\n", k, data.classMeshName(e.classId).c_str(), e.location.x,
+                            e.location.y, e.location.z, e.scale, e.orientation.x, e.orientation.y, e.orientation.z, e.orientation.w);
             }
         }
         // RASA_FADEDUMP=<multiplier>: per map entity the game's distance fade (tabula_rasa.exe FUN_00856c00, see CLAUDE.md

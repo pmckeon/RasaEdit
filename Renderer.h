@@ -228,12 +228,15 @@ public:
     bool cullBackFaces = true;
     // Alpha-blended (opacity = tint.w x vertex alpha x texture alpha), lit, drawn after all opaque draws, without depth
     // writes: water, and pieces in the game's Translucent phase (SRCALPHA / INVSRCALPHA, PhaseTranslucent.fx).
-    // detail: the forward pieces' detail layer (added around 0.5), sampled with UV set 1 when detailUv1.
+    // detail: the forward pieces' detail layer (added around 0.5), sampled with UV set detailSet (0 / 1 / 2).
+    // uvTransforms (forward pieces): diffuse = UV set 0 x transform 0, detail = UV set detailSet x transform detailSet
+    // (vsBasicStatic2TexVertColor); only its transform fields are read. Null: the UVs as stored.
     // cullBack (translucent, additive, aniso): back faces culled when cullBackFaces is on - every phase and TRAdditive*
     // effect sets no CULLMODE, so PalGlobalEffect's CCW applies (fxcull.py, 2026-10-13); water (TRWaterReflectRefract) and
     // the four NONE effects are two-sided.
     void drawTranslucent(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, SDL_GPUTexture* texture = nullptr,
-                         SDL_GPUTexture* detail = nullptr, bool detailUv1 = false, bool cullBack = false);
+                         SDL_GPUTexture* detail = nullptr, int detailSet = 0, bool cullBack = false,
+                         const TrMaterial* uvTransforms = nullptr);
     // A TR piece drawn with its forward technique while its body is in the distance fade band (SceneView, "fading" in
     // drawModelPieces): the translucent pipeline (SRCALPHA / INVSRCALPHA, no depth writes), sky lights only (no placed lights),
     // alpha = lerp(diffuse.a, modifier.a, vertex alpha) - TrMaterial flags.w bit 0x10.
@@ -241,7 +244,8 @@ public:
     // Additive (one, one), unlit, faded by fog, drawn last without depth writes: the game's TRAdditive* effects.
     // lit: a forward-phase piece in the Additive phase (lit per vertex, opacity x tint.w = MatDiffuse alpha).
     void drawAdditive(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, SDL_GPUTexture* texture, bool lit = false,
-                      SDL_GPUTexture* detail = nullptr, bool detailUv1 = false, bool cullBack = false);
+                      SDL_GPUTexture* detail = nullptr, int detailSet = 0, bool cullBack = false,
+                      const TrMaterial* uvTransforms = nullptr);
     // The game's TRAdditiveAnisoSpec* effects (holograms): additive, with detail/decal layers and a view-angle light ramp.
     void drawAnisoAdditive(const GpuMesh& mesh, const Mat4& model, const AnisoMaterial& material, bool cullBack = false, bool sky = false);
     // Sky layers (TRasa::SkyLayer bodies in the Sky phase, see SceneView::queueSky): drawn after the opaque geometry and before
@@ -312,6 +316,7 @@ private:
         bool trHairCutout = false;               // TRHair: kill where the normal map's alpha < 0.5
         bool castsShadow = true;                 // drawn into the sun shadow map (see setShadowCasting)
         bool sky = false;                        // sky layer: at the far plane (drawSkyEmissive / drawAnisoAdditive(..., sky))
+        bool forwardUv = false;                  // forward piece with TexCoordTransforms in tr (trFlags.w bit 0x20)
     };
     SDL_GPUShader* createShader(const unsigned char* dxil, size_t dxilSize, const unsigned char* spirv, size_t spirvSize,
                                 const char* entryPoint, SDL_GPUShaderStage stage, uint32_t samplers, uint32_t storageBuffers = 0);

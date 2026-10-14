@@ -282,7 +282,10 @@ private:
         // /dl_showdiffuse): lit per vertex, detail layer, opacity x MatDiffuse alpha.
         bool forwardLit = false;
         SDL_GPUTexture* detail = nullptr;
-        bool detailUv1 = false;
+        int detailSet = 0;                     // DetailTexCoord: the detail map's UV set (0 / 1 / 2)
+        // The forward technique's TexCoordTransforms (vsBasicStatic2TexVertColor, disassembled 2026-10-15: diffuse = UV set 0 x
+        // TexCoordTransform0, detail = UV set n x TexCoordTransform<n>); only the transform fields are used.
+        TrMaterial forwardUv;
         float matDiffuseAlpha = 1.0f;
         bool flesh = false;                    // swap group "flesh": hued with the skin colour
         uint32_t swapId = 0;                   // avatar swap set (0: not swappable)

@@ -72,7 +72,8 @@ cbuffer FragmentUniforms : register(b0, space3)
                               // b environment reflection), z: 1 = environment cube reflection (t9), w: 1 = cut-out by normal-map alpha
     // TR* deferred materials (TrMaterial in Renderer.h): slot 1 map in t2 on uv1, slot 2 map in t3 on uv2.
     float4 trFlags;           // x slot 1 kind, y slot 2 kind (1 modifier, 2 detail, 3 decal), z environment mode, w bits (1 active,
-                              // 2 albedo x (2 vcol + emissive), 4 specular, 8 emissive glow)
+                              // 2 albedo x (2 vcol + emissive), 4 specular, 8 emissive glow, 0x10 fading forward,
+                              // 0x20 forward piece: UV transforms only)
     float4 trSpecular;        // MatSpecular
     float4 trEmissive;        // MatEmissive x 0.5
     float4 trTransform[6];    // TexCoordTransform0..2: u row, v row
@@ -246,7 +247,7 @@ float4 psMain(VertexOutput input) : SV_Target0
         return float4(anisoAdditive(input), 1.0);
     }
     const uint trBits = (uint)trFlags.w;
-    const float2 uv0 = (trBits & 0x1) ? trTransformUv(input.uv, 0) : input.uv;
+    const float2 uv0 = (trBits & 0x21) ? trTransformUv(input.uv, 0) : input.uv;
     const float4 texel = diffuseTexture.Sample(diffuseSampler, uv0);
     if (options.x > 0.0 && texel.a < options.x)
         discard;
@@ -260,7 +261,12 @@ float4 psMain(VertexOutput input) : SV_Target0
     // Detail layer, added around 0.5 grey (the forward TRDiffMapDetMapVertColor pixel shader psPixelShader:
     // (diffuse + detail - 0.5) x lit vertex colour x 2). Set only for forward-phase pieces.
     if (layers.z > 0.5)
-        albedo += detailTexture.Sample(detailSampler, layers.x > 0.5 ? input.uv1 : input.uv).rgb - 0.5;
+    {
+        // layers.x: the detail map's UV set; trBits 0x20: x TexCoordTransform<set> (vsBasicStatic2TexVertColor).
+        const uint detailSet = (uint)(layers.x + 0.5);
+        const float2 detailUv = detailSet == 2 ? input.uv2 : detailSet == 1 ? input.uv1 : input.uv;
+        albedo += detailTexture.Sample(detailSampler, (trBits & 0x20) ? trTransformUv(detailUv, detailSet) : detailUv).rgb - 0.5;
+    }
     float4 base = input.colour * tint * float4(albedo, 1.0);
     if (options.z > 0.5)
     {

@@ -325,6 +325,11 @@ std::vector<PlacedLight> readLights(const Bytes& data, const std::map<std::strin
             const std::vector<float> q = numbers(orientation->second);
             if (q.size() >= 4) light.worldOrientation = Quat{q[0], q[1], q[2], q[3]};
         }
+        const auto local = p.find("LocalOrientation");
+        if (local != p.end()) {
+            const std::vector<float> q = numbers(local->second);
+            if (q.size() >= 4) light.localOrientation = Quat{q[0], q[1], q[2], q[3]};
+        }
         if (p.count("GlobeMapFile")) light.globeMap = p.at("GlobeMapFile");
         light.coneAngle = number(p, "ConeAngle", 45);
         light.penumbraAngle = number(p, "PenumbraAngle", 60);
