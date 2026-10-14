@@ -294,6 +294,8 @@ private:
             tr::ConnectionPointName connection;    // what lookups match (see tr::ConnectionPointName)
             Mat4 frame;                        // model space; posed models: on the posed skeleton
             tr::Quat rotation;
+            int32_t bone = -1;                 // skeleton bone the point hangs on (-1: none)
+            Mat4 local = identityMatrix();     // the point's transform relative to that bone
         };
         std::vector<ContactFrame> contactFrames;
         // Animation playback (map objects with an X.anm named like their model): pieces skinned wholly to one bone are
@@ -308,6 +310,8 @@ private:
         mutable uint64_t boneFrame = 0;        // frame whose bone palette was uploaded (setPieceSkin)
         mutable uint32_t boneBase = 0;
         std::vector<Mat4> restSkin;            // skin matrices the mesh was posed with at load (frame 0 / bind pose)
+        bool avatarPose = false;               // a creature's idle pose ("%" key): posed per placement (ServerPlacement::idles)
+        tr::GeoModel poseSkeleton;             // avatar parts: the base body's bones they are posed on (empty: own bones)
         mutable std::vector<Mat4> frameSkin;   // currentSkin's cache
         mutable uint64_t frameSkinFrame = 0;
     };
@@ -350,6 +354,12 @@ private:
         Model* body = nullptr;
         tr::SfxLight event;
     };
+    struct IdleSequence {               // a creature's idle playback (poseIdle)
+        float start = 0;                // light-clock time the current animation started
+        float last = -1;                // light-clock time of the last update (a clock running backwards restarts)
+        int32_t current = -1;           // index in ServerPlacement::idles; -1 = not started
+        uint32_t random = 1;            // Park-Miller state
+    };
     struct ServerPlacement {
         Selection selection;
         tr::Vec3 position;
@@ -365,6 +375,8 @@ private:
             Vec4f hue;
         };
         std::vector<BodyAccessory> bodyAccessories;
+        std::vector<tr::GameData::FamilyAnimation> idles;   // creatures: "Idle - Non Combat", played in sequence (poseIdle)
+        mutable IdleSequence idle;
         Vec4f skinHue;                  // w: 1 = hue flesh pieces
         Vec4f colour;
         float ringRadius = 0;           // spawn radius / trigger radius (0: none)
@@ -380,6 +392,17 @@ private:
     float entityDistanceAlpha(const Placement& p) const;    // 1 opaque, (0.01, 1) fading, <= 0.01 culled
     Model* objectModelFor(const std::string& mesh, const std::string& packageAnimation = "");
     std::unordered_map<std::string, std::string> objectAnimations_;   // mesh -> its object animation ("" = none)
+    // Creature idles: animations by name (null = failed to read), bone -> track per (model, animation), and the palettes of the
+    // creature being drawn (model -> bone base, set by poseIdle, cleared after the placement) with its base skeleton's posed bones.
+    const tr::Animation* idleAnimation(const std::string& name);
+    const std::vector<int>& idleTracks(const Model& model, const tr::Animation& animation);
+    bool poseIdle(const ServerPlacement& s);
+    std::unordered_map<std::string, std::unique_ptr<tr::Animation>> idleAnimations_;
+    std::map<std::pair<const Model*, const tr::Animation*>, std::vector<int>> idleTracks_;
+    const std::vector<int>& poseBoneIndices(const Model& part, const Model& base);
+    std::map<std::pair<const Model*, const Model*>, std::vector<int>> poseBoneIndices_;
+    std::unordered_map<const Model*, uint32_t> skinOverride_;
+    std::vector<Mat4> idlePosed_;
     SceneLighting skyLightingAt() const;       // the sky part of lighting()
     // Puts the camera distance metres from target, looking at it (see focusOn).
     void frameTarget(const tr::Vec3& target, float distance);
@@ -446,7 +469,9 @@ private:
     void addPackageEffects(const std::string& package, Model* body, int depth, StateEffects& effects);
     // A contact point's frame on a body (cp 0 = the body itself); false when the body is not loaded or lacks the id.
     // Lookup by connection point (type 1, `usage`, id) as FUN_00924880; id 0 = the body itself (special-FX events).
-    static bool contactFrame(const Model* body, uint32_t id, uint32_t usage, Mat4& frame, tr::Quat& rotation);
+    // posedBones: the body's bones posed this frame (a creature's idle); the point then follows its bone.
+    static bool contactFrame(const Model* body, uint32_t id, uint32_t usage, Mat4& frame, tr::Quat& rotation,
+                             const std::vector<Mat4>* posedBones = nullptr);
     AvatarResolver serverAvatarFor_;
     std::unordered_map<std::string, Model> models_;
     struct ParticleFile {

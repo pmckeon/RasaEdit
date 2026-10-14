@@ -144,10 +144,14 @@ std::vector<int> boneTrackIndices(const tr::GeoModel& geo, const tr::Animation& 
     return indices;
 }
 
+// skeletonPosed / skeletonIndex: the pose skeleton already posed, and per bone of geo its index there (-1: none) - in place of
+// posing `skeleton` here and matching bones by name.
 std::vector<Mat4> skinMatrices(const tr::GeoModel& geo, const tr::Animation& animation, float time, const tr::GeoModel* skeleton = nullptr,
-                               std::vector<Mat4>* posedOut = nullptr, const std::vector<int>* boneTracks = nullptr) {
+                               std::vector<Mat4>* posedOut = nullptr, const std::vector<int>* boneTracks = nullptr,
+                               const std::vector<Mat4>* skeletonPosedIn = nullptr, const std::vector<int>* skeletonIndex = nullptr) {
     std::unordered_map<std::string, Mat4> skeletonPosed;
-    if (skeleton) {
+    const bool indexed = skeletonPosedIn && skeletonIndex;
+    if (skeleton && !indexed) {
         const size_t m = skeleton->bones.size();
         std::vector<Mat4> world(m);
         for (size_t k = 0; k < m; ++k) {
@@ -187,7 +191,10 @@ std::vector<Mat4> skinMatrices(const tr::GeoModel& geo, const tr::Animation& ani
         rootScale[k] = hasParent ? rootScale[size_t(bone.parent)] : bone.scale;
         bindWorld[k] = hasParent ? multiply(bindWorld[size_t(bone.parent)], bindLocal) : bindLocal;
         posedWorld[k] = hasParent ? multiply(posedWorld[size_t(bone.parent)], posedLocal) : posedLocal;
-        if (!skeletonPosed.empty()) {
+        if (indexed) {
+            if (k < skeletonIndex->size() && (*skeletonIndex)[k] >= 0 && size_t((*skeletonIndex)[k]) < skeletonPosedIn->size())
+                posedWorld[k] = (*skeletonPosedIn)[size_t((*skeletonIndex)[k])];
+        } else if (!skeletonPosed.empty()) {
             const auto found = skeletonPosed.find(tr::toLowerAscii(bone.name));
             if (found != skeletonPosed.end()) posedWorld[k] = found->second;
         }
@@ -1149,7 +1156,10 @@ Vec4f parseColour(const std::string& text) {
 void SceneView::loadModel(const std::string& name, Model& model) {
     try {
         // name is "<mesh>", "<mesh>|<animation>" (posed: skinned pieces in the animation's first frame) or
-        // "<mesh>|<animation>|<skeleton mesh>" (avatar parts: posed on the base body's skeleton).
+        // "<mesh>|<animation>|<skeleton mesh>" (avatar parts: posed on the base body's skeleton). The animation may be marked:
+        // "@" a map object's own animation (played), "%" a creature's idle pose - skinned on the GPU with stored vertices so the
+        // creature's idle sequence can pose it per frame (ServerPlacement::idles); built and, without a per-frame palette,
+        // drawn in the animation's first frame.
         const size_t bar = name.find('|');
         const size_t bar2 = bar == std::string::npos ? std::string::npos : name.find('|', bar + 1);
         const tr::GeoModel geo = tr::readGeo(assets_.read(name.substr(0, bar)));
@@ -1161,7 +1171,8 @@ void SceneView::loadModel(const std::string& name, Model& model) {
             try {
                 std::string animationName = name.substr(bar + 1, bar2 == std::string::npos ? std::string::npos : bar2 - bar - 1);
                 const bool marked = !animationName.empty() && animationName[0] == '@';     // a map object's own animation
-                if (marked) animationName = animationName.substr(1);
+                const bool avatarPose = !animationName.empty() && animationName[0] == '%';  // a creature's idle pose
+                if (marked || avatarPose) animationName = animationName.substr(1);
                 tr::GeoModel skeletonGeo;
                 if (bar2 != std::string::npos) skeletonGeo = tr::readGeo(assets_.read(name.substr(bar2 + 1)));
                 const tr::Animation animation = tr::readAnimation(assets_.read(animationName));
@@ -1174,6 +1185,12 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                     model.boneTracks = boneTrackIndices(model.skeleton, model.animation);
                     model.restInverse.clear();
                     for (const Mat4& m : skin) model.restInverse.push_back(affineInverse(m));
+                }
+                if (avatarPose && !skin.empty()) {
+                    objectAnimation = true;                 // GPU skin buffers; no rigid-piece path (restInverse stays empty)
+                    model.avatarPose = true;
+                    model.skeleton.bones = geo.bones;
+                    if (bar2 != std::string::npos) model.poseSkeleton.bones = skeletonGeo.bones;
                 }
             } catch (const std::exception& e) {
                 SDL_Log("pose %s: %s; drawing the bind pose", name.c_str(), e.what());
@@ -1612,6 +1629,14 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 frame = multiply(posedBones[size_t(cp.bone)], local);
             }
             model.contactFrames.push_back(Model::ContactFrame{cp.id, tr::parseConnectionPointName(cp), frame, cp.rotation});
+            if (cp.bone >= 0) {                     // re-posed per frame on animated creatures (avatar accessories)
+                Mat4 local = rotationMatrix(cp.rotation);
+                local.row0.w = cp.position.x;
+                local.row1.w = cp.position.y;
+                local.row2.w = cp.position.z;
+                model.contactFrames.back().bone = cp.bone;
+                model.contactFrames.back().local = local;
+            }
         }
         // Particle systems on contact points ("psys" "<cp>,<file>.pfx"): the point's frame, on its bone's bind pose.
         for (const tr::ParticleAttachment& a : tr::particleAttachments(geo)) {
@@ -1841,11 +1866,107 @@ void SceneView::setPieceSkin(const ModelPiece& piece) {
         return;
     }
     const Model& model = *piece.skinOwner;
+    const auto posed = skinOverride_.find(&model);          // a creature's idle, posed for the placement being drawn
+    if (posed != skinOverride_.end()) {
+        renderer_.setSkin(piece.skinBuffer, posed->second, piece.skinNormals);
+        return;
+    }
     if (model.boneFrame != frameNumber_) {
         model.boneBase = renderer_.addBones(currentSkin(model));
         model.boneFrame = frameNumber_;
     }
     renderer_.setSkin(piece.skinBuffer, model.boneBase, piece.skinNormals);
+}
+
+// ------------------------------------------------------------------------------------------
+// Creature idles
+// ------------------------------------------------------------------------------------------
+const tr::Animation* SceneView::idleAnimation(const std::string& name) {
+    auto found = idleAnimations_.find(name);
+    if (found == idleAnimations_.end()) {
+        std::unique_ptr<tr::Animation> animation;
+        try {
+            animation = std::make_unique<tr::Animation>(tr::readAnimation(assets_.read(name)));
+        } catch (const std::exception& e) {
+            SDL_Log("idle %s: %s", name.c_str(), e.what());
+        }
+        found = idleAnimations_.emplace(name, std::move(animation)).first;
+    }
+    return found->second.get();
+}
+
+const std::vector<int>& SceneView::idleTracks(const Model& model, const tr::Animation& animation) {
+    const auto key = std::make_pair(&model, &animation);
+    auto found = idleTracks_.find(key);
+    if (found == idleTracks_.end()) found = idleTracks_.emplace(key, boneTrackIndices(model.skeleton, animation)).first;
+    return found->second;
+}
+
+// Per bone of an avatar part, its index in the base body's skeleton (by name, case-insensitive, as skinMatrices matches them).
+const std::vector<int>& SceneView::poseBoneIndices(const Model& part, const Model& base) {
+    const auto key = std::make_pair(&part, &base);
+    auto found = poseBoneIndices_.find(key);
+    if (found == poseBoneIndices_.end()) {
+        std::unordered_map<std::string, int> byName;
+        for (size_t k = 0; k < base.skeleton.bones.size(); ++k) byName.emplace(tr::toLowerAscii(base.skeleton.bones[k].name), int(k));
+        std::vector<int> indices;
+        for (const tr::GeoBone& bone : part.skeleton.bones) {
+            const auto b = byName.find(tr::toLowerAscii(bone.name));
+            indices.push_back(b == byName.end() ? -1 : b->second);
+        }
+        found = poseBoneIndices_.emplace(key, std::move(indices)).first;
+    }
+    return found->second;
+}
+
+// The client plays a creature's "Idle - Non Combat" family as an ambient family: chained, from the first frame, and each time an
+// animation ends the next is drawn by weighted random over the family's frequencies (characteranimationmgr.py
+// UpdateAnimations -> PlayAnimationFamily(chain=1, randStartFrame=0) -> ChainAnimationFamily, _SelectAnimation). The editor uses
+// its own random stream (Park-Miller, seeded by the placement) on the light clock, so the order is not the game's; a clock that
+// runs backwards restarts the sequence. Fills skinOverride_ (the base model's and each part's palette) and idlePosed_ (the base
+// skeleton's posed bones, for accessory sockets). False: draw the models' stored first frame.
+bool SceneView::poseIdle(const ServerPlacement& s) {
+    if (!animateSkins || s.idles.empty() || !s.model || !s.model->avatarPose || s.model->skeleton.bones.empty()) return false;
+    IdleSequence& q = s.idle;
+    int32_t total = 0;
+    for (const tr::GameData::FamilyAnimation& a : s.idles) total += std::max(a.frequency, 0);
+    auto pick = [&]() {
+        q.random = uint32_t(uint64_t(q.random) * 48271u % 2147483647u);
+        if (total <= 0) return int32_t(0);
+        int32_t r = int32_t(double(q.random) / 2147483647.0 * double(total));
+        for (size_t k = 0; k < s.idles.size(); ++k) {
+            r -= std::max(s.idles[k].frequency, 0);
+            if (r < 0) return int32_t(k);
+        }
+        return int32_t(s.idles.size() - 1);
+    };
+    const float now = std::max(lightTime, 0.0f);
+    if (q.current < 0 || now < q.last) {
+        q.random = uint32_t(s.selection.index % 2147483646u) + 1u;
+        q.start = 0;
+        q.current = pick();
+    }
+    q.last = now;
+    const tr::Animation* animation = nullptr;
+    for (int guard = 0; guard < 100000; ++guard) {
+        animation = idleAnimation(s.idles[size_t(q.current)].name);
+        const float duration = animation ? animation->duration : 0.0f;
+        if (duration > 0.0f && now - q.start < duration) break;
+        q.start += duration;
+        q.current = pick();
+        animation = nullptr;
+    }
+    if (!animation) return false;
+    const float t = now - q.start;
+    const Model& base = *s.model;
+    skinOverride_[&base] = renderer_.addBones(skinMatrices(base.skeleton, *animation, t, nullptr, &idlePosed_, &idleTracks(base, *animation)));
+    for (const AvatarDraw& part : s.avatarParts) {
+        const Model* m = part.model;
+        if (!m || !m->loaded || !m->avatarPose || m->skeleton.bones.empty() || skinOverride_.count(m)) continue;
+        skinOverride_[m] = renderer_.addBones(skinMatrices(m->skeleton, *animation, t, nullptr, nullptr, &idleTracks(*m, *animation), &idlePosed_,
+                                                           &poseBoneIndices(*m, base)));
+    }
+    return true;
 }
 
 // ------------------------------------------------------------------------------------------
@@ -1878,7 +1999,7 @@ void SceneView::addPackageEffects(const std::string& package, Model* body, int d
     }
 }
 
-bool SceneView::contactFrame(const Model* body, uint32_t id, uint32_t usage, Mat4& frame, tr::Quat& rotation) {
+bool SceneView::contactFrame(const Model* body, uint32_t id, uint32_t usage, Mat4& frame, tr::Quat& rotation, const std::vector<Mat4>* posedBones) {
     frame = identityMatrix();
     rotation = tr::Quat{};
     if (id == 0) return true;
@@ -1886,6 +2007,7 @@ bool SceneView::contactFrame(const Model* body, uint32_t id, uint32_t usage, Mat
     for (const Model::ContactFrame& c : body->contactFrames)
         if (c.connection.valid && c.connection.type == 1 && c.connection.usage == usage && c.connection.id == id) {
             frame = c.frame;
+            if (posedBones && c.bone >= 0 && size_t(c.bone) < posedBones->size()) frame = multiply((*posedBones)[size_t(c.bone)], c.local);
             rotation = c.rotation;
             return true;
         }
@@ -2181,6 +2303,11 @@ void SceneView::queueDraws(const Selection& selection) {
         const bool hasModel = s.model && s.model->loaded && (s.model->hasSolid || s.model->effectOnly);
         if (hasModel) {
             const Vec4f tint = modelTint(selected);
+            struct IdleScope {                  // the creature's idle palettes apply to this placement only
+                SceneView& view;
+                ~IdleScope() { view.skinOverride_.clear(); }
+            } idleScope{*this};
+            const bool idling = poseIdle(s);
             Mat4 drawWorld = s.world;          // accessories on connection points draw elsewhere
             auto drawPiece = [&](const ModelPiece& piece, const Vec4f& partHue) {
                 SkinScope skinScope{renderer_};
@@ -2261,7 +2388,7 @@ void SceneView::queueDraws(const Selection& selection) {
                 if (!a.model || !a.model->loaded) continue;
                 Mat4 socket, plug;
                 tr::Quat ignored;
-                if (!contactFrame(s.model, a.connectionPoint, 1, socket, ignored)) continue;
+                if (!contactFrame(s.model, a.connectionPoint, 1, socket, ignored, idling ? &idlePosed_ : nullptr)) continue;
                 if (!contactFrame(a.model, a.connectionPoint, 2, plug, ignored)) plug = identityMatrix();
                 drawWorld = multiply(s.world, multiply(rigid(socket), affineInverse(rigid(plug))));
                 // The appearance colour is not a hue here (traced 2026-10-14): AddAccessory's RGBA reaches FinalizeAddAccessory
@@ -2766,10 +2893,13 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
         s.model = creature ? modelFor(meshForClass(creature->classId)) : nullptr;
         if (creature && avatarFor) {
             const AvatarLook look = avatarFor(*creature);
-            if (!look.baseMesh.empty()) s.model = modelFor(look.baseMesh, look.poseAnimation);
+            // "%": built for GPU skinning so the idle sequence can pose it per frame (poseIdle).
+            const std::string pose = look.poseAnimation.empty() ? std::string() : "%" + look.poseAnimation;
+            if (!look.baseMesh.empty()) s.model = modelFor(look.baseMesh, pose);
             s.skinHue = hueFromAbgr(look.skinColour);
             for (const AvatarPart& part : look.parts)
-                s.avatarParts.push_back(AvatarDraw{modelFor(part.mesh, look.poseAnimation, look.baseMesh), part.swapsetId, hueFromAbgr(part.colour)});
+                s.avatarParts.push_back(AvatarDraw{modelFor(part.mesh, pose, look.baseMesh), part.swapsetId, hueFromAbgr(part.colour)});
+            s.idles = look.idles;
             for (const AvatarAccessory& a : look.accessories)
                 s.bodyAccessories.push_back(ServerPlacement::BodyAccessory{objectModelFor(a.mesh), uint32_t(a.connectionPoint), hueFromAbgr(a.colour)});
         }

@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-namespace tr { class GameData; }
+#include "gamedata.h"
 class WorldDatabase;
 struct Creature;
 
@@ -31,9 +31,12 @@ struct AvatarAccessory {
 
 struct AvatarLook {
     std::string baseMesh;          // "" if the creature class has no mesh
-    // Pose: the first "Idle - Non Combat" animation of the base mesh's skeleton (animationdata); "" = bind pose.
-    // Skeleton 23 (human female) has no families: the male list with "m_" -> "f_" is used (UNVERIFIED rule).
+    // Idle: family 1 "Idle - Non Combat" of the base mesh's skeleton (animationdata.animationFamilyData[(1, skeleton)]); the
+    // client plays an ambient family chained, picking the next animation by weighted random (frequency) each time one ends
+    // (characteranimationmgr.py UpdateAnimations / PlayAnimationFamily / _SelectAnimation). poseAnimation = the first: the
+    // pose the models are built in (and drawn in when not animating); "" = bind pose.
     std::string poseAnimation;
+    std::vector<tr::GameData::FamilyAnimation> idles;
     uint32_t skinColour = 0;       // ABGR hue for "flesh" pieces: the Face slot (17) colour; 0 = none (UNVERIFIED rule)
     std::vector<AvatarPart> parts;
     std::vector<AvatarAccessory> accessories;

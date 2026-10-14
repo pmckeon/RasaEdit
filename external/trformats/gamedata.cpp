@@ -833,14 +833,20 @@ int32_t GameData::meshSkeletonId(int32_t meshId) {
     return py::isInt(id) ? int32_t(py::asInt(id)) : -1;
 }
 
-std::vector<std::string> GameData::familyAnimations(int32_t skeletonId, int32_t familyId) {
-    std::vector<std::string> names;
-    const py::Object* list = py::dictGetTuple(global("generated.client.animationdata", "animationFamilyData"), {skeletonId, familyId});
+std::vector<GameData::FamilyAnimation> GameData::familyAnimations(int32_t familyId, int32_t skeletonId) {
+    std::vector<FamilyAnimation> animations;
+    const py::Object* list = py::dictGetTuple(global("generated.client.animationdata", "animationFamilyData"), {familyId, skeletonId});
     for (size_t k = 0; k < py::length(list); ++k) {
-        const py::Object* animation = py::item(py::item(list, k), 0);
-        if (py::isInt(animation)) names.push_back(stringById(int32_t(py::asInt(animation))));
+        const py::Object* entry = py::item(list, k);
+        const py::Object* animation = py::item(entry, 0);
+        const py::Object* frequency = py::item(entry, 1);
+        if (!py::isInt(animation)) continue;
+        FamilyAnimation a;
+        a.name = stringById(int32_t(py::asInt(animation)));
+        a.frequency = py::isInt(frequency) ? int32_t(py::asInt(frequency)) : 1;
+        if (!a.name.empty()) animations.push_back(std::move(a));     // _FilterAnimList drops ids the string table lacks
     }
-    return names;
+    return animations;
 }
 
 }  // namespace tr

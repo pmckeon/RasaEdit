@@ -193,9 +193,15 @@ public:
     std::string swapsetName(int32_t swapsetId);               // swapset[id], e.g. "Torso"
 
     // Animation sets (generated.client.animationdata): meshSkeleton[meshId] = skeletonId;
-    // animationFamilyData[(skeletonId, familyId)] = [(animation string id, weight, ...)], family 1 = "Idle - Non Combat".
+    // animationFamilyData[(familyId, skeletonId)] = [(animation string id, frequency, min level, max level, ...)] - the key is
+    // FAMILY first (client/characteranimationmgr.py _SelectAnimation: .get((animFamilyId, skeletonId))); family 1 = "Idle - Non
+    // Combat". (Read as (skeleton, family) until 2026-10-14, which only worked for skeleton 1 = family 1.)
+    struct FamilyAnimation {
+        std::string name;                                     // .anm
+        int32_t frequency = 1;                                // weight of the random pick
+    };
     int32_t meshSkeletonId(int32_t meshId);                   // -1 if the mesh has none
-    std::vector<std::string> familyAnimations(int32_t skeletonId, int32_t familyId);   // .anm names, table order
+    std::vector<FamilyAnimation> familyAnimations(int32_t familyId, int32_t skeletonId);   // table order
 
 private:
     ZipArchive zip_;
