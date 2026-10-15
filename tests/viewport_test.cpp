@@ -4,6 +4,7 @@
 #include "Avatar.h"
 #include "SceneView.h"
 #include "UiCanvas.h"
+#include "UiSchema.h"
 #include "gamedata.h"
 #include "WorldDatabase.h"
 
@@ -42,6 +43,108 @@ int main(int argc, char** argv) {
         // data\xml\Tabula_Rasa_UI_EXPORT.xml in turn with UiCanvas into <out.rgba> and exits; prints what could not be resolved.
         // RASA_UIHIDDEN=1 draws hidden widgets too, RASA_UIMOUSE=<x>,<y> puts the mouse there (logical), RASA_UISCREEN=<w>x<h> draws for that screen
         // (the output is then w x h, else the export's 1280 x 960), RASA_UIBACKGROUND=<raw rgba file of that size> draws over it.
+        // RASA_UIVALIDATE=<xml file>: lists every validation issue of that UI export (errors, then warnings unless RASA_UIWARNINGS is
+        // unset) with the element's uiid path, its root widget / template and its tag.
+        if (const char* file = envValue("RASA_UIVALIDATE")) {
+            const tr::UiDocument doc(tr::readFile(file));
+            const auto issues = uischema::validate(doc.ui(), &assets, &data);
+            const bool warnings = envValue("RASA_UIWARNINGS") != nullptr;
+            size_t errors = 0;
+            for (const auto& i : issues) errors += i.error ? 1 : 0;
+            std::printf("%s: %zu errors, %zu warnings\n", file, errors, issues.size() - errors);
+            for (int pass = 0; pass < 2; ++pass)
+                for (const auto& i : issues) {
+                    if (i.error != (pass == 0) || (!i.error && !warnings)) continue;
+                    std::string where, root, tag;
+                    if (!i.section.empty()) where = "Definitions/" + i.section;
+                    else {
+                        const tr::XmlNode* n = i.templates ? &doc.ui().templates : &doc.ui().widgets;
+                        where = i.templates ? "TemplateWidgets" : "Widgets";
+                        for (size_t k = 0; k < i.path.size() && n; ++k) {
+                            const int32_t idx = i.path[k];
+                            n = idx >= 0 && size_t(idx) < n->children.size() ? &n->children[size_t(idx)] : nullptr;
+                            if (!n) break;
+                            const std::string id = n->attribute("uiid");
+                            where += "/" + (id.empty() ? n->tag + "[" + std::to_string(idx) + "]" : id);
+                            if (k == 0) root = (id.empty() ? n->tag : id);
+                            tag = n->tag;
+                        }
+                    }
+                    std::printf("%s | %s | %s | <%s> | %s\n", i.error ? "ERROR" : "warning", root.c_str(), where.c_str(), tag.c_str(), i.message.c_str());
+                }
+            return 0;
+        }
+        // RASA_UIDOCTEST=1: validates the UI export, then edits it with tr::UiDocument (attribute set / add / remove, element insert /
+        // duplicate / move / remove), checks each result parses and reads back, undoes everything and checks the text is the original.
+        if (envValue("RASA_UIDOCTEST")) {
+            const tr::Bytes xml = tr::readFile((std::filesystem::path(argv[1]) / "data" / "xml" / "Tabula_Rasa_UI_EXPORT.xml").string());
+            auto t0 = std::chrono::steady_clock::now();
+            tr::UiDocument doc(xml);
+            std::printf("UI document: %zu bytes, parsed in %.0f ms\n", doc.text().size(),
+                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+            t0 = std::chrono::steady_clock::now();
+            const auto issues = uischema::validate(doc.ui(), &assets, &data);
+            size_t errors = 0;
+            for (const auto& i : issues) errors += i.error ? 1 : 0;
+            std::printf("validation: %zu errors, %zu warnings in %.0f ms\n", errors, issues.size() - errors,
+                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+            size_t shown = 0;
+            for (int pass = 0; pass < 2; ++pass)
+                for (const auto& i : issues)
+                    if (i.error == (pass == 0) && shown++ < 25)
+                    std::printf("  %s %s%s %s: %s\n", i.error ? "ERROR" : "warn ", i.section.c_str(), i.templates ? "T" : "",
+                                [&] { std::string s; for (int32_t k : i.path) s += "/" + std::to_string(k); return s; }().c_str(), i.message.c_str());
+            int failures = 0;
+            auto check = [&](bool ok, const char* what) { std::printf("%s %s\n", ok ? "ok  " : "FAIL", what); failures += ok ? 0 : 1; };
+            const std::string original = doc.text();
+            // FrontEnd/LogOutWindow (root 1, its LogOutWindow child).
+            std::vector<int32_t> window;
+            for (size_t k = 0; k < doc.ui().widgets.children.size(); ++k)
+                if (doc.ui().widgets.children[k].attribute("uiid") == "FrontEnd")
+                    for (size_t j = 0; j < doc.ui().widgets.children[k].children.size(); ++j)
+                        if (doc.ui().widgets.children[k].children[j].attribute("uiid") == "LogOutWindow") window = {int32_t(k), int32_t(j)};
+            check(!window.empty(), "LogOutWindow found");
+            doc.setAttribute(false, window, "anchorOffsetX", "17");
+            check(doc.node(false, window)->attribute("anchorOffsetX") == "17", "attribute changed");
+            doc.setAttribute(false, window, "colorG", "128");
+            const auto& attrs = doc.node(false, window)->attributes;
+            size_t g = 0, s0 = 0;
+            for (size_t k = 0; k < attrs.size(); ++k) { if (attrs[k].first == "colorG") g = k; if (attrs[k].first == "sizeW") s0 = k; }
+            check(doc.node(false, window)->attribute("colorG") == "128" && g > s0, "new attribute placed in the export's order");
+            doc.setAttribute(false, window, "uiid", "Logout\"<&>");
+            check(doc.node(false, window)->attribute("uiid") == "Logout\"<&>", "special characters escaped and read back");
+            doc.removeAttribute(false, window, "colorG");
+            check(!doc.node(false, window)->hasAttribute("colorG"), "attribute removed");
+            tr::XmlNode bitmap;
+            bitmap.tag = "Bitmap";
+            bitmap.attributes = {{"uiid", "NewBitmap"}, {"sizeW", "32"}, {"sizeH", "32"}, {"textureDef", "DEFAULT"}};
+            const size_t before = doc.node(false, window)->children.size();
+            const auto added = doc.insertElement(false, window, 1, bitmap);
+            check(doc.node(false, window)->children.size() == before + 1 && doc.node(false, added)->attribute("uiid") == "NewBitmap", "element inserted");
+            const auto copy = doc.duplicateElement(false, added);
+            check(doc.node(false, copy)->attribute("uiid") == "NewBitmap" && doc.node(false, window)->children.size() == before + 2, "element duplicated");
+            const auto moved = doc.moveElement(false, copy, 1);
+            check(moved.back() == copy.back() + 1 && doc.node(false, moved)->attribute("uiid") == "NewBitmap", "element moved down");
+            doc.removeElement(false, moved);
+            check(doc.node(false, window)->children.size() == before + 1, "element removed");
+            // Into a self-closing element: the first Bitmap without children.
+            std::vector<int32_t> leaf = window;
+            leaf.push_back(int32_t(before));
+            for (size_t k = 0; k < doc.node(false, window)->children.size(); ++k)
+                if (doc.node(false, window)->children[k].selfClosing) { leaf.back() = int32_t(k); break; }
+            const auto nested = doc.insertElement(false, leaf, 0, bitmap);
+            check(!doc.node(false, leaf)->selfClosing && doc.node(false, nested), "child inserted into a self-closing element");
+            const auto after = uischema::validate(doc.ui(), &assets, &data);
+            size_t afterErrors = 0;
+            for (const auto& i : after) afterErrors += i.error ? 1 : 0;
+            check(afterErrors > errors, "validation flags a Bitmap inside a Bitmap");
+            while (doc.canUndo()) doc.undo();
+            check(doc.text() == original, "undo restores the original text byte for byte");
+            while (doc.canRedo()) doc.redo();
+            check(doc.node(false, nested) != nullptr, "redo replays the edits");
+            std::printf("%d failure(s)\n", failures);
+            return failures == 0 ? 0 : 1;
+        }
         if (const char* uiPaths = envValue("RASA_UIRENDER")) {
             const tr::Bytes xml = tr::readFile((std::filesystem::path(argv[1]) / "data" / "xml" / "Tabula_Rasa_UI_EXPORT.xml").string());
             const tr::UiExport ui = tr::readUiExport(xml);
@@ -51,11 +154,15 @@ int main(int argc, char** argv) {
             canvas.setSources(&ui, &assets, &data, argv[1]);
             UiCanvas::Options options;
             options.showHidden = envValue("RASA_UIHIDDEN") != nullptr;
+            canvas.setTemplates(envValue("RASA_UITEMPLATES") != nullptr);    // paths from Definitions/TemplateWidgets
             if (const char* state = envValue("RASA_UIBUTTONS")) {        // up / highlighted / down / disabled / pressed
                 const std::string s = state;
                 options.buttonState = s == "up" ? 1 : s == "highlighted" ? 2 : s == "down" ? 3 : s == "disabled" ? 4 : s == "pressed" ? 5 : 0;
             }
             options.toggledOn = envValue("RASA_UITOGGLED") != nullptr;
+            if (const char* progress = envValue("RASA_UIPROGRESS")) options.progress = std::strtof(progress, nullptr);   // 0..1
+            if (const char* scroll = envValue("RASA_UISCROLL")) options.scroll = std::strtof(scroll, nullptr);           // 0..1
+            if (const char* animTime = envValue("RASA_UIANIM")) options.animTime = std::strtof(animTime, nullptr);       // ms
             if (const char* mouse = envValue("RASA_UIMOUSE")) {           // logical x,y: the window wires glow around it
                 options.mouseHighlight = std::sscanf(mouse, "%f,%f", &options.mouseX, &options.mouseY) == 2;
             }
@@ -73,7 +180,7 @@ int main(int argc, char** argv) {
                 if (uiPath != "*") {
                     std::stringstream parts(uiPath);
                     std::string part;
-                    const tr::XmlNode* n = &ui.widgets;
+                    const tr::XmlNode* n = canvas.root();
                     while (std::getline(parts, part, '/')) {
                         int32_t found = -1;
                         for (size_t k = 0; k < n->children.size() && found < 0; ++k)
@@ -142,6 +249,7 @@ int main(int argc, char** argv) {
             scene.setRegionEnvironmentMaps(regionEnvironmentMaps);
             scene.setClassHues([&](int32_t classId, tr::HueColour& hue1, tr::HueColour& hue2) { return data.classHue(classId, hue1, hue2); });
             scene.setUsableStatePackages([&](int32_t classId, int32_t stateId) { return data.usableStatePackage(classId, stateId); });
+            scene.setStringLookup([&](int32_t stringId) { return data.stringById(stringId); });
             scene.setUsableStateAnimations([&](int32_t classId, int32_t stateId) { return data.usableStateAnimation(classId, stateId); });
             // RASA_TIME=<fraction of the day>, RASA_SKY=<index>, RASA_NOSKY=1 / RASA_NOFOG=1 for lighting checks.
             if (const char* t = envValue("RASA_TIME")) scene.timeOfDay = float(std::atof(t));
@@ -256,6 +364,30 @@ int main(int argc, char** argv) {
             }
             std::printf("pkg scan: %zu packages, %zu failed; %zu accessories, %zu particle attaches, %zu lights\n", packages, failed,
                         accessories, particles, lights);
+        }
+        // RASA_CONSTANTS=<module>: a game data module's integer constants (GameData::moduleConstants).
+        if (const char* module = envValue("RASA_CONSTANTS")) {
+            try {
+                const auto constants = data.moduleConstants(module);
+                std::printf("%s: %zu constants\n", module, constants.size());
+                for (size_t k = 0; k < constants.size() && k < 8; ++k) std::printf("  %d %s\n", constants[k].first, constants[k].second.c_str());
+            } catch (const std::exception& e) {
+                std::printf("%s: %s\n", module, e.what());
+            }
+        }
+        // RASA_PKGINFO=<name.pkg>: one special-FX package's events (accessories, particle attaches with target / contact point, lights).
+        if (const char* pkg = envValue("RASA_PKGINFO")) {
+            try {
+                const tr::SfxPackage p = tr::readSfxPackage(assets.read(pkg));
+                for (const tr::SfxAccessory& a : p.accessories)
+                    std::printf("pkg %s accessory mesh %s anim %s package %s\n", pkg, a.mesh.c_str(), a.animation.c_str(), a.package.c_str());
+                for (const tr::SfxParticleAttach& a : p.particles)
+                    std::printf("pkg %s particles %s target %u contact point %u (v%u, unknown0 %u, unknown2 %u, flag %d)\n", pkg, a.file.c_str(), a.target,
+                                a.contactPoint, a.version, a.unknown0, a.unknown2, int(a.flag));
+                std::printf("pkg %s: %zu lights\n", pkg, p.lights.size());
+            } catch (const std::exception& e) {
+                std::printf("pkg %s: %s\n", pkg, e.what());
+            }
         }
         // RASA_GEOSCAN=1: every model's pieces whose vertex colours are all zero (colour and alpha), with names.
         if (envValue("RASA_GEOSCAN")) {
@@ -473,7 +605,8 @@ int main(int argc, char** argv) {
         std::unique_ptr<WorldDatabase> database;
         WorldContent content;
         if (const char* dbPath = envValue("RASA_DB")) {
-            database = std::make_unique<WorldDatabase>(dbPath);
+            const char* base = SDL_GetBasePath();
+            database = std::make_unique<WorldDatabase>(dbPath, defaultMySqlPluginDir(base ? base : ""));
             content = database->loadMap(database->contextIdForMap(map.name));
             scene.setServerContent(&content, database.get(), [&](int32_t id) { return data.classMeshName(id); },
                                    [&](const Creature& c) { return resolveAvatar(data, *database, c); });
@@ -595,6 +728,17 @@ int main(int argc, char** argv) {
                 destructible.name = "save test destructible";
                 destructible.destructible = DestructibleSettings{100, 22, 3, 1};
                 edited.objects.push_back(destructible);
+                const bool emitters = database->hasTable("map_emitter");
+                if (emitters) {
+                    PlacedObject emitter;
+                    emitter.kind = ObjectKind::Emitter;
+                    emitter.classId = kEmitterClassId;
+                    emitter.position = tr::Vec3{7, 8, 9};
+                    emitter.rotation = 1.25f;
+                    emitter.name = "save test emitter";
+                    emitter.emitter = EmitterSettings{4242, false};
+                    edited.objects.push_back(emitter);
+                }
                 if (!edited.wormholeLocks.empty()) edited.wormholeLocks.front().value += 1;
                 WormholeLock lock;
                 lock.fromTeleporterId = 0;
@@ -607,6 +751,7 @@ int main(int argc, char** argv) {
                 const bool saved = database->save(original, edited, summary, error);
                 const WorldContent reloaded = database->loadMap(content.mapContextId);
                 bool ambientOk = true, usableOk = false, destructibleOk = false, lockOk = false, lockEdited = edited.wormholeLocks.size() < 2;
+                bool emitterOk = !emitters;
                 for (const PlacedObject& o : edited.objects)
                     if (o.kind == ObjectKind::AmbientNpc && o.id != 0) {
                         bool found = false;
@@ -622,6 +767,9 @@ int main(int argc, char** argv) {
                                    u.resetSeconds == 5 && u.intervalMinSeconds == 6 && u.intervalMaxSeconds == 7 && u.damageMin == 8 && u.damageMax == 9 &&
                                    std::fabs(u.radius - 2.5f) < 1e-4f && u.actionArg == 3;
                     }
+                    if (r.kind == ObjectKind::Emitter && r.name == "save test emitter")
+                        emitterOk = r.classId == kEmitterClassId && r.emitter.packageId == 4242 && !r.emitter.isOn && std::fabs(r.rotation - 1.25f) < 1e-4f &&
+                                    std::fabs(r.position.z - 9.0f) < 1e-4f;
                     if (r.kind == ObjectKind::WorldDestructible && r.name == "save test destructible")
                         destructibleOk = r.classId == 3896 && r.destructible.hitPoints == 100 && r.destructible.creatureId == 22 &&
                                          r.destructible.creatureCount == 3 && r.destructible.side == 1;
@@ -631,15 +779,107 @@ int main(int argc, char** argv) {
                     if (!edited.wormholeLocks.empty() && r.id == edited.wormholeLocks.front().id) lockEdited = r.value == edited.wormholeLocks.front().value;
                 }
                 std::printf("object save test: saved %d (%d added, %d changed, %d deleted%s%s), ambient %s, usable %s, destructible %s, lock added %s, "
-                            "lock changed %s\n", saved, summary.inserted, summary.updated, summary.deleted, error.empty() ? "" : ": ", error.c_str(),
+                            "lock changed %s, emitter %s\n", saved, summary.inserted, summary.updated, summary.deleted, error.empty() ? "" : ": ", error.c_str(),
                             ambientOk ? "ok" : "FAILED", usableOk ? "ok" : "FAILED", destructibleOk ? "ok" : "FAILED", lockOk ? "ok" : "FAILED",
-                            lockEdited ? "ok" : "FAILED");
+                            lockEdited ? "ok" : "FAILED", emitterOk ? "ok" : "FAILED");
                 // Restore: the original lists (new rows deleted by id, edited rows written back).
                 const bool restored = database->save(reloaded, original, summary, error);
                 const WorldContent back = database->loadMap(content.mapContextId);
                 std::printf("object save test restore: %d (%d added, %d changed, %d deleted), %zu objects / %zu locks (originally %zu / %zu)\n", restored,
                             summary.inserted, summary.updated, summary.deleted, back.objects.size(), back.wormholeLocks.size(), original.objects.size(),
                             original.wormholeLocks.size());
+                content = back;
+                scene.setServerContent(&content, database.get(), [&](int32_t id) { return data.classMeshName(id); },
+                                       [&](const Creature& c) { return resolveAvatar(data, *database, c); });
+            }
+            // RASA_MARKERS=1: the client's map-screen markers of this map (uimapmarker.factionedmarkers) and their map_marker bindings, with
+            // the distance from the marker to the bound object recomputed against the stored match_distance.
+            if (envValue("RASA_MARKERS")) {
+                const int32_t mapTemplateId = int32_t(tr::py::asInt(
+                    tr::py::item(tr::py::dictGet(data.global("generated.client.gamecontext", "lookup"), content.mapContextId), 3), -1));   // gamecontext [3]
+                const std::vector<tr::MapScreenMarker> markers = data.factionedMapMarkers(mapTemplateId);
+                size_t bound = 0, agree = 0;
+                for (const tr::MapScreenMarker& m : markers) {
+                    std::string binding = "unbound";
+                    for (const MapMarkerBinding& b : content.mapMarkers) {
+                        if (b.markerEntityId != m.entityId) continue;
+                        ++bound;
+                        tr::Vec3 p{};
+                        bool found = false;
+                        if (b.objectKind == 1)
+                            for (const Teleporter& t : content.teleporters)
+                                if (t.id == b.objectId) p = t.position, found = true;
+                        if (b.objectKind == 2)
+                            for (const PlacedObject& o : content.objects)
+                                if (o.kind == ObjectKind::Kraftwerk && o.id == b.objectId) p = o.position, found = true;
+                        const double d = std::sqrt(double(p.x - m.x) * (p.x - m.x) + double(p.y - m.y) * (p.y - m.y) + double(p.z - m.z) * (p.z - m.z));
+                        if (found && std::fabs(d - b.matchDistance) < 0.02) ++agree;
+                        char line[160];
+                        std::snprintf(line, sizeof line, "kind %d id %lld, stored %.2f m, recomputed %.2f m", b.objectKind, static_cast<long long>(b.objectId),
+                                      b.matchDistance, found ? d : -1.0);
+                        binding = line;
+                    }
+                    std::printf("marker %lld type %d %s (%.1f %.1f %.1f): %s\n", static_cast<long long>(m.entityId), m.type, m.name.c_str(), m.x, m.y, m.z,
+                                binding.c_str());
+                }
+                std::printf("markers: %zu client, %zu bound, %zu bindings in map_marker, %zu distances agree\n", markers.size(), bound,
+                            content.mapMarkers.size(), agree);
+            }
+            // RASA_SAVETEST with map markers (maps with bindings): unbind the first, rebind the second to another object with a new
+            // distance and comment, save, reload, compare, restore.
+            if (envValue("RASA_SAVETEST") && database->hasTable("map_marker") && content.mapMarkers.size() >= 2) {
+                const WorldContent original = content;
+                WorldContent edited = content;
+                const MapMarkerBinding dropped = edited.mapMarkers.front();
+                edited.mapMarkers.erase(edited.mapMarkers.begin());
+                MapMarkerBinding& changed = edited.mapMarkers.front();
+                changed.objectId = 4242;
+                changed.matchDistance = 7.25;
+                changed.hasComment = true;
+                changed.comment = "save test marker";
+                const MapMarkerBinding expect = changed;
+                WorldDatabase::SaveSummary summary;
+                std::string error;
+                const bool saved = database->save(original, edited, summary, error);
+                const WorldContent reloaded = database->loadMap(content.mapContextId);
+                bool ok = reloaded.mapMarkers.size() == edited.mapMarkers.size();
+                for (const MapMarkerBinding& m : reloaded.mapMarkers) {
+                    if (m.markerEntityId == dropped.markerEntityId) ok = false;
+                    if (m.markerEntityId == expect.markerEntityId)
+                        ok = ok && m.objectId == 4242 && std::fabs(m.matchDistance - 7.25) < 1e-9 && m.hasComment && m.comment == "save test marker";
+                }
+                const bool restored = database->save(reloaded, original, summary, error);
+                const WorldContent back = database->loadMap(content.mapContextId);
+                std::printf("map marker save test: saved %d%s%s, %s; restored %d, %zu bindings (originally %zu)\n", saved, error.empty() ? "" : ": ",
+                            error.c_str(), ok ? "bindings match" : "FAILED", restored, back.mapMarkers.size(), original.mapMarkers.size());
+                content = back;
+                scene.setServerContent(&content, database.get(), [&](int32_t id) { return data.classMeshName(id); },
+                                       [&](const Creature& c) { return resolveAvatar(data, *database, c); });
+            }
+            // RASA_SAVETEST with control point links (maps with control points): drop the first link, add a boss link, save, reload,
+            // compare as sets, then restore.
+            if (envValue("RASA_SAVETEST") && database->hasTable("control_point_link") && !content.controlPointLinks.empty()) {
+                const WorldContent original = content;
+                WorldContent edited = content;
+                const ControlPointLink dropped = edited.controlPointLinks.front();
+                edited.controlPointLinks.erase(edited.controlPointLinks.begin());
+                const ControlPointLink added{dropped.controlPointId, 5, 999001};
+                edited.controlPointLinks.push_back(added);
+                WorldDatabase::SaveSummary summary;
+                std::string error;
+                const bool saved = database->save(original, edited, summary, error);
+                const WorldContent reloaded = database->loadMap(content.mapContextId);
+                const auto has = [](const std::vector<ControlPointLink>& list, const ControlPointLink& l) {
+                    for (const ControlPointLink& x : list)
+                        if (x.controlPointId == l.controlPointId && x.kind == l.kind && x.objectId == l.objectId) return true;
+                    return false;
+                };
+                const bool ok = reloaded.controlPointLinks.size() == edited.controlPointLinks.size() && has(reloaded.controlPointLinks, added) &&
+                                !has(reloaded.controlPointLinks, dropped);
+                const bool restored = database->save(reloaded, original, summary, error);
+                const WorldContent back = database->loadMap(content.mapContextId);
+                std::printf("control point link save test: saved %d%s%s, %s; restored %d, %zu links (originally %zu)\n", saved, error.empty() ? "" : ": ",
+                            error.c_str(), ok ? "links match" : "FAILED", restored, back.controlPointLinks.size(), original.controlPointLinks.size());
                 content = back;
                 scene.setServerContent(&content, database.get(), [&](int32_t id) { return data.classMeshName(id); },
                                        [&](const Creature& c) { return resolveAvatar(data, *database, c); });
@@ -704,6 +944,15 @@ int main(int argc, char** argv) {
                                 saved, summary.inserted, summary.updated, summary.deleted, error.empty() ? "" : ": ", error.c_str(),
                                 sameRows(objectives2, objectives3) ? "match" : "DIFFER", sameRows(triggers2, triggers3) ? "match" : "DIFFER",
                                 objectives.key.size());
+                    // Restore (the test can then run again on the same database - a MySQL server is not a fresh copy each time).
+                    if (saved) {
+                        const bool restored = database->saveTables({{&objectives3, &objectives}, {&triggers3, &triggers}}, summary, error);
+                        std::printf("generic table save test restore: %d, %s\n", restored,
+                                    sameRows(objectives, database->loadTable("mission_objective_definition")) &&
+                                            sameRows(triggers, database->loadTable("mission_trigger"))
+                                        ? "original back"
+                                        : "FAILED");
+                    }
                 }
                 // Foreign keys (PRAGMA foreign_keys = ON in WorldDatabase): deleting a mission that still has a mission_area row
                 // (ON DELETE RESTRICT) must fail and leave the mission in place.

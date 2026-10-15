@@ -3597,6 +3597,25 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
                 s.idleDelayUpper = animation.delayUpper;
             }
         }
+        if (o.kind == ObjectKind::Emitter) {
+            // FXPackageEmitter: the body is particle_proxy.geo (no pieces, client/augmentations/emitter.py); while on, the package is
+            // attached to it (fxpackageemitter.py TurnOn: body.AttachFXPackage(stringtable[package], [], [])).
+            s.model = nullptr;
+            std::string package;
+            if (o.emitter.isOn && stringFor_) {
+                try { package = stringFor_(int32_t(o.emitter.packageId)); } catch (const std::exception&) {}
+            }
+            if (package.size() > 4 && package.compare(package.size() - 4, 4, ".pkg") == 0) {
+                // The package's events attach to the proxy's contact points: particle_proxy.geo has no pieces but carries every
+                // HPS_ connection point (VFX1, Head, Right_Hand, ...) at its origin, 1 cm up - e.g. smokeplume_fire.pkg attaches
+                // vfx_smokeplume.pfx to connection point 28 (HPS_VFX1).
+                StateEffects fx;
+                addPackageEffects(package, objectModelFor("particle_proxy.geo"), 0, fx);
+                s.accessories = fx.accessories;
+                s.stateParticles = fx.particles;
+                s.stateLights = fx.lights;
+            }
+        }
         s.colour = markerColour::ofObject(o.kind);
         s.ringRadius = 1.5f;
         s.facing = o.kind != ObjectKind::Logos;
@@ -3627,6 +3646,31 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
                 s.linkTarget = pool.position;
             }
         serverPlacements_.push_back(s);
+    }
+    // Control point links: a line from each linked pool / teleporter / footlocker to its control point.
+    for (const ControlPointLink& link : content->controlPointLinks) {
+        const PlacedObject* point = nullptr;
+        for (const PlacedObject& o : content->objects)
+            if (o.kind == ObjectKind::ControlPoint && o.id == link.controlPointId) point = &o;
+        if (!point) continue;
+        Selection target{};
+        if (link.kind == 1 || link.kind == 2) {
+            for (size_t k = 0; k < content->spawnPools.size(); ++k)
+                if (content->spawnPools[k].id == link.objectId) target = Selection{SelectionKind::SpawnPool, k};
+        } else if (link.kind == 3 || link.kind == 4) {
+            for (size_t k = 0; k < content->teleporters.size(); ++k)
+                if (content->teleporters[k].id == link.objectId) target = Selection{SelectionKind::Teleporter, k};
+        } else if (link.kind == 6) {
+            for (size_t k = 0; k < content->objects.size(); ++k)
+                if (content->objects[k].kind == ObjectKind::Footlocker && content->objects[k].id == link.objectId) target = Selection{SelectionKind::Object, k};
+        }
+        if (target.kind == SelectionKind::None) continue;
+        for (ServerPlacement& s : serverPlacements_)
+            if (s.selection.kind == target.kind && s.selection.index == target.index && !s.linked) {
+                s.linked = true;
+                s.linkTarget = point->position;
+                break;
+            }
     }
     // Patrol steps: a line from each to the next of its pool, and from the last back to the first (the circuit Rasa.NET's
     // Patrols walks); a facing arrow where the step turns the creature.

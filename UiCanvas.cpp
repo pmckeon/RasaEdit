@@ -45,6 +45,14 @@ void anchorPoint(int32_t anchor, int32_t w, int32_t h, int32_t& x, int32_t& y) {
     }
 }
 
+// Colour modulation (FUN_008b7280, per byte): 0 if either is 0, the other if one is 255, else round(a x b / 255).
+uint8_t multiplyColour(uint8_t a, uint8_t b) {
+    if (a == 0 || b == 0) return 0;
+    if (a == 255) return b;
+    if (b == 255) return a;
+    return uint8_t(std::lround(double(a) * double(b) / 255.0));
+}
+
 UiCanvas::Rect intersect(const UiCanvas::Rect& a, const UiCanvas::Rect& b) {
     return UiCanvas::Rect{std::max(a.x0, b.x0), std::max(a.y0, b.y0), std::min(a.x1, b.x1), std::min(a.y1, b.y1)};
 }
@@ -299,8 +307,8 @@ UiCanvas::Face* UiCanvas::face(const std::string& family) {
 void UiCanvas::setSources(const tr::UiExport* ui, const tr::AssetLibrary* assets, tr::GameData* game, const std::string& gameRoot) {
     ui_ = ui;
     if (ui_) {
-        width_ = ui_->logicalWidth;
-        height_ = ui_->logicalHeight;
+        width_ = 1280;
+        height_ = 960;
     }
     assets_ = assets;
     game_ = game;
@@ -308,6 +316,7 @@ void UiCanvas::setSources(const tr::UiExport* ui, const tr::AssetLibrary* assets
     images_.clear();
     faces_.clear();
     fontFiles_.clear();
+    loadAnimations();
     fontFilesListed_ = false;
     drawn_.clear();
     missingTextures_.clear();
@@ -315,8 +324,57 @@ void UiCanvas::setSources(const tr::UiExport* ui, const tr::AssetLibrary* assets
     missingTextIds_.clear();
 }
 
-const tr::XmlNode* UiCanvas::node(const tr::UiExport& ui, const std::vector<int32_t>& path) {
-    const tr::XmlNode* n = &ui.widgets;
+void UiCanvas::setExport(const tr::UiExport* ui) {
+    ui_ = ui;
+    loadAnimations();
+}
+
+void UiCanvas::loadAnimations() {
+    animations_.clear();
+    if (ui_) {
+        for (const tr::XmlNode& a : ui_->animations.children) {
+            if (a.tag != "Animation") continue;
+            const tr::XmlNode* id = a.child("id");
+            if (!id || id->text.empty()) continue;
+            Animation anim;
+            const tr::XmlNode* type = a.child("animType");
+            anim.bitmap = type && type->text == "Bitmap";
+            const tr::XmlNode* playback = a.child("playbackType");
+            if (playback) anim.playback = playback->text == "pingpong" ? 2 : playback->text == "repeat" ? 1 : 0;
+            auto readTrack = [&](const char* tag, AnimTrack& track, std::initializer_list<const char*> names) {
+                const tr::XmlNode* t = a.child(tag);
+                if (!t) return;
+                track.discrete = t->attribute("discrete") == "true";
+                for (const tr::XmlNode& f : t->children) {
+                    AnimKey key;
+                    key.time = uint32_t(std::strtoul(f.attribute("time").c_str(), nullptr, 10));
+                    int k = 0;
+                    for (const char* n : names) key.v[k++] = std::strtof(f.attribute(n).c_str(), nullptr);
+                    track.keys.push_back(key);
+                }
+                std::stable_sort(track.keys.begin(), track.keys.end(), [](const AnimKey& x, const AnimKey& y) { return x.time < y.time; });
+                if (!track.keys.empty()) anim.length = std::max(anim.length, track.keys.back().time);
+            };
+            if (anim.bitmap) {
+                readTrack("uvTrack", anim.uv, {"X", "Y", "Z", "W"});
+                readTrack("rotTrack", anim.rot, {"rot"});
+                if (const tr::XmlNode* r = a.child("rotTrack")) {
+                    if (r->hasAttribute("anchorX")) anim.anchorX = std::strtof(r->attribute("anchorX").c_str(), nullptr);
+                    if (r->hasAttribute("anchorY")) anim.anchorY = std::strtof(r->attribute("anchorY").c_str(), nullptr);
+                }
+            } else {
+                readTrack("scaleTrack", anim.scale, {"X", "Y"});
+                readTrack("transTrack", anim.trans, {"X", "Y"});
+                readTrack("colorTrack", anim.colour, {"R", "G", "B", "A"});
+            }
+            animations_[id->text] = std::move(anim);
+        }
+    }
+}
+
+const tr::XmlNode* UiCanvas::node(const std::vector<int32_t>& path) const {
+    const tr::XmlNode* n = root();
+    if (!n) return nullptr;
     for (int32_t i : path) {
         if (i < 0 || size_t(i) >= n->children.size()) return nullptr;
         n = &n->children[size_t(i)];
@@ -324,38 +382,174 @@ const tr::XmlNode* UiCanvas::node(const tr::UiExport& ui, const std::vector<int3
     return n;
 }
 
-UiCanvas::Rect UiCanvas::childRect(const tr::XmlNode& widget, const Rect& parent) const {
+// Animations (tabula_rasa.exe client\tr\ui\anim, decompiled 2026-10-15). Loaders: AnimData FUN_008bf0a0 (id; playbackType pingpong
+// 2, repeat 1, else - "stall" - 0), WidgetAnimData FUN_008ba880 (scaleTrack / transTrack: (time, X, Y); colorTrack: (time, R, G, B, A)),
+// BitmapAnimData FUN_008c0250 (uvTrack (time, X, Y, Z, W), rotTrack (time, rot) with anchorX / anchorY, default 0.5; textureTrack -
+// empty in the export). Widgets name theirs with widgetAnimName (Widget loader FUN_0089c630 -> slot 88), bitmaps with bitmapAnimName
+// (FUN_008f4070 -> slot 135); setting one starts its player at once (slot 91: AnimManager FUN_0088d100 makes a WidgetAnimPlayer /
+// BitmapAnimPlayer, FUN_0088d3a0 starts it at time 0). Per frame (FUN_008bf780) the player's time t (ms, x speed 1.0) is wrapped
+// (FUN_008bf440): length = the longest track's last key (FUN_008bba90); length 0 = nothing applied; repeat t mod length; pingpong t mod
+// 2 length, mirrored past length; stall unwrapped. Each track is sampled (FUN_008bc1c0 / FUN_008bbdc0 / FUN_008c2190; keys sorted by
+// time on first use): no keys = not applied; one key, or t at or before the first: the first; at or after the last: the last; else
+// between the keys around t with f = (t - t0) / (t1 - t0): linear (vectors FUN_008bd310 / FUN_008c3fd0; colours per channel, rounded
+// and clamped, FUN_004445c0 / FUN_00444390), or for a discrete track the earlier key while f < 1. UNVERIFIED: no in-game animation was
+// captured; the clock here is one shared time (the game starts each widget's at load, and autoRestartAnims - Widget + 0x98 - restarts
+// it, presumably when shown; that call was not traced).
+bool UiCanvas::sampleAnimation(const std::string& name, bool bitmap, AnimFrame& frame) const {
+    if (options_.animTime < 0 || name.empty()) return false;
+    const auto it = animations_.find(name);
+    if (it == animations_.end() || it->second.bitmap != bitmap || it->second.length == 0) return false;
+    const Animation& a = it->second;
+    uint32_t t = uint32_t(options_.animTime);
+    if (a.playback != 0 || t < a.length) animating_ = true;
+    if (a.playback == 1) t %= a.length;
+    else if (a.playback == 2) {
+        t %= a.length * 2;
+        if (t > a.length) t = a.length * 2 - t;
+    }
+    auto sampleTrack = [&](const AnimTrack& track, int components, bool colour, float out[4]) {
+        if (track.keys.empty()) return false;
+        const std::vector<AnimKey>& k = track.keys;
+        if (k.size() == 1 || t <= k.front().time) {
+            for (int c = 0; c < components; ++c) out[c] = k.front().v[c];
+            return true;
+        }
+        if (t >= k.back().time) {
+            for (int c = 0; c < components; ++c) out[c] = k.back().v[c];
+            return true;
+        }
+        size_t i = 1;
+        while (i + 1 < k.size() && k[i].time < t) ++i;      // k[i - 1].time < t <= k[i].time
+        const AnimKey& p = k[i - 1];
+        const AnimKey& n = k[i];
+        const float f = n.time != p.time ? float(t - p.time) / float(n.time - p.time) : 0.0f;
+        for (int c = 0; c < components; ++c) {
+            if (colour) {
+                const float v = f <= 0 ? p.v[c] : f >= 1 ? n.v[c] : float(std::lround(p.v[c] + f * (n.v[c] - p.v[c])));
+                out[c] = std::clamp(v, 0.0f, 255.0f);
+            } else if (track.discrete) {
+                out[c] = f < 1 ? p.v[c] : n.v[c];
+            } else {
+                out[c] = f <= 0 ? p.v[c] : f >= 1 ? n.v[c] : p.v[c] + f * (n.v[c] - p.v[c]);
+            }
+        }
+        return true;
+    };
+    float v[4];
+    if (bitmap) {
+        if ((frame.uv = sampleTrack(a.uv, 4, false, v))) std::copy(v, v + 4, frame.uvRect);
+        if ((frame.rot = sampleTrack(a.rot, 1, false, v))) {
+            frame.rotation = v[0];
+            frame.anchorX = a.anchorX;
+            frame.anchorY = a.anchorY;
+        }
+        return frame.uv || frame.rot;
+    }
+    if ((frame.scale = sampleTrack(a.scale, 2, false, v))) {
+        frame.scaleX = v[0];
+        frame.scaleY = v[1];
+    }
+    if ((frame.trans = sampleTrack(a.trans, 2, false, v))) {
+        frame.transX = v[0];
+        frame.transY = v[1];
+    }
+    if ((frame.colour = sampleTrack(a.colour, 4, true, v)))
+        for (int c = 0; c < 4; ++c) frame.rgba[c] = uint8_t(v[c]);
+    return frame.scale || frame.trans || frame.colour;
+}
+
+// Layout (Widget slot 105, FUN_0089d740, read in the assembly 2026-10-15): size w x h (sizeW / sizeH, or the parent's size with
+// resizeToParent); a widget animation's scale makes it trunc(w x sx) x trunc(h x sy), centred: offset ((w - w') / 2, (h - h') / 2)
+// (integer halves towards 0); its translation adds (trunc(tx), trunc(ty)). With a parent: left = parent left + trunc((anchor position +
+// offset) x S), width trunc(w' x S), S = the parent's scale (slot 107: its own animation scale x its parent's, so children shrink with
+// it); the anchor position (FUN_008b6fb0) uses the unscaled sizes. Without animations this is the plain anchor layout.
+UiCanvas::Placed UiCanvas::place(const tr::XmlNode& widget, const Placed& parent) const {
     int32_t w = intAttribute(widget, "sizeW"), h = intAttribute(widget, "sizeH");
     if (attributeIsTrue(widget, "resizeToParent")) {
-        w = parent.width();
-        h = parent.height();
+        w = parent.w;
+        h = parent.h;
+    }
+    if (const auto so = buttonOverrides_.find(&widget); so != buttonOverrides_.end() && so->second.size) {
+        w = so->second.width;
+        h = so->second.height;
+    }
+    if (&widget == options_.dragNode) {
+        w += options_.dragW;
+        h += options_.dragH;
     }
     // Full-screen windows (declared at the export's logical size) take a wider screen's width (see fitToScreen).
-    if (ui_ && width_ != ui_->logicalWidth && w == ui_->logicalWidth && h == ui_->logicalHeight && parent.width() == width_) w = width_;
+    if (width_ != 1280 && w == 1280 && h == 960 && parent.w == width_) w = width_;
     int32_t px = 0, py = 0, cx = 0, cy = 0;
-    anchorPoint(intAttribute(widget, "parentAnchor"), parent.width(), parent.height(), px, py);
+    anchorPoint(intAttribute(widget, "parentAnchor"), parent.w, parent.h, px, py);
     anchorPoint(intAttribute(widget, "childAnchor"), w, h, cx, cy);
     int32_t offsetX = intAttribute(widget, "anchorOffsetX"), offsetY = intAttribute(widget, "anchorOffsetY");
+    if (&widget == options_.dragNode) {
+        offsetX += options_.dragX;
+        offsetY += options_.dragY;
+    }
     const auto o = buttonOverrides_.find(&widget);
     if (o != buttonOverrides_.end() && o->second.offset) {
         offsetX = o->second.offsetX;
         offsetY = o->second.offsetY;
     }
-    const int32_t x = parent.x0 + px + offsetX - cx;
-    const int32_t y = parent.y0 + py + offsetY - cy;
-    return Rect{x, y, x + w, y + h};
+    int32_t dx = 0, dy = 0, drawnW = w, drawnH = h;
+    Placed out;
+    out.w = w;
+    out.h = h;
+    out.sx = parent.sx;
+    out.sy = parent.sy;
+    AnimFrame frame;
+    if (sampleAnimation(widget.attribute("widgetAnimName"), false, frame)) {
+        if (frame.scale) {
+            drawnW = int32_t(float(w) * frame.scaleX);
+            drawnH = int32_t(float(h) * frame.scaleY);
+            dx = (w - drawnW) / 2;
+            dy = (h - drawnH) / 2;
+            out.sx *= frame.scaleX;
+            out.sy *= frame.scaleY;
+        }
+        if (frame.trans) {
+            dx += int32_t(frame.transX);
+            dy += int32_t(frame.transY);
+        }
+    }
+    const int32_t x = parent.rect.x0 + int32_t(float(px + offsetX - cx + dx) * parent.sx);
+    const int32_t y = parent.rect.y0 + int32_t(float(py + offsetY - cy + dy) * parent.sy);
+    out.rect = Rect{x, y, x + int32_t(float(drawnW) * parent.sx), y + int32_t(float(drawnH) * parent.sy)};
+    // The render context colour the widget's children draw with: its colour x its parent's context colour (FUN_008aee70).
+    uint8_t own[4];
+    ownColour(widget, own);
+    for (int c = 0; c < 4; ++c) out.colour[c] = multiplyColour(own[c], parent.colour[c]);
+    return out;
 }
 
-UiCanvas::Rect UiCanvas::layout(const std::vector<int32_t>& path) const {
-    if (!ui_) return Rect{};
-    Rect rect{0, 0, width_, height_};
-    const tr::XmlNode* n = &ui_->widgets;
+UiCanvas::Placed UiCanvas::placedAt(const std::vector<int32_t>& path) const {
+    Placed placed;
+    placed.rect = Rect{0, 0, width_, height_};
+    placed.w = width_;
+    placed.h = height_;
+    if (!ui_) return placed;
+    const tr::XmlNode* n = root();
     for (int32_t i : path) {
         if (i < 0 || size_t(i) >= n->children.size()) break;
         n = &n->children[size_t(i)];
-        rect = childRect(*n, rect);
+        placed = place(*n, placed);
     }
-    return rect;
+    return placed;
+}
+
+UiCanvas::Rect UiCanvas::layout(const std::vector<int32_t>& path) const { return placedAt(path).rect; }
+
+void UiCanvas::offsetsFor(const std::vector<int32_t>& path, const Rect& rect, int32_t& offsetX, int32_t& offsetY) const {
+    offsetX = offsetY = 0;
+    const tr::XmlNode* n = node(path);
+    if (!n || path.empty()) return;
+    const Placed parent = placedAt(std::vector<int32_t>(path.begin(), path.end() - 1));
+    int32_t px = 0, py = 0, cx = 0, cy = 0;
+    anchorPoint(intAttribute(*n, "parentAnchor"), parent.w, parent.h, px, py);
+    anchorPoint(intAttribute(*n, "childAnchor"), rect.width(), rect.height(), cx, cy);
+    offsetX = rect.x0 - parent.rect.x0 - px + cx;
+    offsetY = rect.y0 - parent.rect.y0 - py + cy;
 }
 
 // ------------------------------------------------------------------------------------------
@@ -475,17 +669,59 @@ void UiCanvas::drawTexture(const tr::XmlNode& widget, const Rect& rect, const Re
     if (!useColour) colour[0] = colour[1] = colour[2] = colour[3] = 1.0f;
     const Rect px = target.pixels(rect);
     const Rect area = intersect(px, target.pixels(clip));
-    const float regionW = float(def->right - def->left), regionH = float(def->bottom - def->top);
+    // A bitmap animation (Bitmap render FUN_008f5300 -> FUN_008f5550, read in the assembly 2026-10-15): a uv key replaces the texture region
+    // by (trunc(width x X), trunc(height x Y), trunc(width x Z), trunc(height x W)) of the whole texture (an empty one widened by a pixel,
+    // both axes against the width - as the code does); a rotation key gives the quad's texture coordinates the matrix translate(-anchor)
+    // x RotationZ(rot) x translate(anchor) (D3DX, row vectors; rot in radians). The draw (FUN_005adc60) takes a region with right <= left
+    // or bottom <= top as the whole texture. UNVERIFIED: that the rotation applies to the quad's 0..1 coordinates before they are mapped
+    // into the region (the draw's matrix chain decompiles poorly), and the sampler's wrap addressing for animated regions outside the
+    // texture (16Frame_512x256's first row is at Y 1..1.25).
+    int32_t left = def->left, top = def->top, right = def->right, bottom = def->bottom;
+    AnimFrame anim;
+    const bool animated = sampleAnimation(widget.attribute("bitmapAnimName"), true, anim);
+    if (animated && anim.uv) {
+        left = int32_t(float(img->width) * anim.uvRect[0]);
+        top = int32_t(float(img->height) * anim.uvRect[1]);
+        right = int32_t(float(img->width) * anim.uvRect[2]);
+        bottom = int32_t(float(img->height) * anim.uvRect[3]);
+        if (left == right) {
+            if (right < img->width) ++right;
+            else --left;
+        }
+        if (top == bottom) {
+            if (bottom < img->width) ++bottom;
+            else --top;
+        }
+    }
+    if (right <= left || bottom <= top) {
+        left = 0;
+        top = 0;
+        right = img->width;
+        bottom = img->height;
+    }
+    const bool rotate = animated && anim.rot;
+    const float rc = std::cos(anim.rotation), rs = std::sin(anim.rotation);
+    const float regionW = float(right - left), regionH = float(bottom - top);
     const float w = float(std::max(1, px.width())), h = float(std::max(1, px.height()));
     for (int32_t y = std::max(area.y0, 0); y < std::min(area.y1, target.height); ++y) {
         const float dy = float(y - px.y0) + 0.5f;
         // Tiled: the region repeats at its own size in logical units.
-        const float v = def->tileV && regionH > 0 ? float(def->top) + std::fmod(dy / target.sy, regionH) : float(def->top) + dy / h * regionH;
+        float v = def->tileV && regionH > 0 ? float(top) + std::fmod(dy / target.sy, regionH) : float(top) + dy / h * regionH;
         for (int32_t x = std::max(area.x0, 0); x < std::min(area.x1, target.width); ++x) {
             const float dx = float(x - px.x0) + 0.5f;
-            const float u = def->tileU && regionW > 0 ? float(def->left) + std::fmod(dx / target.sx, regionW) : float(def->left) + dx / w * regionW;
+            float u = def->tileU && regionW > 0 ? float(left) + std::fmod(dx / target.sx, regionW) : float(left) + dx / w * regionW;
+            if (rotate) {
+                const float qx = dx / w - anim.anchorX, qy = dy / h - anim.anchorY;
+                u = float(left) + (qx * rc - qy * rs + anim.anchorX) * regionW;
+                v = float(top) + (qx * rs + qy * rc + anim.anchorY) * regionH;
+            }
             float t[4];
-            sample(img->rgba, img->width, img->height, u, v, t);
+            if (animated) {
+                const float fw = float(img->width), fh = float(img->height);
+                sample(img->rgba, img->width, img->height, u - std::floor(u / fw) * fw, v - std::floor(v / fh) * fh, t);
+            } else {
+                sample(img->rgba, img->width, img->height, u, v, t);
+            }
             if (mask) {
                 float m[4];
                 sample(mask->rgba, mask->width, mask->height, dx / w * float(mask->width), dy / h * float(mask->height), m);
@@ -535,10 +771,6 @@ void UiCanvas::drawText(const tr::XmlNode& widget, const Rect& rect, const Rect&
     if (!font && !ui_->fonts.empty()) font = &ui_->fonts.begin()->second;    // UNVERIFIED stand-in for unknown font ids
     if (!font || font->ranges.empty()) return;
     auto emOf = [&](const tr::UiFontRange& r) { return int32_t(std::lround(float(r.pointSize * 4 / 3) * target.sy)); };
-    const tr::UiFontRange& base = font->ranges.front();
-    Face* baseFace = face(base.face);
-    if (!baseFace) return;
-    const int32_t baseEm = emOf(base);
     struct Item {
         uint32_t cp;
         Face* face;
@@ -546,20 +778,77 @@ void UiCanvas::drawText(const tr::XmlNode& widget, const Rect& rect, const Rect&
         bool bold, shadow;
     };
     std::vector<Item> items;
-    for (uint32_t cp : codepoints(s)) {
-        const tr::UiFontRange* range = font->rangeFor(cp);
-        Face* f = range ? face(range->face) : nullptr;
-        if (!f) { f = baseFace; range = &base; }
-        items.push_back(Item{cp, f, emOf(*range), range->bold, range->shadow});
-    }
+    const tr::UiFontRange* basePtr = nullptr;
+    Face* baseFace = nullptr;
+    int32_t baseEm = 0;
+    const std::vector<uint32_t> cps = codepoints(s);
+    auto setFont = [&](const tr::UiFont& f) {
+        basePtr = &f.ranges.front();
+        baseFace = face(basePtr->face);
+        baseEm = emOf(*basePtr);
+        items.clear();
+        if (!baseFace) return;
+        for (uint32_t cp : cps) {
+            const tr::UiFontRange* range = f.rangeFor(cp);
+            Face* rf = range ? face(range->face) : nullptr;
+            if (!rf) { rf = baseFace; range = basePtr; }
+            items.push_back(Item{cp, rf, emOf(*range), range->bold, range->shadow});
+        }
+    };
+    setFont(*font);
+    if (!baseFace) return;
     const Rect px = target.pixels(rect);
     auto advance = [&](size_t i) {
         int32_t a = items[i].face->glyph(items[i].em, items[i].cp, items[i].bold, items[i].shadow).advance;
         if (i + 1 < items.size() && items[i + 1].face == items[i].face) a += items[i].face->kern(items[i].em, items[i].cp, items[i + 1].cp);
         return a;
     };
-    std::vector<std::pair<size_t, size_t>> lines;
     const bool wrap = attributeIsTrue(widget, "wrapText");
+    // Text that does not fit an unwrapped widget (uitext.cpp FUN_008b1c00, decompiled 2026-10-15):
+    // - scaleToFit: another of the UI's fonts - FUN_00896a20 -> FUN_008ea910 -> FUN_006ab090 takes the width ratio (widget / text),
+    //   s = trunc(-em x ratio) (GDI lfHeight = -em) and walks s towards 0 until a created font of the same face has that size (first
+    //   with the same style flags, then plain); the defined font owning it is used, else "DefaultSmallest". Fonts are created for
+    //   every defined range, so: the largest defined font of the same face no bigger than trunc(em x ratio).
+    // - otherwise FUN_008fa210 cuts it to fit and appends "..." (three periods).
+    if (!wrap && !items.empty()) {
+        int32_t total = 0;
+        for (size_t i = 0; i < items.size(); ++i) total += advance(i);
+        if (total > px.width() && px.width() > 0) {
+            if (attributeIsTrue(widget, "scaleToFit")) {
+                const int32_t targetEm = int32_t(float(baseEm) * float(px.width()) / float(total));
+                const tr::UiFont* best = nullptr;
+                int32_t bestEm = 0;
+                for (int pass = 0; pass < 2 && !best; ++pass)
+                    for (const auto& entry : ui_->fonts) {
+                        const tr::UiFontRange& r = entry.second.ranges.empty() ? *basePtr : entry.second.ranges.front();
+                        if (entry.second.ranges.empty() || r.face != basePtr->face) continue;
+                        if (pass == 0 && (r.bold != basePtr->bold || r.italic != basePtr->italic || r.shadow != basePtr->shadow)) continue;
+                        if (pass == 1 && (r.bold || r.italic || r.shadow)) continue;
+                        const int32_t em = emOf(r);
+                        if (em <= targetEm && em > bestEm) {
+                            best = &entry.second;
+                            bestEm = em;
+                        }
+                    }
+                if (!best) best = ui_->font("DefaultSmallest");
+                if (best && !best->ranges.empty()) {
+                    setFont(*best);
+                    if (!baseFace) return;
+                }
+            } else {
+                // Keep the characters that fit, then drop more until "..." fits too.
+                int32_t used = 0;
+                size_t keep = 0;
+                while (keep < items.size() && used + advance(keep) <= px.width()) used += advance(keep++);
+                const Face::Glyph& dot = baseFace->glyph(baseEm, '.', basePtr->bold, basePtr->shadow);
+                const int32_t dots = dot.advance * 3;
+                while (keep > 0 && used + dots > px.width()) used -= advance(--keep);
+                items.resize(keep);
+                for (int k = 0; k < 3; ++k) items.push_back(Item{'.', baseFace, baseEm, basePtr->bold, basePtr->shadow});
+            }
+        }
+    }
+    std::vector<std::pair<size_t, size_t>> lines;
     size_t lineStart = 0, lastSpace = size_t(-1);
     int32_t width = 0;
     for (size_t i = 0; i < items.size(); ++i) {
@@ -621,13 +910,24 @@ void UiCanvas::drawText(const tr::XmlNode& widget, const Rect& rect, const Rect&
     }
 }
 
-void UiCanvas::colourOf(const tr::XmlNode& widget, float rgba[4]) const {
+// Widget slot 73 (FUN_0089d3c0): the colour property, x the widget animation's colour when it has one (FUN_008b7280).
+void UiCanvas::ownColour(const tr::XmlNode& widget, uint8_t rgba[4]) const {
+    float f[4];
     const auto o = buttonOverrides_.find(&widget);
-    if (o != buttonOverrides_.end() && o->second.colour) {
-        for (int c = 0; c < 4; ++c) rgba[c] = o->second.rgba[c];
-        return;
-    }
-    widgetColour(widget, rgba);
+    if (o != buttonOverrides_.end() && o->second.colour) std::copy(o->second.rgba, o->second.rgba + 4, f);
+    else widgetColour(widget, f);
+    for (int c = 0; c < 4; ++c) rgba[c] = uint8_t(std::lround(std::clamp(f[c], 0.0f, 1.0f) * 255.0f));
+    AnimFrame frame;
+    if (sampleAnimation(widget.attribute("widgetAnimName"), false, frame) && frame.colour)
+        for (int c = 0; c < 4; ++c) rgba[c] = multiplyColour(frame.rgba[c], rgba[c]);
+}
+
+// What a widget draws with (Bitmap render FUN_008f5300, the composite's FUN_008aee70): its colour x the render context colour, which
+// every composite multiplies its own colour into for its children - so a container's colour (alpha 0 on some HUD groups) reaches them.
+void UiCanvas::colourOf(const tr::XmlNode& widget, float rgba[4]) const {
+    uint8_t own[4];
+    ownColour(widget, own);
+    for (int c = 0; c < 4; ++c) rgba[c] = float(multiplyColour(own[c], context_[c])) / 255.0f;
 }
 
 // Button states (tabula_rasa.exe, decompiled 2026-10-15). A push button (PushButton; ScrollUpBtn / ScrollDownBtn, Thumb, Track and Entry
@@ -641,17 +941,24 @@ void UiCanvas::colourOf(const tr::XmlNode& widget, float rgba[4]) const {
 // DownDisabled if on, else UpDisabled; pressed (+0x18b) -> Pressed; highlighted (+0x18a) -> DownHighlighted / UpHighlighted; else
 // Down / Up.
 void UiCanvas::applyButtonState(const tr::XmlNode& button) {
-    if (options_.buttonState == 0 || !button.hasAttribute("UpTextureDef")) return;
+    if ((options_.buttonState == 0 && !options_.interactiveButtons) || !isButton(button)) return;
     const tr::XmlNode* bitmap = nullptr;
     const tr::XmlNode* textNode = nullptr;
     for (const tr::XmlNode& c : button.children) {
         if (!bitmap && c.tag == "Bitmap") bitmap = &c;
         if (!textNode && c.tag == "Text") textNode = &c;
     }
-    const int state = options_.buttonState;                 // 1 up, 2 highlighted, 3 down, 4 disabled, 5 pressed
+    int state = options_.buttonState;                       // 1 up, 2 highlighted, 3 down, 4 disabled, 5 pressed
     const bool toggle = button.tag == "Button" || button.tag == "ToggleButton";
+    bool on = options_.toggledOn;
+    if (options_.interactiveButtons) {
+        // enabled defaults to false: the Widget constructor (FUN_0089c280) zeroes the flag (+ 0x56, SetEnabled / IsEnabled = slots 114 / 115)
+        // and the loader sets it only when the attribute is present (the export's 22 push buttons without it are exactly its Disabled ones).
+        const bool hovered = options_.hoveredButton == &button;
+        state = button.attribute("enabled") != "true" ? 4 : hovered && options_.pushedButton == &button ? (toggle ? 5 : 3) : hovered ? 2 : 1;
+        on = options_.toggledButtons && options_.toggledButtons->count(&button) > 0;
+    }
     if (toggle) {
-        const bool on = options_.toggledOn;
         std::string def;
         if (state == 4) def = button.attribute(on ? "DownDisabledTextureDef" : "UpDisabledTextureDef");
         else if (state == 5) def = button.attribute("PressedTextureDef");
@@ -683,11 +990,109 @@ void UiCanvas::applyButtonState(const tr::XmlNode& button) {
     }
 }
 
-void UiCanvas::drawWidget(const tr::XmlNode& widget, std::vector<int32_t>& path, const Rect& parent, const Rect& clip, bool branchRoot,
+// Progress bars (tabula_rasa.exe uidrawables, decompiled 2026-10-15): the loader FUN_008b3ee0 reads orientation (leftToRight 1, rightToLeft
+// 2, bottomToTop 4, topToBottom 8; default 1), style (reveal 0, stretch 1, anything else - "slide" - 2; default 1) and percentComplete
+// (float, default 0), owns a Bitmap (the export's Filler child) and lays it out at load and on every change (FUN_008b4440), f = trunc(w x p)
+// or trunc(h x p):
+// - reveal (FUN_008b44b0): the filler at the bar's size and (0, 0); the bar clips its children to the filled part (right = left + f,
+//   left = right - f, top = bottom - f, bottom = top + f).
+// - stretch (FUN_008b45b0): the filler sized (f, h) / (w, f), at (0, 0), or (w - f, 0) / (0, h - f) for rightToLeft / bottomToTop.
+// - slide (FUN_008b4710): the filler at the bar's size, offset (f - w, 0), (w - f, 0), (0, h - f), (0, f - h).
+// The other two clip to the whole bar. The export's Filler children are this layout at the exported percentComplete.
+void UiCanvas::applyProgress(const tr::XmlNode& bar) {
+    if (bar.tag != "ProgressBar") return;
+    const tr::XmlNode* filler = nullptr;
+    for (const tr::XmlNode& c : bar.children)
+        if (c.tag == "Filler" || c.tag == "Bitmap") { filler = &c; break; }
+    const std::string o = bar.attribute("orientation"), st = bar.attribute("style");
+    const int orientation = o.empty() || o == "leftToRight" ? 1 : o == "rightToLeft" ? 2 : o == "bottomToTop" ? 4 : 8;
+    const int style = st.empty() || st == "stretch" ? 1 : st == "reveal" ? 0 : 2;
+    float p = options_.progress >= 0 ? options_.progress : 0.0f;
+    if (options_.progress < 0 && bar.hasAttribute("percentComplete")) p = std::strtof(bar.attribute("percentComplete").c_str(), nullptr);
+    const int32_t w = intAttribute(bar, "sizeW"), h = intAttribute(bar, "sizeH");
+    const int32_t fw = int32_t(float(w) * p), fh = int32_t(float(h) * p);     // truncated, as _ftol
+    Rect clipRect{0, 0, w, h};
+    if (!filler) {
+        childClips_[&bar] = clipRect;
+        return;
+    }
+    ButtonOverride& f = buttonOverrides_[filler];
+    f.size = true;
+    f.offset = true;
+    f.width = w;
+    f.height = h;
+    f.offsetX = 0;
+    f.offsetY = 0;
+    if (style == 0) {
+        if (orientation == 1) clipRect.x1 = fw;
+        else if (orientation == 2) clipRect.x0 = w - fw;
+        else if (orientation == 4) clipRect.y0 = h - fh;
+        else clipRect.y1 = fh;
+    } else if (style == 1) {
+        if (orientation == 1 || orientation == 2) f.width = fw;
+        else f.height = fh;
+        if (orientation == 2) f.offsetX = w - fw;
+        if (orientation == 4) f.offsetY = h - fh;
+    } else {
+        if (orientation == 1) f.offsetX = fw - w;
+        else if (orientation == 2) f.offsetX = w - fw;
+        else if (orientation == 4) f.offsetY = h - fh;
+        else f.offsetY = fh - h;
+    }
+    childClips_[&bar] = clipRect;
+}
+
+// Scroll bars (scrollbar.cpp; loader FUN_008d6ce0, decompiled 2026-10-15): own two arrow PushButtons, a Track and a Thumb (the export's
+// children). Range min..max (FUN_008d7950), value clamped to min..max - pageSize + 1 (FUN_008d79e0); the thumb (FUN_008d84f0, anchors
+// top / left, FUN_008d8410): ratio = (value - min) / ((max - min + 1) - pageSize) (0 when the range is smaller than the page; 0 / 0 when
+// equal - NaN, _ftol 0x80000000, as one exported scroll bar shows), vertical (the default) offset (0, top button height +
+// trunc((track height - thumb height) x ratio)), horizontal (left button width + trunc((track width - thumb width) x ratio), 0). All 63
+// exported thumbs match. ("slide" stores the thumb's centre in a Track field, +0xb4 - its use is not traced.)
+// Sliders (Slider, Selector, RangeTarget; loader FUN_008da640 not traced in detail): offset (trunc((track width - thumb width) x
+// (value - min) / (max - min)), (track height - thumb height) / 2) fits all 11 exported thumbs exactly.
+void UiCanvas::applyScroll(const tr::XmlNode& bar) {
+    if (options_.scroll < 0 || !bar.hasAttribute("maxRange")) return;
+    const tr::XmlNode* thumb = nullptr;
+    const tr::XmlNode* track = nullptr;
+    const tr::XmlNode* up = nullptr;
+    const tr::XmlNode* down = nullptr;
+    for (const tr::XmlNode& c : bar.children) {
+        if (c.tag == "Thumb") thumb = &c;
+        else if (c.tag == "Track") track = &c;
+        else if (c.tag == "ScrollUpBtn") up = &c;
+        else if (c.tag == "ScrollDownBtn") down = &c;
+    }
+    if (!thumb) return;
+    const int32_t trackW = track ? intAttribute(*track, "sizeW") : intAttribute(bar, "sizeW");
+    const int32_t trackH = track ? intAttribute(*track, "sizeH") : intAttribute(bar, "sizeH");
+    const int32_t thumbW = intAttribute(*thumb, "sizeW"), thumbH = intAttribute(*thumb, "sizeH");
+    const float r = std::clamp(options_.scroll, 0.0f, 1.0f);
+    ButtonOverride& o = buttonOverrides_[thumb];
+    o.offset = true;
+    if (bar.tag == "ScrollBar") {
+        // The chosen position stands for value = min + r x (range - page), i.e. the same ratio.
+        if (bar.attribute("style") == "horizontal") {
+            o.offsetX = (down ? intAttribute(*down, "sizeW") : 0) + int32_t(float(trackW - thumbW) * r);
+            o.offsetY = 0;
+        } else {
+            o.offsetX = 0;
+            o.offsetY = (up ? intAttribute(*up, "sizeH") : 0) + int32_t(float(trackH - thumbH) * r);
+        }
+    } else {
+        o.offsetX = int32_t(float(trackW - thumbW) * r);
+        o.offsetY = (trackH - thumbH) / 2;
+    }
+}
+
+void UiCanvas::drawWidget(const tr::XmlNode& widget, std::vector<int32_t>& path, const Placed& parent, const Rect& clip, bool branchRoot,
                           Target& target) {
     if (!branchRoot && !options_.showHidden && widget.attribute("visible") == "false") return;
     applyButtonState(widget);
-    const Rect rect = childRect(widget, parent);
+    applyProgress(widget);
+    applyScroll(widget);
+    const Placed placed = place(widget, parent);
+    const Rect rect = placed.rect;
+    std::copy(parent.colour, parent.colour + 4, context_);
     bool visual = false;
     if (widget.hasAttribute("textureDef")) {
         drawTexture(widget, rect, clip, target);
@@ -700,10 +1105,15 @@ void UiCanvas::drawWidget(const tr::XmlNode& widget, std::vector<int32_t>& path,
         visual = !text(widget).empty();
     }
     drawn_.push_back(DrawnWidget{path, rect, visual});
-    const Rect childClip = attributeIsTrue(widget, "clipChildren") ? intersect(clip, rect) : clip;
+    // clipChildren defaults to true: the WidgetComposite constructor (FUN_008ae750) sets + 0xB0 = 1 and its loader (FUN_008ae9c0) only
+    // overwrites it when the attribute is present (the export writes only "false"); the composite render (FUN_008aee70) clips its
+    // children to its own rectangle when it is set. Only composites have children.
+    Rect childClip = widget.attribute("clipChildren") != "false" ? intersect(clip, rect) : clip;
+    if (const auto cc = childClips_.find(&widget); cc != childClips_.end())
+        childClip = intersect(childClip, Rect{rect.x0 + cc->second.x0, rect.y0 + cc->second.y0, rect.x0 + cc->second.x1, rect.y0 + cc->second.y1});
     for (size_t k = 0; k < widget.children.size(); ++k) {
         path.push_back(int32_t(k));
-        drawWidget(widget.children[k], path, rect, childClip, false, target);
+        drawWidget(widget.children[k], path, placed, childClip, false, target);
         path.pop_back();
     }
 }
@@ -711,8 +1121,11 @@ void UiCanvas::drawWidget(const tr::XmlNode& widget, std::vector<int32_t>& path,
 std::vector<UiCanvas::DrawnWidget> UiCanvas::render(const std::vector<int32_t>& path, const Options& options, std::vector<uint8_t>& rgba) {
     drawn_.clear();
     options_ = options;
+    animating_ = false;
     buttonOverrides_.clear();
-    const int32_t logicalW = ui_ ? ui_->logicalWidth : 1280, logicalH = ui_ ? ui_->logicalHeight : 960;
+    childClips_.clear();
+    // The logical size is the exe's (FUN_004cd8c0: 1280 x 960); the export's Definitions/LogicalSize is not read by the game.
+    const int32_t logicalW = 1280, logicalH = 960;
     // The root window's logical size (tabula_rasa.exe FUN_00896220, sizes from FUN_004cd8c0's call of the UI manager's init
     // FUN_00895430): 1706 x 960 when the screen's width / height exceeds 1.5 (double at 0x00c2b570), else 1280 x 960; the screen
     // scale is screen / logical per axis (FUN_00897190).
@@ -743,15 +1156,16 @@ std::vector<UiCanvas::DrawnWidget> UiCanvas::render(const std::vector<int32_t>& 
             p[0] = p[1] = p[2] = g;
         }
     const Rect screen{0, 0, width_, height_};
-    const tr::XmlNode* n = ui_ ? node(*ui_, path) : nullptr;
+    const tr::XmlNode* n = node(path);
     if (n && !path.empty()) {
         std::vector<int32_t> parentPath(path.begin(), path.end() - 1);
         std::vector<int32_t> walk = path;
-        drawWidget(*n, walk, layout(parentPath), screen, true, target);
+        drawWidget(*n, walk, placedAt(parentPath), screen, true, target);
     } else if (n) {                            // the <Widgets> element itself: every root widget
+        const Placed root = placedAt({});
         for (size_t k = 0; k < n->children.size(); ++k) {
             std::vector<int32_t> walk{int32_t(k)};
-            drawWidget(n->children[k], walk, screen, screen, false, target);
+            drawWidget(n->children[k], walk, root, screen, false, target);
         }
     }
     const size_t count = size_t(screenW) * size_t(screenH);
@@ -761,6 +1175,26 @@ std::vector<UiCanvas::DrawnWidget> UiCanvas::render(const std::vector<int32_t>& 
         rgba[k * 4 + 3] = 255;
     }
     return drawn_;
+}
+
+const tr::XmlNode* UiCanvas::buttonAt(int32_t x, int32_t y) const {
+    // The mouse reaches the last drawn pickable widget under it (pickable defaults to false: Widget constructor FUN_0089c280 + 0x55,
+    // set by the loader only when present). Composites take the mouse themselves only with mouseCapture (default false, + 0xB1 in
+    // FUN_008ae750) - UNVERIFIED: the engine's hit test is not traced; without this an empty button group drawn over another
+    // (LogOutWindow's QuitButtons / LogoutButtons) would hide its buttons.
+    std::vector<int32_t> path;
+    for (auto it = drawn_.rbegin(); it != drawn_.rend() && path.empty(); ++it) {
+        const tr::XmlNode* n = node(it->path);
+        if (!n || !it->rect.contains(x, y) || n->attribute("pickable") != "true") continue;
+        if (!n->children.empty() && !isButton(*n) && n->attribute("mouseCapture") != "true") continue;
+        path = it->path;
+    }
+    while (!path.empty()) {
+        const tr::XmlNode* n = node(path);
+        if (n && isButton(*n)) return n;
+        path.pop_back();
+    }
+    return nullptr;
 }
 
 std::vector<int32_t> UiCanvas::pick(int32_t x, int32_t y) const {

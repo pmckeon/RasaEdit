@@ -17,6 +17,7 @@
 // Control points, regions and mission areas can be edited but not created or deleted. The server
 // reads this data at start-up, so it needs a restart to see saved changes.
 
+#include "DbConnection.h"
 #include "trformats.h"
 
 #include <cstdint>
@@ -27,7 +28,6 @@
 #include <unordered_set>
 #include <vector>
 
-struct sqlite3;
 
 struct MapInfo {
     int32_t mapContextId = 0;
@@ -213,7 +213,11 @@ struct MissionArea {
 // AmbientNpc, WorldUsable and WorldDestructible are Rasa.NET upstream tables (ambient_npc, world_usable, world_destructible;
 // absent on older worlds): server-placed objects no .map places. Their yaw is sent as the other objects' is
 // (WorldLocationDescriptorPacket: Quaternion.CreateFromYawPitchRoll(rotation, 0, 0)).
-enum class ObjectKind : uint8_t { Logos, ControlPoint, Footlocker, Kraftwerk, AmbientNpc, WorldUsable, WorldDestructible };
+// Emitter: map_emitter (Rasa.NET MapEmitterEntry / EmitterManager): an FX package played at a spot - an FXPackageEmitter entity
+// (class 2873, kEmitterClassId; the table has no class column) whose client body is particle_proxy.geo (no pieces) and which
+// attaches the package while it is on (client/augmentations/fxpackageemitter.py: body.AttachFXPackage(stringtable[package])).
+enum class ObjectKind : uint8_t { Logos, ControlPoint, Footlocker, Kraftwerk, AmbientNpc, WorldUsable, WorldDestructible, Emitter };
+constexpr int32_t kEmitterClassId = 2873;
 const char* objectKindName(ObjectKind kind);
 
 // world_usable columns (Rasa.NET WorldUsableEntry; 0 in a number column = the kind's default).
@@ -239,6 +243,12 @@ struct DestructibleSettings {
     int64_t side = 0;                    // a force field's side: 0 the class's default (Bane's), 1 AFS, 2 Bane
 };
 
+// map_emitter columns.
+struct EmitterSettings {
+    int64_t packageId = 0;               // the client's string table id of the .pkg
+    bool isOn = true;                    // plays from when the map loads (else placed but off until turned on)
+};
+
 struct PlacedObject {
     ObjectKind kind = ObjectKind::Logos;
     int64_t id = 0;
@@ -249,6 +259,7 @@ struct PlacedObject {
     std::string name;                    // name or comment column
     UsableSettings usable;               // WorldUsable only
     DestructibleSettings destructible;   // WorldDestructible only
+    EmitterSettings emitter;             // Emitter only
 };
 
 // wormhole_lock (Rasa.NET upstream WormholeLockEntry, Managers.Wormholes): a condition on travelling between world wormholes
@@ -304,6 +315,33 @@ struct ItemTemplateInfo {                            // itemtemplate + itemtempl
 };
 bool sameCreatureDefinition(const CreatureDefinition& a, const CreatureDefinition& b);
 
+// control_point_link (Rasa.NET upstream ControlPointLinkEntry / Managers.ControlPoints, read 2026-10-15): something that belongs to
+// a control point; the key is all three columns. kind 1: object = a spawn pool of the Bane garrison (stands there while they hold
+// it), 2: a spawn pool of the AFS garrison (medic, banker, vendors, soldiers), 3: the teleporter row of its hospital, 4: of its
+// waypoint, 5: a creature row that counts as a boss of its garrison, 6: the footlocker row of its clan lockbox (one a point; on the
+// point's map). The server finds a pool / teleporter by one point (the last link wins). Shipped: hospitals are type-5
+// teleporters, waypoints type 2.
+struct ControlPointLink {
+    int64_t controlPointId = 0;
+    int32_t kind = 1;
+    int64_t objectId = 0;
+};
+const char* controlPointLinkKindName(int32_t kind);
+
+// map_marker (Rasa.NET upstream MapMarkerEntry / MapMarkerManager, read 2026-10-15): ties one of the client's map-screen markers
+// (tr::MapScreenMarker, by the entity id compiled into the client) to the server object whose state it shows. Key (marker entity
+// id, map context). objectKind 1 = a teleporter row (waypoint 2, hospital 3, safe zone 19), 2 = a kraftwerks row (crafting
+// station 4). matchDistance: the marker-to-object distance when bound (the seed matched by position, up to 25 m).
+struct MapMarkerBinding {
+    int64_t markerEntityId = 0;
+    int32_t markerType = 0;
+    int32_t objectKind = 1;
+    int64_t objectId = 0;
+    double matchDistance = 0;
+    bool hasComment = false;                 // comment NULL
+    std::string comment;
+};
+
 // Everything placed on one map context.
 struct WorldContent {
     int32_t mapContextId = -1;
@@ -317,6 +355,8 @@ struct WorldContent {
     std::vector<MissionArea> missionAreas;
     std::vector<PlacedObject> objects;
     std::vector<WormholeLock> wormholeLocks;   // all rows (empty on worlds without the table)
+    std::vector<ControlPointLink> controlPointLinks;   // of this map's control points (empty on worlds without the table)
+    std::vector<MapMarkerBinding> mapMarkers;          // map_marker rows of this map (empty on worlds without the table)
 };
 
 // A database value as SQLite stores it (dynamic typing kept), for tables edited generically (missions).
@@ -349,12 +389,15 @@ struct DbTable {
 
 class WorldDatabase {
 public:
-    explicit WorldDatabase(const std::string& path);       // throws std::runtime_error
+    // spec: a SQLite file (rasaworld.db) or mysql://user[:password]@host[:port]/database (Rasa.NET's MySQL provider; MySQL 8 or
+    // MariaDB). mySqlPluginDir: MariaDB Connector/C's plugin folder (defaultMySqlPluginDir). Throws std::runtime_error.
+    explicit WorldDatabase(const std::string& spec, const std::string& mySqlPluginDir = "");
     ~WorldDatabase();
     WorldDatabase(const WorldDatabase&) = delete;
     WorldDatabase& operator=(const WorldDatabase&) = delete;
 
-    const std::string& path() const { return path_; }
+    const std::string& path() const { return path_; }            // the file, or the MySQL spec without the password
+    bool isMySql() const { return mySql_; }
     bool readOnly() const { return readOnly_; }
     const std::vector<std::string>& warnings() const { return warnings_; }
     std::vector<std::pair<std::string, int64_t>> tableCounts() const;
@@ -393,13 +436,18 @@ public:
     std::vector<CreatureDefinition> creatureDefinitions() const;                    // every creature, sorted by id
     // creature_battlecry scope 1: entity class id -> battle cry package (every creature of the class; empty without the table).
     const std::map<int32_t, int32_t>& classBattlecries() const { return classBattlecries_; }
+    // creature_class_flag (Rasa.NET CreatureClassFlagEntry): entity class id -> the client's creatureflag ids (sent in CreatureInfo; the
+    // client reads BIOLOGICAL / MECHANICAL / MACHINA for Salvage, Tissue Extraction and healing, SPECIES_* for harvest yields).
+    const std::map<int32_t, std::set<int32_t>>& classFlags() const { return classFlags_; }
     // Writes the creature definitions that differ (creature, creature_stat, creature_appearance, the NPC / vendor rows, the
     // creature's own battle cry) in one transaction; new creatures are those whose id is not in `saved`. Creatures are never
     // deleted. With savedClassCries / editedClassCries, the class battle cry rows (scope 1) that differ are written in the same
     // transaction. Reloads the creature tables on success.
     bool saveCreatures(const std::vector<CreatureDefinition>& saved, const std::vector<CreatureDefinition>& edited, SaveSummary& summary,
                        std::string& error, const std::map<int32_t, int32_t>* savedClassCries = nullptr,
-                       const std::map<int32_t, int32_t>* editedClassCries = nullptr);
+                       const std::map<int32_t, int32_t>* editedClassCries = nullptr,
+                       const std::map<int32_t, std::set<int32_t>>* savedClassFlags = nullptr,
+                       const std::map<int32_t, std::set<int32_t>>* editedClassFlags = nullptr);
 
     // Schema checks (the Rasa.NET world schema grows with upstream development; newer tables / columns are optional).
     bool hasTable(const std::string& table) const;
@@ -412,7 +460,9 @@ private:
 
     void execute(const std::string& sql);
 
-    sqlite3* db_ = nullptr;
+    std::unique_ptr<DbConnection> connection_;
+    DbConnection* db_ = nullptr;                     // connection_.get()
+    bool mySql_ = false;
     bool readOnly_ = false;
     std::vector<Creature> creatureList_;
     std::string path_;
@@ -432,6 +482,7 @@ private:
     std::unordered_map<int32_t, ItemTemplateInfo> itemTemplates_;
     std::unordered_map<int32_t, int32_t> creatureBattlecries_;              // creature_battlecry scope 2: creature id -> package
     std::map<int32_t, int32_t> classBattlecries_;                            // scope 1: class id -> package
+    std::map<int32_t, std::set<int32_t>> classFlags_;                        // creature_class_flag
     std::vector<CreatureAction> actions_;
     std::unordered_set<int32_t> npcClasses_;
     std::unordered_set<int32_t> vendorClasses_;

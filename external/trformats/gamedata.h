@@ -144,6 +144,32 @@ struct SwapsetPart {
     int32_t swapsetId = 0;
 };
 
+// A map-screen marker whose state the server sends (generated.client.uimapmarker.factionedmarkers[mapTemplateId] =
+// [(entityId, typeId, nameId, tooltipId, x, y, z)], client/ui/mapwindow.py _ShowMarkerWidgets): entityId is the original server's
+// id for the object, compiled into the client; the marker looks its state up by it (Recv_MapMarkerInfo). Types (uimapmarker): 1
+// control point, 2 waypoint, 3 hospital, 4 crafting station, 19 safe zone, ... The client skips a marker without a type or name.
+struct MapScreenMarker {
+    int64_t entityId = 0;
+    int32_t type = 0;                  // 0 = None
+    int32_t nameId = -1;               // -1 = None
+    std::string name;                  // uimapmarkertextlanguage.lookup[nameId] (clientlanguagemanager.py BuildUIMapMarkerText)
+    float x = 0, y = 0, z = 0;
+};
+const char* mapScreenMarkerTypeName(int32_t type);   // uimapmarker's constant names, readable ("Waypoint", "Hospital", ...)
+
+// A fabrication recipe as the client has it (shared/recipe.py InitData over generated.shared.recipe data, dtuples of
+// spGenShared_RecipeTemplate {TemplateId, EnergyUnitCost, KraftwerksTimeSeconds, ResultItemTemplateId, ResultItemAmount,
+// MinimumPlayerLevel} and spGenShared_RecipeTemplateInputClass {RecipeTemplateId, InputItemClassId, ItemQuantityAmount}).
+struct ClientRecipe {
+    int32_t templateId = 0;            // the schematic's item template
+    int32_t energyCost = 0;
+    int32_t kraftwerksSeconds = 0;
+    int32_t resultTemplateId = 0;
+    int32_t resultAmount = 0;
+    int32_t minLevel = 0;
+    std::vector<std::pair<int32_t, int32_t>> inputs;   // (item class, quantity), table order
+};
+
 // An accessory an item attaches to its wearer (client/augmentations/actor.py _AddAccessory -> body.AddAccessory).
 struct AccessoryAttachment {
     std::string mesh;
@@ -162,6 +188,8 @@ public:
 
     // Typed lookups over the generated client tables.
     std::string stringById(int32_t stringId);                 // generated.client.stringtable
+    // Every string table entry ending with the extension (case-insensitive, e.g. ".pkg"): (id, string), sorted by string.
+    std::vector<std::pair<int32_t, std::string>> stringsWithExtension(const std::string& extension);
     std::string className(int32_t classId);                   // generated.client.entityclass [0]
     int32_t classMeshId(int32_t classId);                     // entityclass [1]; -1 if none
     std::string classMeshName(int32_t classId);               // mesh file name via the string table; "" if none
@@ -177,6 +205,15 @@ public:
     // GetStatePkgId / AttachStateSFX. "" if none.
     std::string usableStatePackage(int32_t classId, int32_t stateId);
     std::string mapTemplateName(int32_t templateId);          // generated.client.maptemplate
+    std::vector<MapScreenMarker> factionedMapMarkers(int32_t templateId);   // in table order
+    // A module's integer constants as (value, name), sorted by value (e.g. "generated.client.constant.creatureflag": 5 BIOLOGICAL).
+    std::vector<std::pair<int32_t, std::string>> moduleConstants(const std::string& module);
+    // A game effect's tooltip line as the client looks it up (tooltipwindow.py _AddModuleEffects): generated.client.gameeffectdata
+    // tooltip[effectId] -> tooltiplanguage.lookup[id] (e.g. "Body: %(amount)s"); "" when the effect has none (no line drawn).
+    std::string effectTooltip(int32_t effectId);
+    // A module set's name (clientlanguagemanager.py GetModuleSetNameString): modulesetnamelanguage.lookup[moduleId]; "" if none.
+    std::string moduleSetName(int32_t moduleId);
+    std::vector<ClientRecipe> clientRecipes();       // by template id
     std::vector<int32_t> contextIdsForMapTemplate(int32_t templateId);   // generated.client.gamecontext [3]
     bool radarInfo(int32_t contextId, int32_t regionId, RadarInfo& info); // false if the context has no radar
 

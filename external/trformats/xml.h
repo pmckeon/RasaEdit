@@ -18,6 +18,10 @@ struct XmlNode {
     std::vector<std::pair<std::string, std::string>> attributes;     // in file order
     std::vector<XmlNode> children;
     std::string text;
+    // Where the element sits in the parsed source (byte offsets): its '<', just past its start tag ('>' or "/>"), just past its end
+    // tag (= sourceTagEnd when self-closing). Lets an editor splice the source text and leave everything else byte-identical.
+    size_t sourceStart = 0, sourceTagEnd = 0, sourceEnd = 0;
+    bool selfClosing = false;
     std::string attribute(const std::string& name) const;            // "" if absent
     bool hasAttribute(const std::string& name) const;
     const XmlNode* child(const std::string& name) const;              // the first child with that tag

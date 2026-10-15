@@ -179,6 +179,8 @@ public:
     // Server teleporters show their USE_TS_STATE_1 (56) package - Rasa.NET puts world teleporters in that state
     // (DynamicObjectManager) - as accessory models (`ACCY` events, tr::readSfxPackage), e.g. the waypoint's beam.
     void setUsableStatePackages(std::function<std::string(int32_t classId, int32_t stateId)> packageFor) { usablePackageFor_ = std::move(packageFor); }
+    // The client's string table (an FX emitter names its package by string id); call before setServerContent.
+    void setStringLookup(std::function<std::string(int32_t stringId)> lookup) { stringFor_ = std::move(lookup); }
     // A usable class's animation in a state (GameData::usableStateAnimation); ambient figures play theirs (state 44).
     void setUsableStateAnimations(std::function<tr::GameData::UsableAnimation(int32_t classId, int32_t stateId)> animationFor) {
         usableAnimationFor_ = std::move(animationFor);
@@ -548,6 +550,7 @@ private:
     const WorldDatabase* serverDatabase_ = nullptr;
     std::function<std::string(int32_t)> serverMeshForClass_;
     std::function<std::string(int32_t, int32_t)> usablePackageFor_;
+    std::function<std::string(int32_t)> stringFor_;
     std::function<tr::GameData::UsableAnimation(int32_t, int32_t)> usableAnimationFor_;
     struct StateEffects {
         std::vector<Model*> accessories;

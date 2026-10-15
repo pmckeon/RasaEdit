@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <map>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -981,6 +982,128 @@ const py::Object* GameData::global(const std::string& module, const std::string&
 
 std::string GameData::stringById(int32_t stringId) {
     return py::asString(py::dictGet(global("generated.client.stringtable", "lookup"), stringId));
+}
+
+std::vector<std::pair<int32_t, std::string>> GameData::stringsWithExtension(const std::string& extension) {
+    std::vector<std::pair<int32_t, std::string>> out;
+    const py::Object* lookup = global("generated.client.stringtable", "lookup");
+    if (!lookup || lookup->kind != py::Kind::Dict) return out;
+    const auto lower = [](std::string s) {
+        for (char& c : s) c = char(std::tolower(static_cast<unsigned char>(c)));
+        return s;
+    };
+    const std::string ext = lower(extension);
+    for (const auto& entry : lookup->entries) {
+        if (!py::isString(entry.second.get())) continue;
+        const std::string s = py::asString(entry.second.get());
+        if (s.size() >= ext.size() && lower(s.substr(s.size() - ext.size())) == ext) out.push_back({int32_t(py::asInt(entry.first.get())), s});
+    }
+    std::sort(out.begin(), out.end(), [](const auto& a, const auto& b) { return a.second < b.second; });
+    return out;
+}
+
+const char* mapScreenMarkerTypeName(int32_t type) {
+    switch (type) {
+        case 1: return "Control point";
+        case 2: return "Waypoint";
+        case 3: return "Hospital";
+        case 4: return "Crafting station";
+        case 5: return "Region label";
+        case 6: return "Point of interest";
+        case 7: return "Instance entrance";
+        case 8: return "Battlefield entrance";
+        case 9: return "Local teleporter";
+        case 10: return "Wormhole";
+        case 11: return "Dropship teleporter";
+        case 15: return "Vendor";
+        case 16: return "Trainer";
+        case 17: return "Footlocker";
+        case 18: return "Auctioneer";
+        case 19: return "Safe zone";
+        case 20: return "Prestige vendor";
+        case 21: return "Clan footlocker";
+        default: return "Marker";
+    }
+}
+
+std::vector<std::pair<int32_t, std::string>> GameData::moduleConstants(const std::string& moduleName) {
+    std::vector<std::pair<int32_t, std::string>> out;
+    const py::Object& globals = module(moduleName);
+    for (const auto& entry : globals.entries) {
+        if (!py::isString(entry.first.get()) || entry.second->kind != py::Kind::Int) continue;
+        const std::string name = py::asString(entry.first.get());
+        if (name.empty() || name[0] == '_') continue;
+        out.push_back({int32_t(entry.second->integer), name});
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+std::string GameData::effectTooltip(int32_t effectId) {
+    const py::Object* tip = py::dictGet(global("generated.client.gameeffectdata", "tooltip"), effectId);
+    if (!tip || py::isNone(tip)) return "";
+    return py::asString(py::dictGet(global("generated.client.language.english.tooltiplanguage", "lookup"), py::asInt(tip)));
+}
+
+std::vector<ClientRecipe> GameData::clientRecipes() {
+    const py::Object* data = global("generated.shared.recipe", "data");
+    // A dtuple table: its rows, and the column names in "<table>.desc" (1-tuples).
+    const auto table = [&](const std::string& name, std::initializer_list<const char*> wanted, std::vector<int>& indices) -> const py::Object* {
+        const py::Object* desc = py::dictGet(data, name + ".desc");
+        indices.clear();
+        for (const char* w : wanted) {
+            int found = -1;
+            for (size_t k = 0; k < py::length(desc); ++k)
+                if (py::asString(py::item(py::item(desc, k), 0)) == w) found = int(k);
+            if (found < 0) throw FormatError("generated.shared.recipe: " + name + " has no column " + w);
+            indices.push_back(found);
+        }
+        return py::dictGet(data, name);
+    };
+    std::vector<int> c;
+    std::map<int32_t, ClientRecipe> recipes;
+    const py::Object* rows = table("spGenShared_RecipeTemplate",
+                                   {"TemplateId", "EnergyUnitCost", "KraftwerksTimeSeconds", "ResultItemTemplateId", "ResultItemAmount", "MinimumPlayerLevel"}, c);
+    for (size_t k = 0; k < py::length(rows); ++k) {
+        const py::Object* row = py::item(rows, k);
+        const auto v = [&](int i) { return int32_t(py::asInt(py::item(row, size_t(c[size_t(i)])))); };
+        ClientRecipe r{v(0), v(1), v(2), v(3), v(4), v(5), {}};
+        recipes[r.templateId] = r;
+    }
+    rows = table("spGenShared_RecipeTemplateInputClass", {"RecipeTemplateId", "InputItemClassId", "ItemQuantityAmount"}, c);
+    for (size_t k = 0; k < py::length(rows); ++k) {
+        const py::Object* row = py::item(rows, k);
+        const int32_t id = int32_t(py::asInt(py::item(row, size_t(c[0]))));
+        const auto it = recipes.find(id);
+        if (it != recipes.end())
+            it->second.inputs.push_back({int32_t(py::asInt(py::item(row, size_t(c[1])))), int32_t(py::asInt(py::item(row, size_t(c[2]))))});
+    }
+    std::vector<ClientRecipe> out;
+    for (auto& [id, r] : recipes) out.push_back(std::move(r));
+    return out;
+}
+
+std::string GameData::moduleSetName(int32_t moduleId) {
+    return py::asString(py::dictGet(global("generated.client.language.english.modulesetnamelanguage", "lookup"), moduleId));
+}
+
+std::vector<MapScreenMarker> GameData::factionedMapMarkers(int32_t templateId) {
+    std::vector<MapScreenMarker> out;
+    const py::Object* list = py::dictGet(global("generated.client.uimapmarker", "factionedmarkers"), templateId);
+    const py::Object* names = global("generated.client.language.english.uimapmarkertextlanguage", "lookup");
+    for (size_t k = 0; k < py::length(list); ++k) {
+        const py::Object* row = py::item(list, k);
+        MapScreenMarker m;
+        m.entityId = py::asInt(py::item(row, 0));
+        m.type = py::isNone(py::item(row, 1)) ? 0 : int32_t(py::asInt(py::item(row, 1)));
+        m.nameId = py::isNone(py::item(row, 2)) ? -1 : int32_t(py::asInt(py::item(row, 2)));
+        if (m.nameId >= 0) m.name = py::asString(py::dictGet(names, m.nameId));
+        m.x = float(py::asFloat(py::item(row, 4)));
+        m.y = float(py::asFloat(py::item(row, 5)));
+        m.z = float(py::asFloat(py::item(row, 6)));
+        out.push_back(std::move(m));
+    }
+    return out;
 }
 
 std::string GameData::className(int32_t classId) {

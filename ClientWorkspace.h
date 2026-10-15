@@ -11,6 +11,8 @@
 // files the client reads directly (tabula_rasa.cfg Maps = "data/maps/|.map"), so no patch archive is needed.
 class ClientWorkspace : public Workspace, public ViewportEditHooks {
 public:
+    // Writes a file in place, keeping the first original as <file>.rasaedit-original (also used by the UI workspace).
+    static bool writeFileWithBackup(const std::string& path, const tr::Bytes& data, std::string& error);
     explicit ClientWorkspace(EditorContext& ctx) : Workspace(ctx) {}
     void handleShortcuts() override;
     void drawEditMenu() override;
@@ -58,7 +60,6 @@ private:
     void setLightProperty(size_t light, const std::string& name, const std::string& value, const std::string& type);
     void lightsChanged();                            // after the lights.xml text changed
     tr::Vec3 lightPosition_;                         // selectedPosition() for a light: synced from its Position, written back
-    bool writeFileWithBackup(const std::string& path, const tr::Bytes& data, std::string& error);
     MapEdit snapshot() const;
     void restore(const MapEdit& edit);
     void noteEdit();                                 // one undo step per edited inspector field

@@ -17,7 +17,11 @@ EditorContext::EditorContext(SDL_Window* window_, SDL_GPUDevice* device_) : wind
         imguiIniPath = "imgui.ini";
     }
     // RASAEDIT_SETTINGS=<file>: another settings file (tests point it at a copy, so they never touch the user's database).
-    if (const char* overridePath = std::getenv("RASAEDIT_SETTINGS"); overridePath && *overridePath) settingsPath_ = overridePath;
+    // The ImGui layout goes next to it, so a test or capture never changes the user's own layout.
+    if (const char* overridePath = std::getenv("RASAEDIT_SETTINGS"); overridePath && *overridePath) {
+        settingsPath_ = overridePath;
+        imguiIniPath = (std::filesystem::path(overridePath).parent_path() / "imgui.ini").string();
+    }
     try {
         renderer = std::make_unique<Renderer>(device);
     } catch (const std::exception& e) {
@@ -211,6 +215,7 @@ bool EditorContext::openMap(const std::string& name) {
                     try { return gameData->classHue(classId, hue1, hue2); } catch (const std::exception&) { return false; }
                 });
                 scene->setUsableStatePackages([this](int32_t classId, int32_t stateId) { return gameData->usableStatePackage(classId, stateId); });
+                scene->setStringLookup([this](int32_t stringId) { return gameData->stringById(stringId); });
                 scene->setUsableStateAnimations([this](int32_t classId, int32_t stateId) { return gameData->usableStateAnimation(classId, stateId); });
             }
         }

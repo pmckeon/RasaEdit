@@ -26,6 +26,7 @@
       "default-features": false
     },
     "zlib",
-    "sqlite3"
+    "sqlite3",
+    "libmariadb"
   ]
 }

@@ -84,12 +84,22 @@ private:
     }
     void element(XmlNode& node) {
         if (pos_ >= text_.size() || text_[pos_] != '<') error("'<' expected");
+        node.sourceStart = pos_;
         ++pos_;
         node.tag = name();
         for (;;) {
             skipSpace();
-            if (startsWith("/>")) { pos_ += 2; return; }
-            if (startsWith(">")) { ++pos_; break; }
+            if (startsWith("/>")) {
+                pos_ += 2;
+                node.sourceTagEnd = node.sourceEnd = pos_;
+                node.selfClosing = true;
+                return;
+            }
+            if (startsWith(">")) {
+                ++pos_;
+                node.sourceTagEnd = pos_;
+                break;
+            }
             std::string key = name();
             skipSpace();
             if (pos_ >= text_.size() || text_[pos_] != '=') error("'=' expected");
@@ -114,6 +124,7 @@ private:
                 skipSpace();
                 if (pos_ >= text_.size() || text_[pos_] != '>') error("'>' expected");
                 ++pos_;
+                node.sourceEnd = pos_;
                 node.text = trimmed(text);
                 return;
             }

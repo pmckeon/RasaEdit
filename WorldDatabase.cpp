@@ -3,45 +3,32 @@
 #include <functional>
 #include <map>
 
-#include <sqlite3.h>
 
 #include <algorithm>
 #include <stdexcept>
 
 namespace {
 
-// Minimal RAII prepared statement with typed column accessors.
+// A statement of the connection's backend (DbConnection.h), with the typed accessors the loaders use.
 class Statement {
 public:
-    Statement(sqlite3* db, const std::string& sql) {
-        if (sqlite3_prepare_v2(db, sql.c_str(), -1, &statement_, nullptr) != SQLITE_OK)
-            throw std::runtime_error("SQL error: " + std::string(sqlite3_errmsg(db)) + " in: " + sql);
-    }
-    ~Statement() { sqlite3_finalize(statement_); }
-    Statement(const Statement&) = delete;
-    Statement& operator=(const Statement&) = delete;
-    void bindInt(int index, int64_t value) { sqlite3_bind_int64(statement_, index, value); }
-    void bindReal(int index, double value) { sqlite3_bind_double(statement_, index, value); }
-    void bindText(int index, const std::string& value) { sqlite3_bind_text(statement_, index, value.c_str(), int(value.size()), SQLITE_TRANSIENT); }
-    void bindNull(int index) { sqlite3_bind_null(statement_, index); }
-    int columnType(int column) const { return sqlite3_column_type(statement_, column); }
-    double realDouble(int column) const { return sqlite3_column_double(statement_, column); }
-    bool step() { return sqlite3_step(statement_) == SQLITE_ROW; }
-    // For INSERT / UPDATE / DELETE: throws on failure.
-    void run(sqlite3* db) {
-        const int rc = sqlite3_step(statement_);
-        if (rc != SQLITE_DONE && rc != SQLITE_ROW) throw std::runtime_error(std::string(sqlite3_errmsg(db)));
-    }
-    int64_t integer(int column) const { return sqlite3_column_int64(statement_, column); }
-    int32_t int32(int column) const { return int32_t(sqlite3_column_int64(statement_, column)); }
-    float real(int column) const { return float(sqlite3_column_double(statement_, column)); }
-    std::string text(int column) const {
-        const unsigned char* t = sqlite3_column_text(statement_, column);
-        return t ? reinterpret_cast<const char*>(t) : "";
-    }
+    Statement(DbConnection* db, const std::string& sql) : statement_(db->prepare(sql)) {}
+    void bindInt(int index, int64_t value) { statement_->bindInt(index, value); }
+    void bindReal(int index, double value) { statement_->bindReal(index, value); }
+    void bindText(int index, const std::string& value) { statement_->bindText(index, value); }
+    void bindNull(int index) { statement_->bindNull(index); }
+    DbType columnType(int column) const { return statement_->columnType(column); }
+    bool isNull(int column) const { return statement_->columnType(column) == DbType::Null; }
+    double realDouble(int column) const { return statement_->realDouble(column); }
+    bool step() { return statement_->step(); }
+    void run(DbConnection*) { statement_->run(); }     // INSERT / UPDATE / DELETE: throws on failure
+    int64_t integer(int column) const { return statement_->integer(column); }
+    int32_t int32(int column) const { return int32_t(statement_->integer(column)); }
+    float real(int column) const { return float(statement_->realDouble(column)); }
+    std::string text(int column) const { return statement_->text(column); }
     tr::Vec3 vec3(int column) const { return tr::Vec3{real(column), real(column + 1), real(column + 2)}; }
 private:
-    sqlite3_stmt* statement_ = nullptr;
+    std::unique_ptr<DbStatement> statement_;
 };
 
 std::string lower(std::string s) { return tr::toLowerAscii(std::move(s)); }
@@ -103,6 +90,18 @@ const char* spawnAnimationName(int32_t animType) {
     }
 }
 
+const char* controlPointLinkKindName(int32_t kind) {
+    switch (kind) {
+        case 1: return "Bane garrison pool";
+        case 2: return "AFS garrison pool";
+        case 3: return "Hospital";
+        case 4: return "Waypoint";
+        case 5: return "Boss";
+        case 6: return "Clan lockbox";
+        default: return "unknown";
+    }
+}
+
 const char* objectKindName(ObjectKind kind) {
     switch (kind) {
         case ObjectKind::Logos: return "Logos";
@@ -111,45 +110,33 @@ const char* objectKindName(ObjectKind kind) {
         case ObjectKind::AmbientNpc: return "Ambient NPC";
         case ObjectKind::WorldUsable: return "World usable";
         case ObjectKind::WorldDestructible: return "World destructible";
+        case ObjectKind::Emitter: return "FX emitter";
         default: return "Kraftwerk";
     }
 }
 
-WorldDatabase::WorldDatabase(const std::string& path) : path_(path) {
-    if (sqlite3_open_v2(path.c_str(), &db_, SQLITE_OPEN_READWRITE, nullptr) != SQLITE_OK) {
-        sqlite3_close(db_);
-        db_ = nullptr;
-        readOnly_ = true;
-        if (sqlite3_open_v2(path.c_str(), &db_, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK) {
-            const std::string message = db_ ? sqlite3_errmsg(db_) : "out of memory";
-            sqlite3_close(db_);
-            db_ = nullptr;
-            throw std::runtime_error("cannot open database: " + message);
-        }
-        warnings_.push_back("the file is not writable; opened read-only");
+WorldDatabase::WorldDatabase(const std::string& spec, const std::string& mySqlPluginDir) : path_(spec) {
+    if (isMySqlSpec(spec)) {
+        MySqlSpec m;
+        if (!parseMySqlSpec(spec, m)) throw std::runtime_error("not a MySQL connection spec (mysql://user[:password]@host[:port]/database): " + spec);
+        connection_ = openMySql(m, mySqlPluginDir);
+        path_ = mySqlSpecString(m);                    // shown and remembered without the password
+        mySql_ = true;
+    } else {
+        connection_ = openSqlite(spec, warnings_);
     }
-    sqlite3_busy_timeout(db_, 2000);                 // the server may be using the file
-    // Enforce the schema's foreign keys on the editor's saves (SQLite leaves them off per connection by default): a save
-    // that would orphan rows (e.g. mission_area -> mission_content_definition, ON DELETE RESTRICT) fails and is rolled back
-    // instead of writing, and ON DELETE CASCADE rows (mission_evidence) go with their parent.
-    sqlite3_exec(db_, "PRAGMA foreign_keys = ON", nullptr, nullptr, nullptr);
-    {
-        Statement tables(db_, "SELECT name FROM sqlite_master WHERE type = 'table'");
-        while (tables.step()) {
-            const std::string table = tables.text(0);
-            std::set<std::string>& columns = columns_[lower(table)];
-            Statement info(db_, "PRAGMA table_info(\"" + table + "\")");
-            while (info.step()) columns.insert(lower(info.text(1)));
-        }
+    db_ = connection_.get();
+    readOnly_ = db_->readOnly();
+    for (const std::string& table : db_->tables()) {
+        std::set<std::string>& columns = columns_[lower(table)];
+        for (const DbColumnInfo& c : db_->columns(table)) columns.insert(lower(c.name));
     }
     if (!hasTable("spawnpool") && !hasTable("creature") && !hasTable("map_info"))
         throw std::runtime_error("this does not look like a Rasa.NET World database (no spawnpool, creature or map_info table)");
     loadGlobals();
 }
 
-WorldDatabase::~WorldDatabase() {
-    if (db_) sqlite3_close(db_);
-}
+WorldDatabase::~WorldDatabase() = default;
 
 bool WorldDatabase::hasTable(const std::string& table) const { return columns_.count(lower(table)) != 0; }
 
@@ -201,6 +188,11 @@ void WorldDatabase::loadCreatures() {
     itemTemplates_.clear();
     creatureBattlecries_.clear();
     classBattlecries_.clear();
+    classFlags_.clear();
+    if (hasTable("creature_class_flag") && requireColumns("creature_class_flag", {"class_id", "flag_id"})) {
+        Statement s(db_, "SELECT class_id, flag_id FROM creature_class_flag");
+        while (s.step()) classFlags_[s.int32(0)].insert(s.int32(1));
+    }
     if (requireColumns("creature_battlecry", {"scope", "target_id", "package_id"})) {
         Statement s(db_, "SELECT scope, target_id, package_id FROM creature_battlecry");
         while (s.step()) {
@@ -233,7 +225,7 @@ void WorldDatabase::loadCreatures() {
         while (s.step()) vendorPrices_[s.int32(0)] = s.int32(1);
     }
     if (requireColumns("vendor_item", {"id", "item_template_id"})) {
-        Statement s(db_, "SELECT id, item_template_id FROM vendor_item ORDER BY rowid");
+        Statement s(db_, std::string("SELECT id, item_template_id FROM vendor_item") + (db_->hasRowId() ? " ORDER BY rowid" : ""));
         while (s.step()) vendorItems_[s.int32(0)].push_back(s.int32(1));
     }
     if (requireColumns("itemtemplate", {"id", "buy_price"}) && requireColumns("itemtemplate_itemclass", {"itemtemplateid", "itemclassid"})) {
@@ -425,15 +417,12 @@ DbTable WorldDatabase::loadTable(const std::string& table) const {
     DbTable t;
     t.name = table;
     std::vector<std::pair<int, int>> keyOrder;             // (pk position, column)
-    {
-        Statement info(db_, "PRAGMA table_info(\"" + table + "\")");
-        while (info.step()) {
-            const int index = int(t.columns.size());
-            t.columns.push_back(info.text(1));
-            t.declaredTypes.push_back(info.text(2));
-            t.nullable.push_back(info.integer(3) == 0);
-            if (info.integer(5) > 0) keyOrder.emplace_back(int(info.integer(5)), index);
-        }
+    for (const DbColumnInfo& c : db_->columns(table)) {
+        const int index = int(t.columns.size());
+        t.columns.push_back(c.name);
+        t.declaredTypes.push_back(c.declaredType);
+        t.nullable.push_back(c.nullable);
+        if (c.keyPosition > 0) keyOrder.emplace_back(c.keyPosition, index);
     }
     if (t.columns.empty()) throw std::runtime_error("no table " + table);
     std::sort(keyOrder.begin(), keyOrder.end());
@@ -450,9 +439,9 @@ DbTable WorldDatabase::loadTable(const std::string& table) const {
         std::vector<DbValue> row(t.columns.size());
         for (size_t k = 0; k < t.columns.size(); ++k) {
             switch (s.columnType(int(k))) {
-                case SQLITE_INTEGER: row[k] = DbValue::integer(s.integer(int(k))); break;
-                case SQLITE_FLOAT: row[k] = DbValue::real(s.realDouble(int(k))); break;
-                case SQLITE_NULL: break;
+                case DbType::Int: row[k] = DbValue::integer(s.integer(int(k))); break;
+                case DbType::Real: row[k] = DbValue::real(s.realDouble(int(k))); break;
+                case DbType::Null: break;
                 default: row[k] = DbValue::text(s.text(int(k))); break;
             }
         }
@@ -491,7 +480,7 @@ bool WorldDatabase::saveTables(const std::vector<std::pair<const DbTable*, const
         return false;
     }
     try {
-        execute("BEGIN IMMEDIATE");
+        db_->begin();
     } catch (const std::exception& e) {
         error = std::string("cannot start a transaction (is the server writing to the database?): ") + e.what();
         return false;
@@ -561,11 +550,11 @@ bool WorldDatabase::saveTables(const std::vector<std::pair<const DbTable*, const
                 }
             }
         }
-        execute("COMMIT");
+        db_->commit();
         return true;
     } catch (const std::exception& e) {
         error = e.what();
-        try { execute("ROLLBACK"); } catch (const std::exception&) {}
+        try { db_->rollback(); } catch (const std::exception&) {}
         summary = SaveSummary{};
         return false;
     }
@@ -624,14 +613,15 @@ std::vector<CreatureDefinition> WorldDatabase::creatureDefinitions() const {
 
 bool WorldDatabase::saveCreatures(const std::vector<CreatureDefinition>& saved, const std::vector<CreatureDefinition>& edited, SaveSummary& summary,
                                   std::string& error, const std::map<int32_t, int32_t>* savedClassCries,
-                                  const std::map<int32_t, int32_t>* editedClassCries) {
+                                  const std::map<int32_t, int32_t>* editedClassCries, const std::map<int32_t, std::set<int32_t>>* savedClassFlags,
+                                  const std::map<int32_t, std::set<int32_t>>* editedClassFlags) {
     summary = SaveSummary{};
     if (readOnly_) {
         error = "the database was opened read-only";
         return false;
     }
     try {
-        execute("BEGIN IMMEDIATE");
+        db_->begin();
     } catch (const std::exception& e) {
         error = std::string("cannot start a transaction (is the server writing to the database?): ") + e.what();
         return false;
@@ -820,10 +810,35 @@ bool WorldDatabase::saveCreatures(const std::vector<CreatureDefinition>& saved, 
                 ++summary.deleted;
             }
         }
-        execute("COMMIT");
+        // creature_class_flag: the (class, flag) rows that differ.
+        if (savedClassFlags && editedClassFlags && hasTable("creature_class_flag")) {
+            const auto has = [](const std::map<int32_t, std::set<int32_t>>& m, int32_t classId, int32_t flag) {
+                const auto it = m.find(classId);
+                return it != m.end() && it->second.count(flag) != 0;
+            };
+            for (const auto& [classId, flags] : *savedClassFlags)
+                for (int32_t flag : flags) {
+                    if (has(*editedClassFlags, classId, flag)) continue;
+                    Statement s(db_, "DELETE FROM creature_class_flag WHERE class_id = ?1 AND flag_id = ?2");
+                    s.bindInt(1, classId);
+                    s.bindInt(2, flag);
+                    s.run(db_);
+                    ++summary.deleted;
+                }
+            for (const auto& [classId, flags] : *editedClassFlags)
+                for (int32_t flag : flags) {
+                    if (has(*savedClassFlags, classId, flag)) continue;
+                    Statement s(db_, "INSERT INTO creature_class_flag (class_id, flag_id) VALUES (?1, ?2)");
+                    s.bindInt(1, classId);
+                    s.bindInt(2, flag);
+                    s.run(db_);
+                    ++summary.inserted;
+                }
+        }
+        db_->commit();
     } catch (const std::exception& e) {
         error = e.what();
-        try { execute("ROLLBACK"); } catch (const std::exception&) {}
+        try { db_->rollback(); } catch (const std::exception&) {}
         summary = SaveSummary{};
         return false;
     }
@@ -891,7 +906,7 @@ WorldContent WorldDatabase::loadMap(int32_t mapContextId) {
             step.poolId = s.integer(0);
             step.step = s.int32(1);
             step.position = s.vec3(2);
-            step.hasFacing = s.columnType(5) != SQLITE_NULL;
+            step.hasFacing = !s.isNull(5);
             step.facing = step.hasFacing ? s.real(5) : 0.0f;
             step.pauseMs = s.int32(6);
             content.patrolSteps.push_back(step);
@@ -1033,6 +1048,41 @@ WorldContent WorldDatabase::loadMap(int32_t mapContextId) {
             content.objects.push_back(o);
         }
     }
+    if (hasTable("map_emitter") &&
+        requireColumns("map_emitter", {"id", "map_context_id", "pos_x", "pos_y", "pos_z", "rotation", "package_id", "is_on", "comment"})) {
+        Statement s(db_, "SELECT id, map_context_id, pos_x, pos_y, pos_z, rotation, comment, package_id, is_on FROM map_emitter "
+                         "WHERE map_context_id = ?1 ORDER BY id");
+        s.bindInt(1, mapContextId);
+        while (s.step()) {
+            PlacedObject o{ObjectKind::Emitter, s.integer(0), kEmitterClassId, s.int32(1), s.vec3(2), s.real(5), s.text(6)};
+            o.emitter.packageId = s.integer(7);
+            o.emitter.isOn = s.integer(8) != 0;
+            content.objects.push_back(o);
+        }
+    }
+    if (hasTable("map_marker") &&
+        requireColumns("map_marker", {"marker_entity_id", "map_context_id", "marker_type", "object_kind", "object_id", "match_distance", "comment"})) {
+        Statement s(db_, "SELECT marker_entity_id, marker_type, object_kind, object_id, match_distance, comment FROM map_marker WHERE map_context_id = ?1 "
+                         "ORDER BY marker_entity_id");
+        s.bindInt(1, mapContextId);
+        while (s.step()) {
+            MapMarkerBinding m;
+            m.markerEntityId = s.integer(0);
+            m.markerType = s.int32(1);
+            m.objectKind = s.int32(2);
+            m.objectId = s.integer(3);
+            m.matchDistance = s.real(4);
+            m.hasComment = !s.isNull(5);
+            m.comment = m.hasComment ? s.text(5) : std::string();
+            content.mapMarkers.push_back(m);
+        }
+    }
+    if (hasTable("control_point_link") && requireColumns("control_point_link", {"control_point_id", "kind", "object_id"})) {
+        Statement s(db_, "SELECT l.control_point_id, l.kind, l.object_id FROM control_point_link l JOIN control_point p ON p.id = l.control_point_id "
+                         "WHERE p.map_context_id = ?1 ORDER BY l.control_point_id, l.kind, l.object_id");
+        s.bindInt(1, mapContextId);
+        while (s.step()) content.controlPointLinks.push_back(ControlPointLink{s.integer(0), s.int32(1), s.integer(2)});
+    }
     if (hasTable("wormhole_lock") && requireColumns("wormhole_lock", {"id", "from_teleporter_id", "to_teleporter_id", "kind", "value", "comment"})) {
         Statement s(db_, "SELECT id, from_teleporter_id, to_teleporter_id, kind, value, comment FROM wormhole_lock ORDER BY id");
         while (s.step()) {
@@ -1042,7 +1092,7 @@ WorldContent WorldDatabase::loadMap(int32_t mapContextId) {
             w.toTeleporterId = s.integer(2);
             w.kind = s.integer(3);
             w.value = s.integer(4);
-            w.hasComment = s.columnType(5) != SQLITE_NULL;
+            w.hasComment = !s.isNull(5);
             w.comment = w.hasComment ? s.text(5) : std::string();
             content.wormholeLocks.push_back(w);
         }
@@ -1091,7 +1141,8 @@ bool same(const DestructibleSettings& a, const DestructibleSettings& b) {
 }
 bool same(const PlacedObject& a, const PlacedObject& b) {
     return a.classId == b.classId && sameVec(a.position, b.position) && a.rotation == b.rotation && a.name == b.name &&
-           (a.kind != ObjectKind::WorldUsable || same(a.usable, b.usable)) && (a.kind != ObjectKind::WorldDestructible || same(a.destructible, b.destructible));
+           (a.kind != ObjectKind::WorldUsable || same(a.usable, b.usable)) && (a.kind != ObjectKind::WorldDestructible || same(a.destructible, b.destructible)) &&
+           (a.kind != ObjectKind::Emitter || (a.emitter.packageId == b.emitter.packageId && a.emitter.isOn == b.emitter.isOn));
 }
 bool same(const WormholeLock& a, const WormholeLock& b) {
     return a.fromTeleporterId == b.fromTeleporterId && a.toTeleporterId == b.toTeleporterId && a.kind == b.kind && a.value == b.value &&
@@ -1115,20 +1166,14 @@ const char* objectTable(ObjectKind kind) {
         case ObjectKind::AmbientNpc: return "ambient_npc";
         case ObjectKind::WorldUsable: return "world_usable";
         case ObjectKind::WorldDestructible: return "world_destructible";
+        case ObjectKind::Emitter: return "map_emitter";
         default: return "kraftwerks";
     }
 }
 
 }  // namespace
 
-void WorldDatabase::execute(const std::string& sql) {
-    char* message = nullptr;
-    if (sqlite3_exec(db_, sql.c_str(), nullptr, nullptr, &message) != SQLITE_OK) {
-        const std::string text = message ? message : "unknown error";
-        sqlite3_free(message);
-        throw std::runtime_error(text);
-    }
-}
+void WorldDatabase::execute(const std::string& sql) { db_->execute(sql); }
 
 bool WorldDatabase::save(const WorldContent& saved, const WorldContent& edited, SaveSummary& summary, std::string& error) {
     summary = SaveSummary{};
@@ -1138,7 +1183,7 @@ bool WorldDatabase::save(const WorldContent& saved, const WorldContent& edited, 
     }
     const int64_t context = edited.mapContextId;
     try {
-        execute("BEGIN IMMEDIATE");
+        db_->begin();
     } catch (const std::exception& e) {
         error = std::string("cannot start a transaction (is the server writing to the database?): ") + e.what();
         return false;
@@ -1353,6 +1398,25 @@ bool WorldDatabase::save(const WorldContent& saved, const WorldContent& edited, 
             for (const PlacedObject& b : saved.objects) if (b.kind == o.kind && b.id == o.id) { before = &b; break; }
             if (o.id != 0 && (!before || same(*before, o))) continue;
             if (o.id == 0 && o.kind == ObjectKind::ControlPoint) continue;     // not creatable
+            if (o.kind == ObjectKind::Emitter) {
+                // Columns per Rasa.NET MapEmitterEntry (no class column: always FXPackageEmitter).
+                Statement s(db_, o.id == 0 ? "INSERT INTO map_emitter (map_context_id, pos_x, pos_y, pos_z, rotation, package_id, is_on, comment) "
+                                             "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+                                           : "UPDATE map_emitter SET map_context_id = ?1, pos_x = ?2, pos_y = ?3, pos_z = ?4, rotation = ?5, "
+                                             "package_id = ?6, is_on = ?7, comment = ?8 WHERE id = ?9");
+                s.bindInt(1, context);
+                s.bindReal(2, o.position.x);
+                s.bindReal(3, o.position.y);
+                s.bindReal(4, o.position.z);
+                s.bindReal(5, o.rotation);
+                s.bindInt(6, o.emitter.packageId);
+                s.bindInt(7, o.emitter.isOn ? 1 : 0);
+                s.bindText(8, o.name);
+                if (o.id != 0) s.bindInt(9, o.id);
+                s.run(db_);
+                ++(o.id == 0 ? summary.inserted : summary.updated);
+                continue;
+            }
             if (o.kind == ObjectKind::AmbientNpc || o.kind == ObjectKind::WorldUsable || o.kind == ObjectKind::WorldDestructible) {
                 // Columns per Rasa.NET AmbientNpcEntry / WorldUsableEntry / WorldDestructibleEntry.
                 std::vector<std::string> columns = {"class_id", "map_context_id", "pos_x", "pos_y", "pos_z", "rotation", "comment"};
@@ -1450,6 +1514,70 @@ bool WorldDatabase::save(const WorldContent& saved, const WorldContent& edited, 
             }
         }
 
+        // Map markers, keyed by (marker entity id, this map).
+        if (hasTable("map_marker")) {
+            const auto find = [](const std::vector<MapMarkerBinding>& list, int64_t id) -> const MapMarkerBinding* {
+                for (const MapMarkerBinding& m : list)
+                    if (m.markerEntityId == id) return &m;
+                return nullptr;
+            };
+            for (const MapMarkerBinding& m : saved.mapMarkers) {
+                if (find(edited.mapMarkers, m.markerEntityId)) continue;
+                Statement s(db_, "DELETE FROM map_marker WHERE marker_entity_id = ?1 AND map_context_id = ?2");
+                s.bindInt(1, m.markerEntityId);
+                s.bindInt(2, context);
+                s.run(db_);
+                ++summary.deleted;
+            }
+            for (const MapMarkerBinding& m : edited.mapMarkers) {
+                const MapMarkerBinding* before = find(saved.mapMarkers, m.markerEntityId);
+                if (before && before->markerType == m.markerType && before->objectKind == m.objectKind && before->objectId == m.objectId &&
+                    before->matchDistance == m.matchDistance && before->hasComment == m.hasComment && (!m.hasComment || before->comment == m.comment))
+                    continue;
+                Statement s(db_, before ? "UPDATE map_marker SET marker_type = ?3, object_kind = ?4, object_id = ?5, match_distance = ?6, comment = ?7 "
+                                          "WHERE marker_entity_id = ?1 AND map_context_id = ?2"
+                                        : "INSERT INTO map_marker (marker_entity_id, map_context_id, marker_type, object_kind, object_id, match_distance, comment) "
+                                          "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)");
+                s.bindInt(1, m.markerEntityId);
+                s.bindInt(2, context);
+                s.bindInt(3, m.markerType);
+                s.bindInt(4, m.objectKind);
+                s.bindInt(5, m.objectId);
+                s.bindReal(6, m.matchDistance);
+                if (m.hasComment) s.bindText(7, m.comment);
+                s.run(db_);
+                ++(before ? summary.updated : summary.inserted);
+            }
+        }
+
+        // Control point links: the key is the whole row, so a change is a delete and an insert.
+        if (hasTable("control_point_link")) {
+            const auto sameLink = [](const ControlPointLink& a, const ControlPointLink& b) {
+                return a.controlPointId == b.controlPointId && a.kind == b.kind && a.objectId == b.objectId;
+            };
+            const auto contains = [&](const std::vector<ControlPointLink>& list, const ControlPointLink& l) {
+                return std::any_of(list.begin(), list.end(), [&](const ControlPointLink& x) { return sameLink(x, l); });
+            };
+            for (const ControlPointLink& l : saved.controlPointLinks) {
+                if (contains(edited.controlPointLinks, l)) continue;
+                Statement s(db_, "DELETE FROM control_point_link WHERE control_point_id = ?1 AND kind = ?2 AND object_id = ?3");
+                s.bindInt(1, l.controlPointId);
+                s.bindInt(2, l.kind);
+                s.bindInt(3, l.objectId);
+                s.run(db_);
+                ++summary.deleted;
+            }
+            for (const ControlPointLink& l : edited.controlPointLinks) {
+                if (contains(saved.controlPointLinks, l) || l.controlPointId == 0 || l.objectId == 0) continue;
+                Statement s(db_, "INSERT INTO control_point_link (control_point_id, kind, object_id) VALUES (?1, ?2, ?3)");
+                s.bindInt(1, l.controlPointId);
+                s.bindInt(2, l.kind);
+                s.bindInt(3, l.objectId);
+                s.run(db_);
+                ++summary.inserted;
+            }
+        }
+
         // Map links.
         for (int64_t id : deletedIds(saved.mapLinks, edited.mapLinks)) {
             Statement s(db_, "DELETE FROM map_link WHERE id = ?1");
@@ -1527,11 +1655,11 @@ bool WorldDatabase::save(const WorldContent& saved, const WorldContent& edited, 
             s.run(db_);
             ++summary.updated;
         }
-        execute("COMMIT");
+        db_->commit();
         return true;
     } catch (const std::exception& e) {
         error = e.what();
-        try { execute("ROLLBACK"); } catch (const std::exception&) {}
+        try { db_->rollback(); } catch (const std::exception&) {}
         summary = SaveSummary{};
         return false;
     }

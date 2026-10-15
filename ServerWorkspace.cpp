@@ -3,6 +3,7 @@
 #include "imgui_internal.h"   // DockBuilder
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <set>
 #include <cstdio>
@@ -28,17 +29,122 @@ void ServerWorkspace::buildDefaultLayout(ImGuiID dockspace) {
     ImGui::DockBuilderDockWindow("Creatures###Server.Creatures", right);
     ImGui::DockBuilderDockWindow("Missions###Server.Missions", right);
     ImGui::DockBuilderDockWindow("Loot###Server.Loot", right);
+    ImGui::DockBuilderDockWindow("Crafting###Server.Crafting", right);
     ImGui::DockBuilderDockWindow("Map###Server.Map", rightBottom);
     ImGui::DockBuilderFinish(dockspace);
 }
 
 void ServerWorkspace::beginFrame() {
     if (!ImGui::IsAnyItemActive() && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) editItem_ = 0;     // interaction finished
+    // RASAEDIT_SERVER_SELECT=<pool|teleporter|object|creature|module|recipe>:<database id>: start with that server object (or creature, in the
+    // Creatures panel) selected (previews), once the
+    // map's content is loaded.
+    static bool preselected = false;
+    if (!preselected && serverContent_.mapContextId >= 0) {
+        preselected = true;
+        if (const char* spec = std::getenv("RASAEDIT_SERVER_SELECT"); spec && *spec) {
+            const std::string s = spec;
+            const size_t colon = s.find(':');
+            const std::string kind = s.substr(0, colon);
+            const int64_t id = colon == std::string::npos ? 0 : std::strtoll(s.c_str() + colon + 1, nullptr, 10);
+            if (kind == "pool")
+                for (size_t k = 0; k < serverContent_.spawnPools.size(); ++k)
+                    if (serverContent_.spawnPools[k].id == id) selection_ = Selection{SelectionKind::SpawnPool, k};
+            if (kind == "teleporter")
+                for (size_t k = 0; k < serverContent_.teleporters.size(); ++k)
+                    if (serverContent_.teleporters[k].id == id) selection_ = Selection{SelectionKind::Teleporter, k};
+            if (kind == "module") {
+                modules_.selected_ = id;
+                craftingTab_ = 0;
+                focusModules_ = 10;
+            }
+            if (kind == "recipe") {
+                recipes_.selected_ = id;
+                craftingTab_ = 2;
+                focusModules_ = 10;
+            }
+            if (kind == "creature") {
+                creatureSelected_ = int32_t(id);
+                focusCreatures_ = 10;                 // a few frames: the docked window may not exist on the first
+            }
+            if (kind == "object")
+                for (size_t k = 0; k < serverContent_.objects.size(); ++k)
+                    if (serverContent_.objects[k].id == id && serverContent_.objects[k].kind == ObjectKind::ControlPoint) selection_ = Selection{SelectionKind::Object, k};
+            // A placed object is also shown in the viewport ("Show in viewport").
+            if (selection_.kind == SelectionKind::SpawnPool || selection_.kind == SelectionKind::Teleporter || selection_.kind == SelectionKind::Object)
+                viewport_.focusOn(ctx_, selection_);
+            // Options after the id, ";key=value": zoom=<factor> frames it from that many times the usual distance, placeholders=0
+            // turns the viewport's placeholder boxes off.
+            for (size_t p = s.find(';'); p != std::string::npos; p = s.find(';', p + 1)) {
+                const std::string option = s.substr(p + 1, s.find(';', p + 1) - p - 1);
+                const size_t eq = option.find('=');
+                const std::string key = option.substr(0, eq), value = eq == std::string::npos ? "" : option.substr(eq + 1);
+                if (key == "placeholders") ctx_.view.showPlaceholders = value != "0";
+                tr::Vec3 target;
+                float distance = 0;
+                if (key == "zoom" && ctx_.scene && ctx_.scene->focusTarget(selection_, target, distance))
+                    ctx_.scene->focusOnPoint(target, distance * std::max(0.1f, float(std::atof(value.c_str()))));
+            }
+        }
+    }
 }
 
 void ServerWorkspace::onMapLoaded() {
     loadServerContent();
     overview_.onMapLoaded(ctx_);
+}
+
+void ServerWorkspace::showMySqlDialog(const std::string& spec) {
+    MySqlSpec m;
+    const std::string current = spec.empty() ? ctx_.setting("database") : spec;
+    if (parseMySqlSpec(current.find('@') != std::string::npos ? current : std::string(), m)) {
+        std::snprintf(mySqlHost_, sizeof mySqlHost_, "%s", m.host.c_str());
+        mySqlPort_ = m.port;
+        std::snprintf(mySqlUser_, sizeof mySqlUser_, "%s", m.user.c_str());
+        std::snprintf(mySqlDatabase_, sizeof mySqlDatabase_, "%s", m.database.c_str());
+        std::snprintf(mySqlPassword_, sizeof mySqlPassword_, "%s", m.password.c_str());
+    }
+    mySqlRemember_ = !ctx_.setting("databasePassword").empty();
+    mySqlDialogOpen_ = true;
+}
+
+void ServerWorkspace::drawMySqlDialog() {
+    if (mySqlDialogOpen_) {
+        ImGui::OpenPopup("Connect to a MySQL World database");
+        mySqlDialogOpen_ = false;
+    }
+    ImGui::SetNextWindowSize(ImVec2(460, 0), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("Connect to a MySQL World database", nullptr, ImGuiWindowFlags_NoResize)) return;
+    ImGui::TextWrapped("The Rasa.NET World database on a MySQL 8 or MariaDB server (Provider \"MySql\" in Rasa.DBL's databasesettings). "
+                       "Apply the server's pending migrations first - the editor reads the schema as it is.");
+    ImGui::Separator();
+    ImGui::InputText("Host", mySqlHost_, sizeof mySqlHost_);
+    ImGui::InputInt("Port", &mySqlPort_, 0);
+    mySqlPort_ = std::clamp(mySqlPort_, 1, 65535);
+    ImGui::InputText("User", mySqlUser_, sizeof mySqlUser_);
+    ImGui::InputText("Password", mySqlPassword_, sizeof mySqlPassword_, ImGuiInputTextFlags_Password);
+    ImGui::InputText("Database", mySqlDatabase_, sizeof mySqlDatabase_);
+    ImGui::Checkbox("Remember the password", &mySqlRemember_);
+    ImGui::SetItemTooltip("Stored in the editor's settings file in plain text. Off: asked for each time the editor reconnects.");
+    const bool ready = mySqlHost_[0] && mySqlUser_[0] && mySqlDatabase_[0];
+    ImGui::BeginDisabled(!ready);
+    if (ImGui::Button("Connect", ImVec2(120, 0))) {
+        // The spec keeps the password in memory only until the database is open (openDatabase stores it without).
+        const std::string spec = "mysql://" + std::string(mySqlUser_) + (mySqlPassword_[0] ? ":" + std::string(mySqlPassword_) : std::string()) + "@" +
+                                 mySqlHost_ + ":" + std::to_string(mySqlPort_) + "/" + mySqlDatabase_;
+        rememberPasswordOnOpen_ = mySqlRemember_;
+        if (!mySqlRemember_) ctx_.setSetting("databasePassword", "");
+        ctx_.queueDatabase(spec);
+        std::memset(mySqlPassword_, 0, sizeof mySqlPassword_);
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+        std::memset(mySqlPassword_, 0, sizeof mySqlPassword_);
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
 }
 
 void ServerWorkspace::showDatabaseDialog() {
@@ -49,11 +155,13 @@ void ServerWorkspace::showDatabaseDialog() {
 
 void ServerWorkspace::drawPanels() {
     maps_.draw(ctx_, "Maps###Server.Maps");
+    drawMySqlDialog();
     drawServerPanel();
     drawInspectorPanel();
     drawCreaturePanel();
     drawMissionPanel();
     drawLootPanel();
+    drawCraftingPanel();
     drawMapInfoPanel(ctx_, "Map###Server.Map");
     OverviewLayers layers;
     layers.selection = &selection_;
@@ -100,7 +208,8 @@ void SDLCALL ServerWorkspace::databaseDialogCallback(void* userdata, const char*
 
 void ServerWorkspace::openDatabase(const std::string& path) {
     try {
-        auto database = std::make_unique<WorldDatabase>(path);
+        const char* base = SDL_GetBasePath();
+        auto database = std::make_unique<WorldDatabase>(path, defaultMySqlPluginDir(base ? base : ""));
         if (ctx_.scene) ctx_.scene->setServerContent(nullptr, nullptr, nullptr);
         serverContent_ = WorldContent{};
         if (selection_.kind != SelectionKind::MapEntity) selection_ = Selection{};
@@ -118,12 +227,32 @@ void ServerWorkspace::openDatabase(const std::string& path) {
             loot_.clear();
             ctx_.setStatus(std::string("Loot tables not loaded: ") + e.what(), true);
         }
-        ctx_.setSetting("database", path);
+        try {
+            modules_.load(*database_);
+        } catch (const std::exception& e) {
+            modules_.clear();
+            ctx_.setStatus(std::string("Item module tables not loaded: ") + e.what(), true);
+        }
+        try {
+            recipes_.load(*database_);
+        } catch (const std::exception& e) {
+            recipes_.clear();
+            ctx_.setStatus(std::string("Recipe tables not loaded: ") + e.what(), true);
+        }
+        // Remembered without the password (WorldDatabase::path); a MySQL password only when the user asked for it.
+        ctx_.setSetting("database", database_->path());
+        if (database_->isMySql() && rememberPasswordOnOpen_) {
+            MySqlSpec m;
+            if (parseMySqlSpec(path, m)) ctx_.setSetting("databasePassword", m.password);
+        }
+        rememberPasswordOnOpen_ = false;
         loadServerContent();
-        ctx_.setStatus("Opened server database " + path + (database_->warnings().empty() ? "" : "  (with schema warnings, see the Server panel)"),
-                  !database_->warnings().empty());
+        ctx_.setStatus("Opened server database " + database_->path() + (database_->warnings().empty() ? "" : "  (with schema warnings, see the Server panel)"),
+                       !database_->warnings().empty());
     } catch (const std::exception& e) {
         ctx_.setStatus(std::string("Could not open server database: ") + e.what(), true);
+        rememberPasswordOnOpen_ = false;
+        if (isMySqlSpec(path)) showMySqlDialog(path);  // let the user correct the connection (the password field starts empty)
     }
 }
 
@@ -143,6 +272,10 @@ void ServerWorkspace::loadServerContent() {
         if (!contexts.empty()) context = contexts.front();
     }
     if (context < 0) return;
+    clientMarkers_.clear();
+    if (ctx_.gameData && ctx_.mapTemplateId >= 0) {
+        try { clientMarkers_ = ctx_.gameData->factionedMapMarkers(ctx_.mapTemplateId); } catch (const std::exception&) {}
+    }
     try {
         serverContent_ = database_->loadMap(context);
         savedContent_ = serverContent_;
@@ -258,7 +391,8 @@ void ServerWorkspace::drawServerPanel() {
     if (!ImGui::Begin("Server objects###Server.Objects")) { ImGui::End(); return; }
     if (!database_) {
         ImGui::TextWrapped("No server database open. Use File > Open Server Database... and choose the Rasa.NET World database "
-                           "(rasaworld.db with the SQLite provider). It is opened read-only.");
+                           "(rasaworld.db with the SQLite provider), or File > Connect to MySQL Database... for the MySQL provider.");
+        if (ImGui::Button("Connect to MySQL...")) showMySqlDialog();
         ImGui::End();
         return;
     }
@@ -299,6 +433,8 @@ void ServerWorkspace::drawServerPanel() {
                 addServerObject(SelectionKind::Object, ObjectKind::WorldUsable);
             if (database_ && database_->hasTable("world_destructible") && ImGui::MenuItem("World destructible"))
                 addServerObject(SelectionKind::Object, ObjectKind::WorldDestructible);
+            if (database_ && database_->hasTable("map_emitter") && ImGui::MenuItem("FX emitter"))
+                addServerObject(SelectionKind::Object, ObjectKind::Emitter);
             if (database_ && database_->hasTable("wormhole_lock") && ImGui::MenuItem("Wormhole lock"))
                 addServerObject(SelectionKind::WormholeLock, ObjectKind::Footlocker);
             if (ImGui::MenuItem("Kraftwerk")) addServerObject(SelectionKind::Object, ObjectKind::Kraftwerk);
@@ -350,6 +486,7 @@ void ServerWorkspace::drawServerPanel() {
         list("Map links", SelectionKind::MapLink, serverContent_.mapLinks.size());
         list("Mission areas", SelectionKind::MissionArea, serverContent_.missionAreas.size());
         list("Regions", SelectionKind::Region, serverContent_.regions.size());
+        drawMarkerList();
     }
     ImGui::EndChild();
     ImGui::End();
@@ -602,6 +739,7 @@ void ServerWorkspace::deleteSelected() {
                 serverContent_.poses.erase(std::remove_if(serverContent_.poses.begin(), serverContent_.poses.end(),
                                                           [&](const PoolPose& p) { return p.poolId == poolId; }),
                                            serverContent_.poses.end());
+                removeControlPointLinks({1, 2}, poolId);
             }
             what = "spawn pool" + (arrivals ? " and its " + std::to_string(arrivals) + " arrival point(s)" : std::string());
             break;
@@ -627,6 +765,10 @@ void ServerWorkspace::deleteSelected() {
         case SelectionKind::Teleporter:
             if (i >= serverContent_.teleporters.size()) return;
             beginEdit();
+            if (serverContent_.teleporters[i].id > 0) {
+                removeControlPointLinks({3, 4}, serverContent_.teleporters[i].id);
+                removeMarkerBindings(1, serverContent_.teleporters[i].id);
+            }
             serverContent_.teleporters.erase(serverContent_.teleporters.begin() + std::ptrdiff_t(i));
             what = "teleporter";
             break;
@@ -644,6 +786,9 @@ void ServerWorkspace::deleteSelected() {
             }
             beginEdit();
             what = objectKindName(serverContent_.objects[i].kind);
+            if (serverContent_.objects[i].kind == ObjectKind::Footlocker && serverContent_.objects[i].id > 0)
+                removeControlPointLinks({6}, serverContent_.objects[i].id);
+            if (serverContent_.objects[i].kind == ObjectKind::Kraftwerk && serverContent_.objects[i].id > 0) removeMarkerBindings(2, serverContent_.objects[i].id);
             serverContent_.objects.erase(serverContent_.objects.begin() + std::ptrdiff_t(i));
             break;
         default:
@@ -878,6 +1023,12 @@ void ServerWorkspace::addServerObject(SelectionKind kind, ObjectKind objectKind)
             o.mapContextId = serverContent_.mapContextId;
             o.position = point;
             o.name = std::string("New ") + objectKindName(objectKind);
+            if (objectKind == ObjectKind::Emitter) {
+                o.classId = kEmitterClassId;
+                // The package of the emitter last chosen on this map, else none yet (the inspector asks for one).
+                for (const PlacedObject& existing : serverContent_.objects)
+                    if (existing.kind == ObjectKind::Emitter) o.emitter.packageId = existing.emitter.packageId;
+            }
             serverContent_.objects.push_back(o);
             selection_ = Selection{SelectionKind::Object, serverContent_.objects.size() - 1};
             break;
@@ -885,6 +1036,347 @@ void ServerWorkspace::addServerObject(SelectionKind kind, ObjectKind objectKind)
     }
     contentChanged();
     ctx_.setStatus("Added at the centre of the view; set its fields in the Entity panel (not saved yet).", false);
+}
+
+// ------------------------------------------------------------------------------------------
+// Map-screen markers (map_marker)
+// ------------------------------------------------------------------------------------------
+void ServerWorkspace::removeMarkerBindings(int32_t objectKind, int64_t objectId) {
+    auto& b = serverContent_.mapMarkers;
+    b.erase(std::remove_if(b.begin(), b.end(), [&](const MapMarkerBinding& m) { return m.objectKind == objectKind && m.objectId == objectId; }), b.end());
+}
+
+const tr::MapScreenMarker* ServerWorkspace::clientMarker(int64_t entityId) const {
+    for (const tr::MapScreenMarker& m : clientMarkers_)
+        if (m.entityId == entityId) return &m;
+    return nullptr;
+}
+
+void ServerWorkspace::drawMarkerBinding(int32_t objectKind, int64_t objectId, const tr::Vec3& position, std::initializer_list<int32_t> types) {
+    if (!database_ || !database_->hasTable("map_marker")) return;
+    ImGui::SeparatorText("Map screen marker (map_marker)");
+    if (objectId <= 0) {
+        ImGui::TextDisabled("Save the object first.");
+        return;
+    }
+    auto& bindings = serverContent_.mapMarkers;
+    const auto describe = [&](int64_t entityId) {
+        const tr::MapScreenMarker* m = clientMarker(entityId);
+        if (!m) return "marker " + std::to_string(entityId) + " (not one of this map's client markers)";
+        return (m->name.empty() ? std::string("(no name)") : m->name) + "  [" + tr::mapScreenMarkerTypeName(m->type) + "]";
+    };
+    size_t bound = 0;
+    for (size_t k = 0; k < bindings.size(); ++k) {
+        const MapMarkerBinding& b = bindings[k];
+        if (b.objectKind != objectKind || b.objectId != objectId) continue;
+        ++bound;
+        ImGui::PushID(int(k));
+        if (ImGui::SmallButton("x")) {
+            beginEdit();
+            bindings.erase(bindings.begin() + std::ptrdiff_t(k));
+            contentChanged();
+            ImGui::PopID();
+            break;
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Unbind: the marker is then sent no state");
+        ImGui::SameLine();
+        ImGui::Text("%s, %.1f m", describe(b.markerEntityId).c_str(), b.matchDistance);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("client entity id %lld", static_cast<long long>(b.markerEntityId));
+        ImGui::PopID();
+    }
+    if (bound == 0) ImGui::TextDisabled("No map-screen marker shows this object's state.");
+    // Bind: this map's client markers of a type such an object shows, nearest first.
+    std::vector<std::pair<float, const tr::MapScreenMarker*>> candidates;
+    for (const tr::MapScreenMarker& m : clientMarkers_) {
+        if (std::find(types.begin(), types.end(), m.type) == types.end() || m.nameId < 0) continue;
+        const float dx = m.x - position.x, dy = m.y - position.y, dz = m.z - position.z;
+        candidates.push_back({std::sqrt(dx * dx + dy * dy + dz * dz), &m});
+    }
+    std::sort(candidates.begin(), candidates.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    ImGui::SetNextItemWidth(320);
+    if (ImGui::BeginCombo("##bindmarker", "bind a marker...", ImGuiComboFlags_HeightLarge)) {
+        for (const auto& [distance, m] : candidates) {
+            const MapMarkerBinding* existing = nullptr;
+            for (const MapMarkerBinding& b : bindings)
+                if (b.markerEntityId == m->entityId) existing = &b;
+            if (existing && existing->objectKind == objectKind && existing->objectId == objectId) continue;
+            char label[256];
+            std::snprintf(label, sizeof label, "%s  [%s] - %.1f m%s", m->name.c_str(), tr::mapScreenMarkerTypeName(m->type), distance,
+                          existing ? "  (bound elsewhere: moves here)" : "");
+            ImGui::PushID(&m->entityId);
+            if (ImGui::Selectable(label)) {
+                beginEdit();
+                bindings.erase(std::remove_if(bindings.begin(), bindings.end(), [&](const MapMarkerBinding& b) { return b.markerEntityId == m->entityId; }),
+                               bindings.end());
+                MapMarkerBinding b;
+                b.markerEntityId = m->entityId;
+                b.markerType = m->type;
+                b.objectKind = objectKind;
+                b.objectId = objectId;
+                b.matchDistance = std::round(double(distance) * 100.0) / 100.0;
+                b.hasComment = true;
+                b.comment = m->name.substr(0, 64);           // as the seeded rows: the client's marker name (varchar(64))
+                bindings.push_back(b);
+                contentChanged();
+            }
+            ImGui::PopID();
+        }
+        if (candidates.empty()) ImGui::TextDisabled("(no client marker of a matching type on this map)");
+        ImGui::EndCombo();
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("The client draws its own markers (uimapmarker); binding one to this object makes the server send it this object's state.\n"
+                          "The shipped bindings were matched by position (within 25 m).");
+}
+
+void ServerWorkspace::drawMarkerList() {
+    if (!database_ || !database_->hasTable("map_marker")) return;
+    char header[96];
+    std::snprintf(header, sizeof header, "Map screen markers (client, %zu)###markers", clientMarkers_.size());
+    if (!ImGui::TreeNodeEx(header, clientMarkers_.empty() ? ImGuiTreeNodeFlags_Leaf : 0)) return;
+    const std::string needle = tr::toLowerAscii(serverFilter_);
+    for (size_t k = 0; k < clientMarkers_.size(); ++k) {
+        const tr::MapScreenMarker& m = clientMarkers_[k];
+        std::string label = (m.name.empty() ? std::string("(no name: the client skips it)") : m.name) + "  [" + tr::mapScreenMarkerTypeName(m.type) + "]";
+        Selection target{};
+        std::string boundTo = "unbound";
+        for (const MapMarkerBinding& b : serverContent_.mapMarkers) {
+            if (b.markerEntityId != m.entityId) continue;
+            boundTo = (b.objectKind == 1 ? "teleporter " : "kraftwerks ") + std::to_string(b.objectId);
+            if (b.objectKind == 1) {
+                for (size_t t = 0; t < serverContent_.teleporters.size(); ++t)
+                    if (serverContent_.teleporters[t].id == b.objectId) target = Selection{SelectionKind::Teleporter, t};
+            } else {
+                for (size_t o = 0; o < serverContent_.objects.size(); ++o)
+                    if (serverContent_.objects[o].kind == ObjectKind::Kraftwerk && serverContent_.objects[o].id == b.objectId)
+                        target = Selection{SelectionKind::Object, o};
+            }
+            if (target.kind == SelectionKind::None) boundTo += " (not on this map)";
+        }
+        if (m.type == 1) boundTo = "control point: control_point.marker_entity_id";
+        label += "  -> " + boundTo;
+        if (!needle.empty() && tr::toLowerAscii(label).find(needle) == std::string::npos) continue;
+        ImGui::PushID(int(k));
+        if (ImGui::Selectable(label.c_str(), target.kind != SelectionKind::None && sameSelection(selection_, target), ImGuiSelectableFlags_AllowDoubleClick) &&
+            target.kind != SelectionKind::None) {
+            selection_ = target;
+            if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) viewport_.focusOn(ctx_, target);
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("client entity id %lld at (%.1f, %.1f, %.1f)%s", static_cast<long long>(m.entityId), m.x, m.y, m.z,
+                              target.kind == SelectionKind::None && m.type != 1 ? "\nBind it from a teleporter's or Kraftwerk's inspector." : "");
+        ImGui::PopID();
+    }
+    ImGui::TreePop();
+}
+
+// ------------------------------------------------------------------------------------------
+// Control point links (control_point_link)
+// ------------------------------------------------------------------------------------------
+std::string ServerWorkspace::linkedObjectLabel(int32_t kind, int64_t objectId) const {
+    const std::string id = std::to_string(objectId);
+    switch (kind) {
+        case 1:
+        case 2:
+            for (size_t k = 0; k < serverContent_.spawnPools.size(); ++k)
+                if (serverContent_.spawnPools[k].id == objectId) return serverObjectLabel(Selection{SelectionKind::SpawnPool, k});
+            return "spawn pool " + id + " (not on this map)";
+        case 3:
+        case 4:
+            for (size_t k = 0; k < serverContent_.teleporters.size(); ++k)
+                if (serverContent_.teleporters[k].id == objectId) return serverObjectLabel(Selection{SelectionKind::Teleporter, k});
+            return "teleporter " + id + " (not on this map)";
+        case 5: {
+            const Creature* c = database_ ? database_->creature(int32_t(objectId)) : nullptr;
+            return "creature " + id + (c ? "  " + c->comment : std::string(" (not in the creature table)"));
+        }
+        case 6:
+            for (size_t k = 0; k < serverContent_.objects.size(); ++k)
+                if (serverContent_.objects[k].kind == ObjectKind::Footlocker && serverContent_.objects[k].id == objectId)
+                    return serverObjectLabel(Selection{SelectionKind::Object, k});
+            return "footlocker " + id + " (not on this map: the server ignores the link)";
+        default: return id;
+    }
+}
+
+void ServerWorkspace::removeControlPointLinks(std::initializer_list<int32_t> kinds, int64_t objectId) {
+    auto& links = serverContent_.controlPointLinks;
+    links.erase(std::remove_if(links.begin(), links.end(),
+                               [&](const ControlPointLink& l) {
+                                   return l.objectId == objectId && std::find(kinds.begin(), kinds.end(), l.kind) != kinds.end();
+                               }),
+                links.end());
+}
+
+void ServerWorkspace::drawControlPointMembership(std::initializer_list<int32_t> kinds, int64_t objectId) {
+    if (objectId <= 0) return;
+    for (const ControlPointLink& l : serverContent_.controlPointLinks) {
+        if (l.objectId != objectId || std::find(kinds.begin(), kinds.end(), l.kind) == kinds.end()) continue;
+        std::string point = "control point " + std::to_string(l.controlPointId);
+        for (size_t k = 0; k < serverContent_.objects.size(); ++k) {
+            const PlacedObject& o = serverContent_.objects[k];
+            if (o.kind != ObjectKind::ControlPoint || o.id != l.controlPointId) continue;
+            point = o.name.empty() ? point : o.name;
+            ImGui::TextColored(ImVec4(0.6f, 0.85f, 1.0f, 1.0f), "%s of control point %s", controlPointLinkKindName(l.kind), point.c_str());
+            ImGui::SameLine();
+            ImGui::PushID(int(k));
+            if (ImGui::SmallButton("select")) selection_ = Selection{SelectionKind::Object, k};
+            ImGui::PopID();
+        }
+    }
+}
+
+void ServerWorkspace::drawControlPointLinks(const PlacedObject& point) {
+    ImGui::SeparatorText("Garrison and holdings (control_point_link)");
+    if (point.id <= 0) {
+        ImGui::TextDisabled("Save the control point first.");
+        return;
+    }
+    auto& links = serverContent_.controlPointLinks;
+    const ImVec4 warn(1.0f, 0.8f, 0.3f, 1.0f);
+    for (int32_t kind = 1; kind <= 6; ++kind) {
+        ImGui::PushID(kind);
+        ImGui::TextUnformatted(controlPointLinkKindName(kind));
+        static const char* help[] = {"", "spawn pools that stand here while the Bane hold the point", "spawn pools that stand here while the AFS hold it",
+                                     "the teleporter of its hospital (AFS-held only)", "the teleporter of its waypoint (AFS-held only)",
+                                     "creature rows that count as bosses of its garrison", "the footlocker of its clan lockbox (one a point; clan-held only)"};
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", help[kind]);
+        size_t count = 0;
+        for (size_t k = 0; k < links.size(); ++k) {
+            const ControlPointLink l = links[k];
+            if (l.controlPointId != point.id || l.kind != kind) continue;
+            ++count;
+            ImGui::PushID(int(k));
+            // Remove first, so it stays in view whatever the label's length.
+            if (ImGui::SmallButton("x")) {
+                beginEdit();
+                links.erase(links.begin() + std::ptrdiff_t(k));
+                contentChanged();
+                ImGui::PopID();
+                break;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove this link");
+            ImGui::SameLine();
+            ImGui::TextUnformatted(linkedObjectLabel(kind, l.objectId).c_str());
+            // Checks the server's loader makes or the shipped data follows.
+            if (kind == 3 || kind == 4)
+                for (const Teleporter& t : serverContent_.teleporters)
+                    if (t.id == l.objectId && t.type != (kind == 3 ? 5 : 2)) {
+                        ImGui::SameLine();
+                        ImGui::TextColored(warn, "(type %d; shipped %s are type %d)", t.type, kind == 3 ? "hospitals" : "waypoints", kind == 3 ? 5 : 2);
+                    }
+            int owners = 0;
+            for (const ControlPointLink& o : links)
+                if (o.objectId == l.objectId && kind <= 4 && o.kind <= 4 && ((kind <= 2) == (o.kind <= 2))) ++owners;
+            if (owners > 1) {
+                ImGui::SameLine();
+                ImGui::TextColored(warn, "(linked %d times: the server keeps the last)", owners);
+            }
+            ImGui::PopID();
+        }
+        // Add: saved objects of the right kind on this map (a link names a row id).
+        const auto add = [&](int64_t objectId) {
+            beginEdit();
+            links.push_back(ControlPointLink{point.id, kind, objectId});
+            contentChanged();
+        };
+        if (kind == 5) {
+            int32_t creature = 0;
+            ImGui::SetNextItemWidth(320);
+            if (creatureCombo("##boss", creature, false) && creature > 0) add(creature);
+        } else if (kind == 6 && count > 0) {
+            ImGui::TextDisabled("  (one lockbox a point)");
+        } else {
+            ImGui::SetNextItemWidth(320);
+            if (ImGui::BeginCombo("##add", "add...", ImGuiComboFlags_HeightLarge)) {
+                const auto linked = [&](int64_t id) {
+                    for (const ControlPointLink& l : links)
+                        if (l.controlPointId == point.id && l.kind == kind && l.objectId == id) return true;
+                    return false;
+                };
+                if (kind <= 2)
+                    for (size_t k = 0; k < serverContent_.spawnPools.size(); ++k) {
+                        const int64_t id = serverContent_.spawnPools[k].id;
+                        if (id <= 0 || linked(id)) continue;
+                        ImGui::PushID(int(k));
+                        if (ImGui::Selectable(serverObjectLabel(Selection{SelectionKind::SpawnPool, k}).c_str())) add(id);
+                        ImGui::PopID();
+                    }
+                if (kind == 3 || kind == 4)
+                    for (size_t k = 0; k < serverContent_.teleporters.size(); ++k) {
+                        const Teleporter& t = serverContent_.teleporters[k];
+                        if (t.id <= 0 || linked(t.id)) continue;
+                        ImGui::PushID(int(k));
+                        if (ImGui::Selectable((serverObjectLabel(Selection{SelectionKind::Teleporter, k}) + "  (type " + std::to_string(t.type) + ")").c_str()))
+                            add(t.id);
+                        ImGui::PopID();
+                    }
+                if (kind == 6)
+                    for (size_t k = 0; k < serverContent_.objects.size(); ++k) {
+                        const PlacedObject& o = serverContent_.objects[k];
+                        if (o.kind != ObjectKind::Footlocker || o.id <= 0) continue;
+                        ImGui::PushID(int(k));
+                        if (ImGui::Selectable(serverObjectLabel(Selection{SelectionKind::Object, k}).c_str())) add(o.id);
+                        ImGui::PopID();
+                    }
+                ImGui::TextDisabled("(saved objects of this map only)");
+                ImGui::EndCombo();
+            }
+        }
+        ImGui::PopID();
+    }
+}
+
+bool ServerWorkspace::fxPackageCombo(const char* id, int64_t& packageId) {
+    if (!fxPackagesRead_ && ctx_.gameData) {
+        fxPackagesRead_ = true;
+        try { fxPackages_ = ctx_.gameData->stringsWithExtension(".pkg"); } catch (const std::exception&) {}
+    }
+    std::string current = "(none)";
+    for (const auto& [pid, name] : fxPackages_)
+        if (pid == packageId) current = name;
+    if (packageId != 0 && current == "(none)") current = "#" + std::to_string(packageId) + " (not a package)";
+    bool changed = false;
+    if (ImGui::BeginCombo(id, current.c_str(), ImGuiComboFlags_HeightLarge)) {
+        if (ImGui::IsWindowAppearing()) {
+            fxPackageFilter_[0] = 0;
+            ImGui::SetKeyboardFocusHere();
+        }
+        ImGui::InputTextWithHint("##filter", "filter (words)", fxPackageFilter_, sizeof fxPackageFilter_);
+        // Every word must appear (as Rasa.NET's .emitter search does).
+        std::vector<std::string> words;
+        {
+            std::string w;
+            for (const char* c = fxPackageFilter_;; ++c) {
+                if (*c == 0 || *c == ' ') {
+                    if (!w.empty()) words.push_back(w);
+                    w.clear();
+                    if (*c == 0) break;
+                } else w += char(std::tolower(static_cast<unsigned char>(*c)));
+            }
+        }
+        size_t shown = 0;
+        for (const auto& [pid, name] : fxPackages_) {
+            std::string lower = name;
+            for (char& c : lower) c = char(std::tolower(static_cast<unsigned char>(c)));
+            bool match = true;
+            for (const std::string& w : words) match = match && lower.find(w) != std::string::npos;
+            if (!match) continue;
+            if (++shown > 500) {
+                ImGui::TextDisabled("(more: filter)");
+                break;
+            }
+            ImGui::PushID(pid);
+            if (ImGui::Selectable(name.c_str(), pid == packageId)) {
+                noteEdit();
+                packageId = pid;
+                changed = true;
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndCombo();
+    }
+    return changed;
 }
 
 bool ServerWorkspace::creatureCombo(const char* id, int32_t& creatureId, bool allowNone) {
@@ -1027,6 +1519,7 @@ void ServerWorkspace::drawServerObjectEditor() {
             if (i >= serverContent_.spawnPools.size()) break;
             SpawnPool& p = serverContent_.spawnPools[i];
             ImGui::TextDisabled("id %lld", static_cast<long long>(p.id));
+            drawControlPointMembership({1, 2}, p.id);
             position("Position", p.position);
             angle("Facing", p.rotation);
             number("Radius (m)", p.radius, 0.1f, 0.0f, 500.0f);
@@ -1205,20 +1698,25 @@ void ServerWorkspace::drawServerObjectEditor() {
             if (i >= serverContent_.teleporters.size()) break;
             Teleporter& t = serverContent_.teleporters[i];
             ImGui::TextDisabled("id %lld", static_cast<long long>(t.id));
+            drawControlPointMembership({3, 4}, t.id);
             position("Position", t.position);
             angle("Facing", t.rotation);
             classField("Class", t.classId);
             integer("Type", t.type);
             text("Description", t.description);
+            drawMarkerBinding(1, t.id, t.position, {2, 3, 19});
             break;
         }
         case SelectionKind::Object: {
             if (i >= serverContent_.objects.size()) break;
             PlacedObject& o = serverContent_.objects[i];
             ImGui::TextDisabled("%s, id %lld", objectKindName(o.kind), static_cast<long long>(o.id));
+            if (o.kind == ObjectKind::Footlocker) drawControlPointMembership({6}, o.id);
+            if (o.kind == ObjectKind::Kraftwerk) drawMarkerBinding(2, o.id, o.position, {4});
             position("Position", o.position);
             if (o.kind != ObjectKind::Logos) angle("Facing", o.rotation);
-            classField("Class", o.classId);
+            if (o.kind == ObjectKind::Emitter) ImGui::TextDisabled("Class %d FXPackageEmitter (fixed: an invisible proxy that plays the package)", kEmitterClassId);
+            else classField("Class", o.classId);
             text(o.kind == ObjectKind::Logos || o.kind == ObjectKind::ControlPoint ? "Name" : "Comment", o.name);
             // Number columns of the Rasa.NET upstream tables (0 = the kind's / class's default).
             auto whole = [&](const char* label, int64_t& value) {
@@ -1232,6 +1730,40 @@ void ServerWorkspace::drawServerObjectEditor() {
             };
             if (o.kind == ObjectKind::AmbientNpc)
                 ImGui::TextDisabled("A class with the STATELESSSWITCH augmentation (UsableStatelessNPC*): its own looping animations, nothing to use.");
+            if (o.kind == ObjectKind::ControlPoint && database_ && database_->hasTable("control_point_link")) drawControlPointLinks(o);
+            if (o.kind == ObjectKind::Emitter) {
+                // Rasa.NET EmitterManager: the client attaches the package while the emitter is on (fxpackageemitter.py TurnOn:
+                // body.AttachFXPackage); a package the client's string table lacks is left out at start-up.
+                ImGui::SeparatorText("FX emitter");
+                if (fxPackageCombo("Package", o.emitter.packageId)) contentChanged();
+                bool on = o.emitter.isOn;
+                if (ImGui::Checkbox("Plays from map load", &on)) {
+                    noteEdit();
+                    o.emitter.isOn = on;
+                    contentChanged();
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Off: placed but silent until something turns it on (.emitter commands, scripts).");
+                if (o.name.size() > 96) ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "The comment is longer than its column (varchar 96).");
+                // What the package holds (special-FX events the editor draws: accessories, particle systems, lights).
+                std::string package;
+                if (ctx_.gameData) {
+                    try { package = ctx_.gameData->stringById(int32_t(o.emitter.packageId)); } catch (const std::exception&) {}
+                }
+                if (o.emitter.packageId == 0) ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.4f, 1.0f), "Choose a package (the server leaves out an emitter without one).");
+                else if (package.empty() || package.size() < 4 || package.compare(package.size() - 4, 4, ".pkg") != 0)
+                    ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.4f, 1.0f), "String %lld is not an FX package: the server leaves this emitter out.",
+                                       static_cast<long long>(o.emitter.packageId));
+                else if (ctx_.assets) {
+                    try {
+                        const tr::SfxPackage p = tr::readSfxPackage(ctx_.assets->read(package));
+                        ImGui::TextDisabled("%s: %zu accessories, %zu particle systems, %zu lights", package.c_str(), p.accessories.size(), p.particles.size(),
+                                            p.lights.size());
+                    } catch (const std::exception& e) {
+                        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "%s: %s", package.c_str(), e.what());
+                    }
+                }
+            }
             if (o.kind == ObjectKind::WorldUsable) {
                 ImGui::SeparatorText("Usable (0 = the kind's default)");
                 UsableSettings& u = o.usable;
@@ -1400,6 +1932,32 @@ void ServerWorkspace::drawMissionPanel() {
 // ------------------------------------------------------------------------------------------
 // Loot
 // ------------------------------------------------------------------------------------------
+// Crafting: item modules (module_class / module_effect / module_item), the classes that take them (modifiable_class) and the
+// fabrication recipes (recipe / recipe_input). Database-wide, each with its own Save / Revert.
+void ServerWorkspace::drawCraftingPanel() {
+    // Docked with the Loot panel on its first appearance (layouts saved before this panel existed).
+    if (const ImGuiWindow* loot = ImGui::FindWindowByName("Loot###Server.Loot"); loot && loot->DockId)
+        ImGui::SetNextWindowDockID(loot->DockId, ImGuiCond_FirstUseEver);
+    const bool focus = focusModules_ > 0;
+    if (focus) {
+        ImGui::SetNextWindowFocus();
+        --focusModules_;
+    }
+    if (!ImGui::Begin("Crafting###Server.Crafting")) { ImGui::End(); return; }
+    if (!database_) ImGui::TextDisabled("Open a server database first.");
+    else if (ImGui::BeginTabBar("crafting")) {
+        static const char* tabs[] = {"Modules", "Modifiable classes", "Recipes"};
+        for (int k = 0; k < 3; ++k) {
+            if (!ImGui::BeginTabItem(tabs[k], nullptr, focus && k == craftingTab_ ? ImGuiTabItemFlags_SetSelected : 0)) continue;
+            if (k == 2) recipes_.draw(ctx_, *database_, !database_->readOnly());
+            else modules_.draw(ctx_, *database_, !database_->readOnly(), k);
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
+    ImGui::End();
+}
+
 void ServerWorkspace::drawLootPanel() {
     if (!ImGui::Begin("Loot###Server.Loot")) { ImGui::End(); return; }
     if (!database_) ImGui::TextDisabled("Open a server database first.");
@@ -1422,6 +1980,50 @@ void ServerWorkspace::reloadCreatureDefinitions() {
     creatureDefsSaved_ = creatureDefs_;
     classCries_ = database_ ? database_->classBattlecries() : std::map<int32_t, int32_t>{};
     classCriesSaved_ = classCries_;
+    classFlags_ = database_ ? database_->classFlags() : std::map<int32_t, std::set<int32_t>>{};
+    classFlagsSaved_ = classFlags_;
+}
+
+// creature_class_flag: the selected creature's class flags (shared by every creature of the class).
+void ServerWorkspace::drawClassFlags(const CreatureDefinition& d) {
+    ImGui::SeparatorText("Class flags (creature_class_flag)");
+    if (creatureFlagNames_.empty() && ctx_.gameData) {
+        try { creatureFlagNames_ = ctx_.gameData->moduleConstants("generated.client.constant.creatureflag"); } catch (const std::exception&) {}
+    }
+    const auto nameOf = [&](int32_t flag) {
+        for (const auto& [value, name] : creatureFlagNames_)
+            if (value == flag) return name;
+        return std::string("flag ") + std::to_string(flag) + " (not in the client's creatureflag)";
+    };
+    const int32_t classId = d.creature.classId;
+    int sharing = 0;
+    for (const CreatureDefinition& other : creatureDefs_) sharing += other.creature.classId == classId ? 1 : 0;
+    ImGui::TextDisabled("Class %d %s - shared by %d creature(s); sent to the client in CreatureInfo.", classId, ctx_.classInfo(classId).name.c_str(), sharing);
+    std::set<int32_t>& flags = classFlags_[classId];
+    int32_t removed = -1;
+    for (int32_t flag : flags) {
+        ImGui::PushID(flag);
+        if (ImGui::SmallButton("x")) removed = flag;
+        ImGui::SameLine();
+        ImGui::Text("%d %s", flag, nameOf(flag).c_str());
+        ImGui::PopID();
+    }
+    if (removed >= 0) flags.erase(removed);
+    if (flags.empty()) ImGui::TextDisabled("No flags.");
+    // What the client reads (Rasa.NET Data/CreatureFlag.cs: harvest.py, healdisc.py).
+    if (flags.count(5) && flags.count(11)) ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "BIOLOGICAL and MECHANICAL: neither Salvage nor Tissue Extraction works on it.");
+    ImGui::SetNextItemWidth(320);
+    if (ImGui::BeginCombo("##addflag", "add a flag...", ImGuiComboFlags_HeightLarge)) {
+        for (const auto& [value, name] : creatureFlagNames_) {
+            if (flags.count(value)) continue;
+            const std::string label = std::to_string(value) + " " + name;
+            if (ImGui::Selectable(label.c_str())) flags.insert(value);
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::SetItemTooltip("BIOLOGICAL refuses Salvage, MECHANICAL refuses Tissue Extraction (harvest.py); healing tools need BIOLOGICAL or\n"
+                          "MACHINA (healdisc.py); SPECIES_* decide the harvest yields. The other flags are the client's own, not read by the server yet.");
+    if (flags.empty()) classFlags_.erase(classId);
 }
 
 // Battle cries (creature_battlecry; Rasa.NET Battlecries): the creature's own package (scope 2) comes before its class's (scope
@@ -1534,7 +2136,7 @@ void ServerWorkspace::drawBattlecry(CreatureDefinition& d) {
 }
 
 bool ServerWorkspace::creaturesChanged() const {
-    if (classCries_ != classCriesSaved_) return true;
+    if (classCries_ != classCriesSaved_ || classFlags_ != classFlagsSaved_) return true;
     if (creatureDefs_.size() != creatureDefsSaved_.size()) return true;
     for (size_t k = 0; k < creatureDefs_.size(); ++k)
         if (!sameCreatureDefinition(creatureDefs_[k], creatureDefsSaved_[k])) return true;
@@ -1545,7 +2147,7 @@ bool ServerWorkspace::saveCreatures() {
     if (!database_ || database_->readOnly()) return false;
     WorldDatabase::SaveSummary summary;
     std::string error;
-    if (!database_->saveCreatures(creatureDefsSaved_, creatureDefs_, summary, error, &classCriesSaved_, &classCries_)) {
+    if (!database_->saveCreatures(creatureDefsSaved_, creatureDefs_, summary, error, &classCriesSaved_, &classCries_, &classFlagsSaved_, &classFlags_)) {
         ctx_.setStatus("Saving creatures failed, nothing was written: " + error, true);
         return false;
     }
@@ -1582,6 +2184,10 @@ std::string ServerWorkspace::creatureLabel(const CreatureDefinition& d) const {
 }
 
 void ServerWorkspace::drawCreaturePanel() {
+    if (focusCreatures_ > 0) {
+        ImGui::SetNextWindowFocus();
+        --focusCreatures_;
+    }
     if (!ImGui::Begin("Creatures###Server.Creatures")) { ImGui::End(); return; }
     if (!database_) {
         ImGui::TextDisabled("Open a server database first.");
@@ -1610,6 +2216,7 @@ void ServerWorkspace::drawCreaturePanel() {
         if (ImGui::Button("Revert")) {
             creatureDefs_ = creatureDefsSaved_;
             classCries_ = classCriesSaved_;
+            classFlags_ = classFlagsSaved_;
             ctx_.setStatus("Creature edits reverted.", false);
         }
         if (!changed) ImGui::EndDisabled();
@@ -1722,6 +2329,7 @@ void ServerWorkspace::drawCreatureEditor(CreatureDefinition& d, bool isNew) {
     integer("Max HP", c.maxHp);
     integer("Run speed", c.runSpeed);
     integer("Walk speed", c.walkSpeed);
+    if (database_->hasTable("creature_class_flag")) drawClassFlags(d);
     if (database_->hasTable("creature_battlecry")) drawBattlecry(d);
     ImGui::SeparatorText("Actions (creature_action)");
     const std::vector<CreatureAction>& actions = database_->creatureActions();
