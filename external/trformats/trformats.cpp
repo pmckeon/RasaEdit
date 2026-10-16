@@ -1774,6 +1774,38 @@ std::string connectionPointIdName(uint32_t id) {
     return "";
 }
 
+AnimationMarkers readAnimationMarkers(const Bytes& data) {
+    if (data.size() < 8 || std::memcmp(data.data(), "CHNK", 4) != 0) throw FormatError("not a chunk file (no CHNK header)");
+    if (data[4] != 'B') throw FormatError("text chunk files are not supported");
+    ByteReader r(data, 8);
+    const Chunk amrk = expectChunk(r, fourcc("AMRK"));
+    AnimationMarkers result;
+    result.version = amrk.version;
+    const uint32_t count = r.u32();
+    if (size_t(count) * 5 != amrk.end - r.tell())
+        throw FormatError("AMRK holds " + std::to_string(amrk.end - r.tell()) + " bytes for " + std::to_string(count) + " markers");
+    result.markers.reserve(count);
+    for (uint32_t k = 0; k < count; ++k) {
+        AnimMarker m;
+        m.type = r.u8();
+        m.timeMs = r.u32();
+        result.markers.push_back(m);
+    }
+    return result;
+}
+
+const char* animMarkerTypeName(int type) {
+    // tabula_rasa.exe 0x00820e00: switch over 0..60 (jump table 0x00821238), each case one name.
+    static const char* const names[61] = {
+        "Start",    "Strike",   "Footstep1", "WeaponSwing", "WeaponSwing2", "SubStrike", "Windup1", "Windup2", "Windup3", "Windup4",
+        "Resolve1", "Resolve2", "Resolve3",  "Resolve4",    "ProjectileArrived", "Tick", "Usable1", "Usable2", "Usable3", "Usable4",
+        "Script1",  "Script2",  "Script3",   "Script4",     "Stop", "ScaleBegin", "ScaleEnd", "PauseHeadTracking", "UnpauseHeadTracking",
+        "PreStrike", "Footstep2", "Footstep3", "Footstep4", "Footstep5", "Footstep6", "Footstep7", "Footstep8", "Audio1", "Audio2", "Audio3",
+        "Audio4", "Audio5", "Audio6", "Audio7", "Audio8", "Windup5", "Windup6", "Windup7", "Windup8", "Resolve5", "Resolve6", "Resolve7",
+        "Resolve8", "Timer1", "Timer2", "Timer3", "Timer4", "Timer5", "Timer6", "Timer7", "Timer8"};
+    return type >= 0 && type <= 60 ? names[type] : "unknown";
+}
+
 Animation readAnimation(const Bytes& data) {
     if (data.size() < 8 || std::memcmp(data.data(), "CHNK", 4) != 0) throw FormatError("not a chunk file (no CHNK header)");
     if (data[4] != 'B') throw FormatError("text chunk files are not supported");

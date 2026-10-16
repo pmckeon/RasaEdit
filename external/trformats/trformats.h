@@ -690,6 +690,26 @@ struct Animation {
 };
 
 Animation readAnimation(const Bytes& data);
+
+// ------------------------------------------------------------------------------------------
+// Animation markers (.mkr, anim01/02.glm): events at times in the animation of the same name (x.mkr <-> x.anm), e.g. the
+// strike of an attack, footsteps, sounds. Chunk file AMRK v1 { u32 count, count x { u8 type, u32 time (milliseconds) } }.
+// Marker types: the engine's name table (tabula_rasa.exe, the switch at 0x00820e00, 61 cases; anything else "unknown") - 0-28
+// equal client/animmarkers.py (START .. UNPAUSE_HEAD_TRACKING), 29 PreStrike, 30-36 Footstep2-8, 37-44 Audio1-8, 45-48
+// Windup5-8, 49-52 Resolve5-8, 53-60 Timer1-8.
+// ------------------------------------------------------------------------------------------
+struct AnimMarker {
+    uint8_t type = 0;
+    uint32_t timeMs = 0;
+};
+
+struct AnimationMarkers {
+    uint32_t version = 0;
+    std::vector<AnimMarker> markers;   // in file order
+};
+
+AnimationMarkers readAnimationMarkers(const Bytes& data);
+const char* animMarkerTypeName(int type);   // the engine's names ("Strike", "Footstep1", ...); "unknown" outside 0-60
 const AnimTrack* findTrack(const Animation& animation, const std::string& boneName);
 // Interpolated key at time (clamped to the track's range): linear scale/translation, normalised lerp rotation.
 AnimKey sampleTrack(const AnimTrack& track, float time);

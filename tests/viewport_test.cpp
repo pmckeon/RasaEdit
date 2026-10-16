@@ -365,6 +365,32 @@ int main(int argc, char** argv) {
             std::printf("pkg scan: %zu packages, %zu failed; %zu accessories, %zu particle attaches, %zu lights\n", packages, failed,
                         accessories, particles, lights);
         }
+        // RASA_MKRSCAN=1: parse every animation marker file; markers per type, files whose markers lie past their animation's end.
+        if (envValue("RASA_MKRSCAN")) {
+            size_t files = 0, failed = 0, markers = 0, withAnim = 0, inside = 0;
+            std::map<int, size_t> byType;
+            for (const std::string& name : assets.namesWithExtension(".mkr")) {
+                ++files;
+                try {
+                    const tr::AnimationMarkers m = tr::readAnimationMarkers(assets.read(name));
+                    markers += m.markers.size();
+                    for (const tr::AnimMarker& k : m.markers) ++byType[k.type];
+                    const std::string anim = name.substr(0, name.size() - 4) + ".anm";
+                    if (assets.exists(anim)) {
+                        ++withAnim;
+                        const tr::Animation a = tr::readAnimation(assets.read(anim));
+                        bool all = true;
+                        for (const tr::AnimMarker& k : m.markers) all = all && k.timeMs <= uint32_t(a.duration * 1000.0f + 50.0f);
+                        if (all) ++inside;
+                    }
+                } catch (const std::exception& e) {
+                    if (++failed <= 5) std::printf("mkr %s: %s\n", name.c_str(), e.what());
+                }
+            }
+            std::printf("mkr scan: %zu files, %zu failed, %zu markers; %zu with an .anm, %zu of them with every marker inside it\n", files, failed,
+                        markers, withAnim, inside);
+            for (const auto& [type, count] : byType) std::printf("  %2d %-20s %zu\n", type, tr::animMarkerTypeName(type), count);
+        }
         // RASA_CONSTANTS=<module>: a game data module's integer constants (GameData::moduleConstants).
         if (const char* module = envValue("RASA_CONSTANTS")) {
             try {
