@@ -114,6 +114,22 @@ private:
     std::unordered_map<std::string, size_t> index_;     // lower-case name -> entry
 };
 
+// Writes a .glm laid out like the shipped ones (survey of all 181 archives, 2026-10-16): file data from offset 0, each entry on
+// a 1 KiB boundary (zero padding), the name table after the data, the directory after the names, then u32 0 and the directory
+// offset; entries sorted by name case-insensitively (180 of 181; the exception is the user's own re-packed ui.glm, which the
+// game loads, so the order is a convention, not a lookup requirement). Compressed entries are one zlib stream at level 1
+// (every shipped one starts 78 01) with flags 1; an entry is stored (flags 0) when compressing does not make it smaller or
+// `compress` is false. Names must be unique ignoring case. The archive is built in memory and written to `path` through a
+// temporary file. How the game is pointed at a new archive: see CLAUDE.md "How client changes reach the game".
+struct GlmSource {
+    std::string name;                  // bare file name, e.g. "npc_hum_m_officer_v01_df.dds"
+    Bytes data;
+    bool compress = true;
+    uint32_t timestamp = 0;            // unix time; 0 = now
+};
+Bytes buildGlmArchive(std::vector<GlmSource> files);
+void writeGlmArchive(const std::string& path, std::vector<GlmSource> files);
+
 // ASCII lower-casing used for every case-insensitive name comparison.
 std::string toLowerAscii(std::string text);
 

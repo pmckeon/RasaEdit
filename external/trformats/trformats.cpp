@@ -9,7 +9,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
+#include <filesystem>
 #include <fstream>
+#include <system_error>
 
 namespace tr {
 
@@ -191,6 +194,88 @@ Bytes GlmArchive::read(const std::string& name) const {
     const GlmEntry* entry = find(name);
     if (!entry) throw FormatError(path_ + " has no file named " + name);
     return read(*entry);
+}
+
+Bytes buildGlmArchive(std::vector<GlmSource> files) {
+    std::sort(files.begin(), files.end(), [](const GlmSource& a, const GlmSource& b) { return toLowerAscii(a.name) < toLowerAscii(b.name); });
+    for (size_t k = 0; k < files.size(); ++k) {
+        if (files[k].name.empty() || files[k].name.find('\0') != std::string::npos) throw FormatError("glm: an entry needs a name");
+        if (k && toLowerAscii(files[k].name) == toLowerAscii(files[k - 1].name)) throw FormatError("glm: two entries named " + files[k].name);
+    }
+    const uint32_t now = uint32_t(std::time(nullptr));
+    Bytes out;
+    const auto putU32 = [&](uint32_t v) { for (int b = 0; b < 4; ++b) out.push_back(uint8_t(v >> (8 * b))); };
+    const auto putU16 = [&](uint16_t v) { out.push_back(uint8_t(v)); out.push_back(uint8_t(v >> 8)); };
+    const auto pad = [&] { while (out.size() % 1024) out.push_back(0); };
+    std::vector<GlmEntry> entries;
+    for (const GlmSource& f : files) {
+        pad();
+        GlmEntry e;
+        e.name = f.name;
+        e.offset = uint32_t(out.size());
+        e.rawSize = uint32_t(f.data.size());
+        e.timestamp = f.timestamp ? f.timestamp : now;
+        Bytes packed;
+        if (f.compress && !f.data.empty()) {
+            uLongf length = compressBound(uLong(f.data.size()));
+            packed.resize(length);
+            if (compress2(packed.data(), &length, f.data.data(), uLong(f.data.size()), 1) != Z_OK) throw FormatError("glm: zlib failed on " + f.name);
+            packed.resize(length);
+        }
+        if (!packed.empty() && packed.size() < f.data.size()) {
+            e.flags = 1;
+            e.storedSize = uint32_t(packed.size());
+            out.insert(out.end(), packed.begin(), packed.end());
+        } else {
+            e.storedSize = e.rawSize;
+            out.insert(out.end(), f.data.begin(), f.data.end());
+        }
+        if (out.size() > 0xFFFFFFFFull) throw FormatError("glm: archive larger than 4 GB");
+        entries.push_back(std::move(e));
+    }
+    pad();
+    const uint32_t nameTableOffset = uint32_t(out.size());
+    for (GlmEntry& e : entries) {
+        e.nameOffset = uint32_t(out.size()) - nameTableOffset;
+        out.insert(out.end(), e.name.begin(), e.name.end());
+        out.push_back(0);
+    }
+    const uint32_t nameTableLength = uint32_t(out.size()) - nameTableOffset;
+    const uint32_t directoryOffset = uint32_t(out.size());
+    const char magic[8] = {'C', 'H', 'N', 'K', 'B', 'L', 'X', 'X'};
+    out.insert(out.end(), magic, magic + 8);
+    putU32(nameTableOffset);
+    putU32(nameTableLength);
+    putU32(uint32_t(entries.size()));
+    for (const GlmEntry& e : entries) {
+        putU32(e.offset);
+        putU32(e.storedSize);
+        putU32(e.rawSize);
+        putU32(e.nameOffset);
+        putU16(e.flags);
+        putU32(e.timestamp);
+    }
+    putU32(0);
+    putU32(directoryOffset);
+    return out;
+}
+
+void writeGlmArchive(const std::string& path, std::vector<GlmSource> files) {
+    const Bytes archive = buildGlmArchive(std::move(files));
+    const std::string temporary = path + ".writing";
+    {
+        std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+        if (!out) throw FormatError("cannot write " + temporary);
+        out.write(reinterpret_cast<const char*>(archive.data()), std::streamsize(archive.size()));
+        if (!out) throw FormatError("cannot write " + temporary);
+    }
+    std::error_code ec;
+    std::filesystem::rename(temporary, path, ec);
+    if (ec) {
+        std::filesystem::remove(path, ec);
+        std::filesystem::rename(temporary, path, ec);
+        if (ec) throw FormatError("cannot replace " + path + ": " + ec.message());
+    }
 }
 
 static const GlmEntry* findSuffix(const GlmArchive& glm, const std::string& suffix) {

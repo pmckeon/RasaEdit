@@ -365,6 +365,56 @@ int main(int argc, char** argv) {
             std::printf("pkg scan: %zu packages, %zu failed; %zu accessories, %zu particle attaches, %zu lights\n", packages, failed,
                         accessories, particles, lights);
         }
+        // RASA_GLMTEST=<out.glm>: write an archive of a few game files (a texture, a model, an animation, a text file, an empty file),
+        // open it with GlmArchive and compare every entry; then rewrite one shipped archive's every entry and compare again.
+        if (const char* out = envValue("RASA_GLMTEST")) {
+            try {
+                std::vector<tr::GlmSource> sources;
+                for (const char* name : {"npc_hum_m_officer_v01_df.dds", "prop_hum_lamp_v02.geo", "m_idle_non_combat_v01.anm",
+                                         "sky_foreas_bootcamp_d11.sky"})
+                    sources.push_back(tr::GlmSource{name, assets.read(name), true, 0});
+                sources.push_back(tr::GlmSource{"Empty_File.txt", {}, true, 0});
+                sources.push_back(tr::GlmSource{"stored.bin", assets.read("prop_hum_lamp_v02.geo"), false, 1234567890});
+                const std::vector<tr::GlmSource> expected = sources;
+                tr::writeGlmArchive(out, sources);
+                tr::GlmArchive glm(out);
+                size_t matching = 0, compressed = 0;
+                bool ordered = true, aligned = true;
+                for (size_t k = 0; k < glm.entries().size(); ++k) {
+                    const tr::GlmEntry& e = glm.entries()[k];
+                    if (k && tr::toLowerAscii(glm.entries()[k - 1].name) >= tr::toLowerAscii(e.name)) ordered = false;
+                    if (e.offset % 1024) aligned = false;
+                    if (e.flags) ++compressed;
+                    for (const tr::GlmSource& s : expected)
+                        if (s.name == e.name && glm.read(e) == s.data && (s.timestamp == 0 || s.timestamp == e.timestamp)) ++matching;
+                }
+                const tr::GlmEntry* stored = glm.find("STORED.BIN");
+                std::printf("glm write test: %zu entries, %zu read back equal, %zu compressed, %s, %s, stored entry %s\n", glm.entries().size(), matching,
+                            compressed, ordered ? "sorted" : "NOT sorted", aligned ? "1 KiB aligned" : "NOT aligned",
+                            stored && stored->flags == 0 ? "kept stored" : "WRONG");
+                bool duplicateRefused = false;
+                try {
+                    tr::buildGlmArchive({tr::GlmSource{"a.txt", {1}, true, 0}, tr::GlmSource{"A.TXT", {2}, true, 0}});
+                } catch (const tr::FormatError&) {
+                    duplicateRefused = true;
+                }
+                // A whole shipped archive rewritten: every entry read back the same.
+                const std::string source = assets.root() + "/data/sky.glm";
+                tr::GlmArchive original(source);
+                std::vector<tr::GlmSource> all;
+                for (const tr::GlmEntry& e : original.entries()) all.push_back(tr::GlmSource{e.name, original.read(e), e.flags != 0, e.timestamp});
+                const std::string copy = std::string(out) + ".sky.glm";
+                tr::writeGlmArchive(copy, all);
+                tr::GlmArchive rewritten(copy);
+                size_t same = 0;
+                for (const tr::GlmEntry& e : original.entries())
+                    if (const tr::GlmEntry* r = rewritten.find(e.name); r && rewritten.read(*r) == original.read(e)) ++same;
+                std::printf("glm rewrite test: sky.glm %zu entries, %zu equal after rewriting; duplicate names %s\n", original.entries().size(), same,
+                            duplicateRefused ? "refused" : "NOT refused");
+            } catch (const std::exception& e) {
+                std::printf("glm write test FAILED: %s\n", e.what());
+            }
+        }
         // RASA_MKRSCAN=1: parse every animation marker file; markers per type, files whose markers lie past their animation's end.
         if (envValue("RASA_MKRSCAN")) {
             size_t files = 0, failed = 0, markers = 0, withAnim = 0, inside = 0;
