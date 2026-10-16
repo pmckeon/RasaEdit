@@ -2815,6 +2815,7 @@ void SceneView::queueDraws(const Selection& selection) {
         const SelectionKind kind = s.selection.kind;
         if (kind == SelectionKind::Region ? !showRegions : kind == SelectionKind::MissionArea ? !showMissionAreas : !showServer) continue;
         const bool selected = sameSelection(s.selection, selection);
+        if (!selected && garrisonSuspended(s)) continue;     // the side not shown at its point: nothing drawn
         const Vec4f colour = selected ? highlight : s.colour;
         if (s.area) {
             const tr::Vec3& c = s.shape.position;
@@ -2831,6 +2832,18 @@ void SceneView::queueDraws(const Selection& selection) {
             pole.row2 = {0, 0, 1, c.z};
             renderer_.draw(pole_, pole, colour, false);
             continue;
+        }
+        // The link line (pole_ stretched from the marker to its target) is tested on its own: it stays in view when the marker
+        // is behind the camera or beyond the draw distance (e.g. standing at a control point with its linked pools around).
+        if (s.linked && (!s.pointLink || selected || sameSelection(s.pointSelection, selection))) {
+            const tr::Vec3 l = subtract(s.linkTarget, s.position);
+            if (visible(add(s.position, scaled(l, 0.5f)), length(l) * 0.5f + 0.5f)) {
+                Mat4 line = identityMatrix();
+                line.row0 = {1, l.x, 0, s.position.x};
+                line.row1 = {0, l.y, 0, s.position.y + 0.3f};
+                line.row2 = {0, l.z, 1, s.position.z};
+                renderer_.draw(pole_, line, colour, false);
+            }
         }
         const tr::Vec3 d = subtract(s.position, camera_.position);
         if (!selected && dot(d, d) > maxDistance2) continue;
@@ -2925,14 +2938,6 @@ void SceneView::queueDraws(const Selection& selection) {
             ring.row1 = {0, 1, 0, s.position.y + 0.15f};
             ring.row2 = {0, 0, s.ringRadius, s.position.z};
             renderer_.draw(unitCircle_, ring, colour, false);
-        }
-        if (s.linked) {                                 // pole_ (0..1 along +y) stretched from the marker to its target
-            const tr::Vec3 d = subtract(s.linkTarget, s.position);
-            Mat4 line = identityMatrix();
-            line.row0 = {1, d.x, 0, s.position.x};
-            line.row1 = {0, d.y, 0, s.position.y + 0.3f};
-            line.row2 = {0, d.z, 1, s.position.z};
-            renderer_.draw(pole_, line, colour, false);
         }
         if (s.facing) {
             Mat4 arrow = s.world;                       // yaw placement scaled to 3 m, raised slightly
@@ -3214,6 +3219,7 @@ Selection SceneView::pick(float ndcX, float ndcY, bool pickEntities, bool pickSe
         const SelectionKind kind = s.selection.kind;
         if (!pickServer) break;
         if (kind == SelectionKind::Region ? !showRegions : kind == SelectionKind::MissionArea ? !showMissionAreas : !showServer) continue;
+        if (garrisonSuspended(s)) continue;             // not drawn unselected: picked from the lists
         float t = 1e30f;
         bool hit = false;
         if (s.area) {
@@ -3477,6 +3483,22 @@ std::string SceneView::objectAnimationFor(const std::string& mesh) {
 // look (the forward shaders differ per material; the two checked ignore MatDiffuse.a) - fading entities are drawn opaque.
 float SceneView::entityDistanceAlpha(const Placement& p) const { return distanceAlpha(p.cullingLayer, p.centre, p.radius); }
 
+// Rasa.NET ControlPoints (ApplyPools): only the holder's garrison spawns - the pools linked as the other side's (control_point_link
+// kind 1 Bane / 2 AFS) are suspended. An open-world point is always held by one side (owner 0 Bane / 1 AFS, from default_owner
+// until it changes hands; the server reads anything but 1 as Bane).
+bool SceneView::garrisonSuspended(const ServerPlacement& s) const { return garrisonHidden(s.garrisonPoint, s.garrisonKind); }
+
+bool SceneView::garrisonHidden(int64_t pointId, int32_t kind) const {
+    if (kind == 0) return false;
+    const int view = garrisonViewOf(pointId);
+    int32_t shown = view == 1 ? 1 : view == 2 ? 2 : 0;
+    if (shown == 0) {
+        const auto owner = pointDefaultOwner_.find(pointId);
+        shown = owner != pointDefaultOwner_.end() && owner->second == 1 ? 2 : 1;
+    }
+    return kind != shown;
+}
+
 bool SceneView::serverModelCulled(const ServerPlacement& s) const {
     if (!gameDistances || s.cullingLayer == 0 || s.area) return false;
     const float radius = s.model && s.model->loaded ? std::max(0.5f, length(subtract(s.model->bounds.max, s.model->bounds.min)) * 0.5f) : 1.0f;
@@ -3533,15 +3555,36 @@ float SceneView::groundHeight(float x, float z, float fallback) const {
     return fallback;
 }
 
+bool SceneView::solidTerrainHeight(float x, float z, float& height) const {
+    if (!map_.hasTerrain || !map_.terrain.heightAtWorld(x, z, height)) return false;
+    // Flag 0 clear = a hole (see "Terrain holes"): the bilinear mix of the four samples' flags, as the vertex alpha interpolates.
+    const tr::Terrain& t = map_.terrain;
+    const float fc = (x - t.header.bounds.min.x) / t.header.spacing, fr = (z - t.header.bounds.min.z) / t.header.spacing;
+    const auto c0 = static_cast<uint32_t>(fc), r0 = static_cast<uint32_t>(fr);
+    auto flag = [&](uint32_t r, uint32_t c) { return tr::terrainFlag(t.sampleAt(r, c).word, 0) ? 1.0f : 0.0f; };
+    const float tc = fc - float(c0), tr = fr - float(r0);
+    const float top = flag(r0, c0) * (1 - tc) + flag(r0, c0 + 1) * tc, bottom = flag(r0 + 1, c0) * (1 - tc) + flag(r0 + 1, c0 + 1) * tc;
+    return top * (1 - tr) + bottom * tr >= 0.5f;
+}
+
+float SceneView::surfaceHeightBelow(float x, float z, float fromY, float fallback, int excludeEntity) const {
+    float terrain = 0;
+    const bool solid = solidTerrainHeight(x, z, terrain) && terrain <= fromY;
+    const float reach = solid ? fromY - terrain : std::max(drawDistance * 1.5f, 500.0f);
+    float t = 0;
+    if (modelSurfaceHit(tr::Vec3{x, fromY, z}, tr::Vec3{0, -1, 0}, reach, t, excludeEntity)) return fromY - t;
+    return solid ? terrain : fallback;
+}
+
 bool SceneView::groundPoint(const tr::Vec3& origin, const tr::Vec3& direction, float fallbackY, tr::Vec3& point) const {
     if (map_.hasTerrain) {
-        // March along the ray (finer near the camera), then refine the crossing by bisection.
+        // March along the ray (finer near the camera), then refine the crossing by bisection. Holes let the ray through.
         float previous = 0.0f;
         const float maxDistance = std::max(drawDistance * 1.5f, 500.0f);
         for (float t = 0.5f; t < maxDistance; t += std::max(0.5f, t * 0.01f)) {
             const tr::Vec3 p = add(origin, scaled(direction, t));
             float h;
-            if (!map_.terrain.heightAtWorld(p.x, p.z, h) || p.y > h) {
+            if (!solidTerrainHeight(p.x, p.z, h) || p.y > h) {
                 previous = t;
                 continue;
             }
@@ -3564,6 +3607,67 @@ bool SceneView::groundPoint(const tr::Vec3& origin, const tr::Vec3& direction, f
     return true;
 }
 
+bool SceneView::modelSurfaceHit(const tr::Vec3& origin, const tr::Vec3& direction, float maxT, float& t, int excludeEntity) const {
+    if (!showEntities) return false;
+    float best = maxT;
+    bool found = false;
+    for (size_t k = 0; k < placements_.size(); ++k) {
+        const tr::MapEntity& e = map_.map.entities[k];
+        const Placement& p = placements_[k];
+        if (!p.model || !p.model->loaded || p.model->triangles.empty() || p.model->effectOnly) continue;
+        if (onlyEntity >= 0 && int(k) != onlyEntity) continue;
+        if (int(k) == excludeEntity) continue;
+        if (gameDistances && entityDistanceAlpha(p) <= 0.01f) continue;     // not drawn
+        // In the entity's local space (scaled; t stays the world-space t of the normalised direction, the transform being affine).
+        const Mat4 r = rotationMatrix(e.orientation);
+        auto toLocal = [&](const tr::Vec3& v) {
+            return tr::Vec3{r.row0.x * v.x + r.row1.x * v.y + r.row2.x * v.z, r.row0.y * v.x + r.row1.y * v.y + r.row2.y * v.z,
+                            r.row0.z * v.x + r.row1.z * v.y + r.row2.z * v.z};
+        };
+        const float inverseScale = e.scale != 0 ? 1.0f / e.scale : 1.0f;
+        const tr::Vec3 o = scaled(toLocal(subtract(origin, e.location)), inverseScale);
+        const tr::Vec3 d = scaled(toLocal(direction), inverseScale);
+        const tr::Bounds& b = p.model->bounds;
+        float tNear = 0, tFar = best;
+        bool hit = true;
+        for (uint32_t axis = 0; axis < 3 && hit; ++axis) {
+            const float oa = tr::component(o, axis), da = tr::component(d, axis);
+            const float lo = tr::component(b.min, axis), hi = tr::component(b.max, axis);
+            if (std::fabs(da) < 1e-9f) { hit = oa >= lo && oa <= hi; continue; }
+            float t0 = (lo - oa) / da, t1 = (hi - oa) / da;
+            if (t0 > t1) std::swap(t0, t1);
+            tNear = std::max(tNear, t0);
+            tFar = std::min(tFar, t1);
+            hit = tNear <= tFar;
+        }
+        if (!hit) continue;
+        const std::vector<tr::Vec3>& v = p.model->positions;
+        const std::vector<uint32_t>& tri = p.model->triangles;
+        for (size_t i = 0; i + 2 < tri.size(); i += 3) {
+            const float hitT = rayTriangle(o, d, v[tri[i]], v[tri[i + 1]], v[tri[i + 2]]);
+            if (hitT > 0.0f && hitT < best) {
+                best = hitT;
+                found = true;
+            }
+        }
+    }
+    if (found) t = best;
+    return found;
+}
+
+bool SceneView::surfacePoint(const tr::Vec3& origin, const tr::Vec3& direction, float fallbackY, tr::Vec3& point, int excludeEntity) const {
+    tr::Vec3 ground;
+    const bool onGround = groundPoint(origin, direction, fallbackY, ground);
+    const float groundT = onGround ? length(subtract(ground, origin)) : std::max(drawDistance * 1.5f, 500.0f);
+    float t = 0;
+    if (modelSurfaceHit(origin, direction, groundT, t, excludeEntity)) {
+        point = add(origin, scaled(direction, t));
+        return true;
+    }
+    if (onGround) point = ground;
+    return onGround;
+}
+
 void SceneView::setServerContent(const WorldContent* content, const WorldDatabase* database, std::function<std::string(int32_t)> meshForClass,
                                  AvatarResolver avatarFor) {
     serverContent_ = content;
@@ -3584,7 +3688,12 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
                     }
         }
     } globeReload{*this};
+    pointDefaultOwner_.clear();
+    poolGarrisons_.clear();
     if (!content) return;
+    poolGarrisons_.resize(content->spawnPools.size());
+    for (const PlacedObject& o : content->objects)
+        if (o.kind == ObjectKind::ControlPoint) pointDefaultOwner_[o.id] = o.controlPoint.defaultOwner;
     auto yawPlacement = [](const tr::Vec3& position, float rotation) {
         return placementMatrix(position, tr::Quat{0, std::sin(rotation * 0.5f), 0, std::cos(rotation * 0.5f)}, 1.0f);
     };
@@ -3647,6 +3756,7 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
             extra.world = yawPlacement(p, pool.rotation);
             dressCreature(extra, spawned[n]);
             extra.colour = s.colour;
+            extra.extraFigure = true;
             serverPlacements_.push_back(extra);
         }
     }
@@ -3744,11 +3854,16 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
             }
         serverPlacements_.push_back(s);
     }
-    // Control point links: a line from each linked pool / teleporter / footlocker to its control point.
+    // Control point links: a line from each linked pool / teleporter / footlocker to its control point (drawn while either is
+    // selected), and each garrison pool's side (Rasa.NET ControlPoints.Load finds a pool's point by its link - the last wins).
     for (const ControlPointLink& link : content->controlPointLinks) {
         const PlacedObject* point = nullptr;
-        for (const PlacedObject& o : content->objects)
-            if (o.kind == ObjectKind::ControlPoint && o.id == link.controlPointId) point = &o;
+        size_t pointIndex = 0;
+        for (size_t k = 0; k < content->objects.size(); ++k)
+            if (content->objects[k].kind == ObjectKind::ControlPoint && content->objects[k].id == link.controlPointId) {
+                point = &content->objects[k];
+                pointIndex = k;
+            }
         if (!point) continue;
         Selection target{};
         if (link.kind == 1 || link.kind == 2) {
@@ -3762,12 +3877,22 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
                 if (content->objects[k].kind == ObjectKind::Footlocker && content->objects[k].id == link.objectId) target = Selection{SelectionKind::Object, k};
         }
         if (target.kind == SelectionKind::None) continue;
-        for (ServerPlacement& s : serverPlacements_)
-            if (s.selection.kind == target.kind && s.selection.index == target.index && !s.linked) {
+        bool lineSet = false;
+        for (ServerPlacement& s : serverPlacements_) {
+            if (s.selection.kind != target.kind || s.selection.index != target.index) continue;
+            if (link.kind == 1 || link.kind == 2) {
+                s.garrisonPoint = link.controlPointId;
+                s.garrisonKind = link.kind;
+                poolGarrisons_[target.index] = PoolGarrison{link.controlPointId, link.kind};
+            }
+            if (!lineSet && !s.extraFigure) {
                 s.linked = true;
                 s.linkTarget = point->position;
-                break;
+                s.pointLink = true;
+                s.pointSelection = Selection{SelectionKind::Object, pointIndex};
+                lineSet = true;
             }
+        }
     }
     // Patrol steps: a line from each to the next of its pool, and from the last back to the first (the circuit Rasa.NET's
     // Patrols walks); a facing arrow where the step turns the creature.

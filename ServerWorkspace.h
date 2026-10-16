@@ -147,6 +147,11 @@ private:
     // Control points: a point's links (garrison pools, hospital, waypoint, bosses, clan lockbox) and, for a pool / teleporter /
     // footlocker, the point it belongs to.
     void drawControlPointLinks(const PlacedObject& point);
+    void drawGarrisonSelector(const PlacedObject& point);       // which side's garrison the viewport shows (SceneView::garrisonViews)
+    Selection linkSelection(int32_t kind, int64_t objectId) const;   // the linked object on this map (None: not here / a boss)
+    size_t pointSection_ = SIZE_MAX;                            // the linked object's control point (objects index), drawn last
+    void drawPointSection();                                    // that point's garrison list, set apart at the end of the inspector
+    const PlacedObject* selectedControlPoint() const;           // the selected control point, or the point a selected object is linked to
     void drawControlPointFields(PlacedObject& point);           // marker_entity_id / default_owner (Rasa.NET ControlPointEntry)
     bool controlPointsEditable() const;                         // the world has those columns: points can be added and deleted
     void drawControlPointMembership(std::initializer_list<int32_t> kinds, int64_t objectId);

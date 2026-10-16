@@ -6,6 +6,10 @@
 #define private public                       // the test inspects workspace internals
 #define protected public
 #include "Editor.h"
+#include "ModelExchange.h"
+#include "assetlibrary.h"
+#include "geofile.h"
+#include <cmath>
 #undef private
 #undef protected
 
@@ -245,6 +249,53 @@ int main() {
                 server.contentChanged();
                 check(server.saveChanges() && server.database_->loadMap(server.serverContent_.mapContextId).controlPointLinks.size() == before,
                       "control point link removed again");
+            }
+            // Garrison shown (the 3D view's and the Overview's rule, SceneView::spawnPoolHidden): at each point the side not shown is
+            // hidden - the starting holder's by default, Bane or AFS when chosen.
+            if (ctx.scene) {
+                SceneView& scene = *ctx.scene;
+                auto hiddenOfKind = [&](int64_t pointId, int32_t kind) {
+                    size_t hidden = 0, all = 0;
+                    for (const ControlPointLink& l : server.serverContent_.controlPointLinks) {
+                        if (l.controlPointId != pointId || l.kind != kind) continue;
+                        for (size_t k = 0; k < server.serverContent_.spawnPools.size(); ++k)
+                            if (server.serverContent_.spawnPools[k].id == l.objectId) {
+                                ++all;
+                                hidden += scene.spawnPoolHidden(k) ? 1 : 0;
+                            }
+                    }
+                    return std::make_pair(hidden, all);
+                };
+                bool ok = true;
+                size_t points = 0;
+                for (const PlacedObject& o : server.serverContent_.objects) {
+                    if (o.kind != ObjectKind::ControlPoint) continue;
+                    ++points;
+                    const int32_t held = o.controlPoint.defaultOwner == 1 ? 2 : 1;
+                    for (int view = 0; view <= 2; ++view) {
+                        scene.garrisonViews[o.id] = view;
+                        const int32_t shown = view == 0 ? held : view;
+                        const auto shownSide = hiddenOfKind(o.id, shown), otherSide = hiddenOfKind(o.id, 3 - shown);
+                        ok = ok && shownSide.first == 0 && otherSide.first == otherSide.second;
+                    }
+                    scene.garrisonViews.erase(o.id);
+                }
+                check(ok && points > 0, "garrison shown: the other side's pools hidden at every control point, for each choice");
+            }
+            // Add with a control point selected: the new spawn pool lands beside the point (not where the view ray meets the terrain).
+            if (pointIndex < server.serverContent_.objects.size()) {
+                const tr::Vec3 at = server.serverContent_.objects[pointIndex].position;
+                server.selection_ = Selection{SelectionKind::Object, pointIndex};
+                const size_t pools = server.serverContent_.spawnPools.size();
+                server.addServerObject(SelectionKind::SpawnPool, ObjectKind::ControlPoint);
+                bool near = server.serverContent_.spawnPools.size() == pools + 1;
+                if (near) {
+                    const tr::Vec3 p = server.serverContent_.spawnPools.back().position;
+                    const float dx = p.x - at.x, dy = p.y - at.y, dz = p.z - at.z;
+                    near = std::sqrt(dx * dx + dy * dy + dz * dz) <= 5.0f;
+                }
+                server.undo();
+                check(near && server.serverContent_.spawnPools.size() == pools, "a pool added with a control point selected lands beside it");
             }
             server.selection_ = Selection{SelectionKind::SpawnPool, 0};
         }
@@ -608,6 +659,56 @@ int main() {
         check(!ctx.scene->showServer, "client viewport hides the server overlay");
         check(editor.client_->visibleEntities_.size() == ctx.map->map.entities.size(), "client entity table filled");
         saveViewport(ctx, device, outputPath("smoke_client.rgba").c_str());
+
+        // Blender exchange: the panel draws; a model goes out to glTF (in the smoke output folder) and comes back unchanged; an import
+        // previewed through the asset library's overrides is what the library then reads. Nothing is written to the game folder.
+        {
+            namespace fs = std::filesystem;
+            const std::string model = "arch_forean_eloh_obelisk_v03.geo";
+            const std::string gltf = outputPath("smoke_gltf") + "/" + "obelisk.gltf";
+            std::error_code ec;
+            fs::remove_all(outputPath("smoke_gltf"), ec);
+            check(ctx.assets->exists(model), "Blender exchange: the test model is in the archives");
+            const ModelExchangeReport report = exportModelGltf(*ctx.assets, model, modelOwnAnimations(*ctx.assets, model), gltf);
+            check(report.written.size() >= 3 && fs::exists(gltf), "Blender exchange: export writes .gltf, .bin and textures");
+            ModelImportResult imported = importModelGltf(*ctx.assets, gltf);
+            check(!imported.files.empty() && imported.files[0].name == model, "Blender exchange: the import builds the model under its own name");
+            bool sameModel = false, textureChanged = false;
+            if (!imported.files.empty()) {
+                const tr::GeoModel a = tr::readGeo(ctx.assets->read(model)), b = tr::readGeo(imported.files[0].data);
+                sameModel = a.pieces.size() == b.pieces.size() && a.bones.size() == b.bones.size();
+                for (size_t k = 0; sameModel && k < a.pieces.size(); ++k)
+                    sameModel = a.pieces[k].vertices.size() == b.pieces[k].vertices.size() && a.pieces[k].indices == b.pieces[k].indices;
+                for (const ImportedFile& f : imported.files) textureChanged = textureChanged || tr::toLowerAscii(f.name).find(".dds") != std::string::npos;
+            }
+            check(sameModel, "Blender exchange: an unedited round trip keeps pieces, vertex counts, indices and bones");
+            check(!textureChanged, "Blender exchange: unedited textures are not written");
+            {
+                // Collision: a model with a walkable-surface volume keeps it through export and import (same triangles, same points).
+                const std::string withCollision = "arch_atta_obelisk_historical_v01.geo";
+                const std::string cgltf = outputPath("smoke_gltf") + "/collision/" + "obelisk_historical.gltf";
+                exportModelGltf(*ctx.assets, withCollision, {}, cgltf);
+                const ModelImportResult back = importModelGltf(*ctx.assets, cgltf);
+                bool kept = false;
+                if (!back.files.empty()) {
+                    const tr::GeoFile a = tr::readGeoFile(ctx.assets->read(withCollision)), b = tr::readGeoFile(back.files[0].data);
+                    for (const tr::GeoFileBone& ba : a.bones)
+                        for (const tr::GeoFileBone& bb : b.bones)
+                            if (ba.name == bb.name && !ba.boundingVolume.empty() && !bb.boundingVolume.empty()) {
+                                const auto va = tr::readBoneVolumes(ba.boundingVolume), vb = tr::readBoneVolumes(bb.boundingVolume);
+                                kept = va.size() == 1 && vb.size() == 1 && va[0].kind == vb[0].kind && va[0].indices.size() == vb[0].indices.size() &&
+                                       std::fabs(va[0].radius - vb[0].radius) < 1e-3f;
+                            }
+                }
+                check(kept, "Blender exchange: a model's collision volume survives export and import");
+            }
+            ctx.assets->setOverride(model, imported.files[0].data);
+            check(ctx.assets->read(model) == imported.files[0].data, "Blender exchange: a previewed model overrides the archive's");
+            ctx.assets->clearOverrides();
+            check(!ctx.assets->hasOverride(model), "Blender exchange: overrides cleared");
+            frames(editor, device, 2);
+            check(ImGui::FindWindowByName("Blender###Client.Blender") != nullptr, "Blender exchange: the Blender panel is drawn");
+        }
 
         // Map editing: move, rotate, duplicate, delete, undo; save into a COPY of the map folder (never the game's) and read back.
         {

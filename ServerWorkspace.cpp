@@ -1,4 +1,5 @@
 #include "ServerWorkspace.h"
+#include "MarkerColours.h"
 
 #include "imgui_internal.h"   // DockBuilder
 
@@ -824,7 +825,7 @@ void ServerWorkspace::duplicateSelected() {
     const tr::Vec3 offset = scaled(ctx_.scene->camera().right(), 2.0f);
     auto shifted = [&](tr::Vec3 p) {
         p = add(p, tr::Vec3{offset.x, 0, offset.z});
-        if (snapToGround_) p.y = ctx_.scene->groundHeight(p.x, p.z, p.y);
+        if (snapToGround_) p.y = ctx_.scene->surfaceHeightBelow(p.x, p.z, p.y + 2.0f, p.y);
         return p;
     };
     switch (selection_.kind) {
@@ -932,11 +933,47 @@ void ServerWorkspace::sortPatrolSteps(int64_t selectPool, int32_t selectStep) {
         if (steps[k].poolId == selectPool && steps[k].step == selectStep) selection_ = Selection{SelectionKind::PatrolStep, k};
 }
 
+const PlacedObject* ServerWorkspace::selectedControlPoint() const {
+    int64_t pointId = 0;
+    if (selection_.kind == SelectionKind::Object && selection_.index < serverContent_.objects.size()) {
+        const PlacedObject& o = serverContent_.objects[selection_.index];
+        if (o.kind == ObjectKind::ControlPoint) return &o;
+        if (o.kind == ObjectKind::Footlocker)
+            for (const ControlPointLink& l : serverContent_.controlPointLinks)
+                if (l.kind == 6 && l.objectId == o.id && o.id > 0) pointId = l.controlPointId;
+    }
+    if (selection_.kind == SelectionKind::SpawnPool && selection_.index < serverContent_.spawnPools.size()) {
+        const int64_t id = serverContent_.spawnPools[selection_.index].id;
+        for (const ControlPointLink& l : serverContent_.controlPointLinks)
+            if ((l.kind == 1 || l.kind == 2) && l.objectId == id && id > 0) pointId = l.controlPointId;
+    }
+    if (selection_.kind == SelectionKind::Teleporter && selection_.index < serverContent_.teleporters.size()) {
+        const int64_t id = serverContent_.teleporters[selection_.index].id;
+        for (const ControlPointLink& l : serverContent_.controlPointLinks)
+            if ((l.kind == 3 || l.kind == 4) && l.objectId == id && id > 0) pointId = l.controlPointId;
+    }
+    if (pointId == 0) return nullptr;
+    for (const PlacedObject& o : serverContent_.objects)
+        if (o.kind == ObjectKind::ControlPoint && o.id == pointId) return &o;
+    return nullptr;
+}
+
 void ServerWorkspace::addServerObject(SelectionKind kind, ObjectKind objectKind) {
     if (!canEditServer() || !ctx_.scene) return;
     tr::Vec3 rayOrigin, rayDirection, point;
     ctx_.scene->viewRay(0.0f, 0.0f, rayOrigin, rayDirection);
-    if (!ctx_.scene->groundPoint(rayOrigin, rayDirection, rayOrigin.y - 10.0f, point)) point = add(rayOrigin, scaled(rayDirection, 20.0f));
+    if (!ctx_.scene->surfacePoint(rayOrigin, rayDirection, rayOrigin.y - 10.0f, point)) point = add(rayOrigin, scaled(rayDirection, 20.0f));
+    // With a control point (or an object linked to one) selected: beside the point, 4 m towards the camera, at the point's own height.
+    // Patrol steps and arrival points belong to their pool and stay at the view centre.
+    const PlacedObject* nearPoint =
+        kind == SelectionKind::WormholeLock || kind == SelectionKind::PatrolStep || kind == SelectionKind::Arrival ? nullptr : selectedControlPoint();
+    if (nearPoint) {
+        float dx = rayOrigin.x - nearPoint->position.x, dz = rayOrigin.z - nearPoint->position.z;
+        const float d = std::sqrt(dx * dx + dz * dz);
+        if (d > 1e-3f) { dx /= d; dz /= d; } else { dx = 1; dz = 0; }
+        point = tr::Vec3{nearPoint->position.x + dx * 4.0f, nearPoint->position.y, nearPoint->position.z + dz * 4.0f};
+    }
+    const char* placedAt = nearPoint ? "beside control point" : "at the centre of the view";
     if (kind == SelectionKind::WormholeLock) {
         // From the selected teleporter when it is one, else from any wormhole; to any; mission kind.
         WormholeLock w;
@@ -965,7 +1002,7 @@ void ServerWorkspace::addServerObject(SelectionKind kind, ObjectKind objectKind)
             ctx_.setStatus("Select a saved spawn pool or one of its patrol steps first: a patrol step needs its pool's database id.", true);
             return;
         }
-        if (snapToGround_) point.y = ctx_.scene->groundHeight(point.x, point.z, point.y);
+        if (snapToGround_) point.y = ctx_.scene->surfaceHeightBelow(point.x, point.z, point.y + 2.0f, point.y);
         beginEdit();
         insertPatrolStep(poolId, after, point);
         contentChanged();
@@ -1070,7 +1107,8 @@ void ServerWorkspace::addServerObject(SelectionKind kind, ObjectKind objectKind)
         }
     }
     contentChanged();
-    ctx_.setStatus("Added at the centre of the view; set its fields in the Entity panel (not saved yet).", false);
+    ctx_.setStatus(std::string("Added ") + placedAt + (nearPoint ? " " + nearPoint->name : std::string()) +
+                       "; set its fields in the Inspector (not saved yet; link it to the point once saved).", false);
 }
 
 // ------------------------------------------------------------------------------------------
@@ -1234,6 +1272,66 @@ std::string ServerWorkspace::linkedObjectLabel(int32_t kind, int64_t objectId) c
     }
 }
 
+Selection ServerWorkspace::linkSelection(int32_t kind, int64_t objectId) const {
+    if (kind == 1 || kind == 2)
+        for (size_t k = 0; k < serverContent_.spawnPools.size(); ++k)
+            if (serverContent_.spawnPools[k].id == objectId) return Selection{SelectionKind::SpawnPool, k};
+    if (kind == 3 || kind == 4)
+        for (size_t k = 0; k < serverContent_.teleporters.size(); ++k)
+            if (serverContent_.teleporters[k].id == objectId) return Selection{SelectionKind::Teleporter, k};
+    if (kind == 6)
+        for (size_t k = 0; k < serverContent_.objects.size(); ++k)
+            if (serverContent_.objects[k].kind == ObjectKind::Footlocker && serverContent_.objects[k].id == objectId)
+                return Selection{SelectionKind::Object, k};
+    return Selection{};
+}
+
+void ServerWorkspace::drawGarrisonSelector(const PlacedObject& point) {
+    if (!ctx_.scene || point.id <= 0) return;
+    int view = ctx_.scene->garrisonViewOf(point.id);
+    const char* holder = point.controlPoint.defaultOwner == 1 ? "As held at start (AFS)" : "As held at start (Bane)";
+    const char* items[] = {holder, "Bane garrison", "AFS garrison"};
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14);
+    if (ImGui::Combo("Garrison shown", &view, items, 3)) ctx_.scene->garrisonViews[point.id] = view;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Rasa.NET spawns only the garrison of the side holding the point; the other side's pools are suspended.\n"
+                          "The viewport draws the chosen side's pools and leaves the other side's out (a selected pool is drawn).\n"
+                          "A view setting only: nothing is saved.");
+}
+
+void ServerWorkspace::drawPointSection() {
+    const size_t k = pointSection_;
+    pointSection_ = SIZE_MAX;
+    if (k >= serverContent_.objects.size() || serverContent_.objects[k].kind != ObjectKind::ControlPoint) return;
+    const PlacedObject& point = serverContent_.objects[k];
+    // A shaded, bordered block after the selected object's own fields, so the two do not run together. Drawn with draw list
+    // channels rather than a child window: the selected row's scroll-into-view must scroll the inspector itself.
+    ImGui::Spacing();
+    ImGui::Spacing();
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    draw->ChannelsSplit(2);
+    draw->ChannelsSetCurrent(1);
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const float left = ImGui::GetCursorScreenPos().x, right = left + ImGui::GetContentRegionAvail().x;
+    const float top = ImGui::GetCursorScreenPos().y;
+    ImGui::Dummy(ImVec2(0, style.FramePadding.y));
+    ImGui::Indent(style.FramePadding.x);
+    ImGui::TextColored(ImVec4(0.6f, 0.85f, 1.0f, 1.0f), "Control point %s", point.name.empty() ? std::to_string(point.id).c_str() : point.name.c_str());
+    ImGui::SameLine();
+    ImGui::PushID("pointSection");
+    if (ImGui::SmallButton("select")) selection_ = Selection{SelectionKind::Object, k};
+    drawGarrisonSelector(point);
+    drawControlPointLinks(point);
+    ImGui::PopID();
+    ImGui::Unindent(style.FramePadding.x);
+    ImGui::Dummy(ImVec2(0, style.FramePadding.y));
+    const float bottom = ImGui::GetItemRectMax().y;
+    draw->ChannelsSetCurrent(0);
+    draw->AddRectFilled(ImVec2(left - 2, top), ImVec2(right + 2, bottom), ImGui::GetColorU32(ImGuiCol_FrameBg, 0.6f), style.FrameRounding);
+    draw->AddRect(ImVec2(left - 2, top), ImVec2(right + 2, bottom), ImGui::GetColorU32(ImVec4(0.6f, 0.85f, 1.0f, 0.5f)), style.FrameRounding);
+    draw->ChannelsMerge();
+}
+
 void ServerWorkspace::removeControlPointLinks(std::initializer_list<int32_t> kinds, int64_t objectId) {
     auto& links = serverContent_.controlPointLinks;
     links.erase(std::remove_if(links.begin(), links.end(),
@@ -1257,6 +1355,8 @@ void ServerWorkspace::drawControlPointMembership(std::initializer_list<int32_t> 
             ImGui::PushID(int(k));
             if (ImGui::SmallButton("select")) selection_ = Selection{SelectionKind::Object, k};
             ImGui::PopID();
+            pointSection_ = k;                          // its whole list, this object highlighted, at the end (drawPointSection)
+            return;                                     // the server keeps one point per object (the last link)
         }
     }
 }
@@ -1366,7 +1466,28 @@ void ServerWorkspace::drawControlPointLinks(const PlacedObject& point) {
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove this link");
             ImGui::SameLine();
-            ImGui::TextUnformatted(linkedObjectLabel(kind, l.objectId).c_str());
+            // Click selects the object (the viewport highlights it and draws its line), double-click also flies there. The
+            // selected object's row is highlighted.
+            const Selection target = linkSelection(kind, l.objectId);
+            const bool isSelected = target.kind != SelectionKind::None && sameSelection(target, selection_);
+            const std::string label = linkedObjectLabel(kind, l.objectId);
+            // The garrison the viewport leaves out at this point: greyed.
+            const int view = ctx_.scene ? ctx_.scene->garrisonViewOf(point.id) : 0;
+            const int shownKind = view == 1 ? 1 : view == 2 ? 2 : point.controlPoint.defaultOwner == 1 ? 2 : 1;
+            const bool hidden = (kind == 1 || kind == 2) && kind != shownKind;
+            if (hidden) ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            if (target.kind == SelectionKind::None) {
+                ImGui::TextUnformatted(label.c_str());
+            } else {
+                if (ImGui::Selectable(label.c_str(), isSelected, ImGuiSelectableFlags_AllowDoubleClick)) {
+                    selection_ = target;
+                    if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) viewport_.focusOn(ctx_, target);
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s\nClick: select, double-click: select and fly there.%s", label.c_str(),
+                                      hidden ? "\nNot drawn: the garrison shown at this point is the other side's." : "");
+            }
+            if (hidden) ImGui::PopStyleColor();
             // Checks the server's loader makes or the shipped data follows.
             if (kind == 3 || kind == 4)
                 for (const Teleporter& t : serverContent_.teleporters)
@@ -1543,7 +1664,11 @@ bool ServerWorkspace::creatureCombo(const char* id, int32_t& creatureId, bool al
 
 void ServerWorkspace::drawServerObjectEditor() {
     const size_t i = selection_.index;
+    pointSection_ = SIZE_MAX;
+    // The selected object's name in the viewport's selection colour.
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(markerColour::selected.x, markerColour::selected.y, markerColour::selected.z, 1.0f));
     ImGui::TextWrapped("%s", serverObjectLabel(selection_).c_str());
+    ImGui::PopStyleColor();
     ImGui::TextDisabled("Drag in the viewport to move, Ctrl+wheel to rotate, Del to delete, Ctrl+D to duplicate.");
     ImGui::Separator();
     const float fieldWidth = ImGui::GetFontSize() * 14;
@@ -1559,7 +1684,7 @@ void ServerWorkspace::drawServerObjectEditor() {
         ImGui::SameLine();
         if (ImGui::SmallButton("Snap to ground") && ctx_.scene) {
             beginEdit();
-            target.y = ctx_.scene->groundHeight(target.x, target.z, target.y);
+            target.y = ctx_.scene->surfaceHeightBelow(target.x, target.z, target.y + 2.0f, target.y);   // first surface below
             contentChanged();
         }
     };
@@ -1869,7 +1994,10 @@ void ServerWorkspace::drawServerObjectEditor() {
             if (o.kind == ObjectKind::AmbientNpc)
                 ImGui::TextDisabled("A class with the STATELESSSWITCH augmentation (UsableStatelessNPC*): its own looping animations, nothing to use.");
             if (o.kind == ObjectKind::ControlPoint && controlPointsEditable()) drawControlPointFields(o);
-            if (o.kind == ObjectKind::ControlPoint && database_ && database_->hasTable("control_point_link")) drawControlPointLinks(o);
+            if (o.kind == ObjectKind::ControlPoint && database_ && database_->hasTable("control_point_link")) {
+                drawGarrisonSelector(o);
+                drawControlPointLinks(o);
+            }
             if (o.kind == ObjectKind::Emitter) {
                 // Rasa.NET EmitterManager: the client attaches the package while the emitter is on (fxpackageemitter.py TurnOn:
                 // body.AttachFXPackage); a package the client's string table lacks is left out at start-up.
@@ -2049,6 +2177,7 @@ void ServerWorkspace::drawServerObjectEditor() {
     if (ImGui::Button("Show in overview")) overview_.requestFocus();
     ImGui::SameLine();
     if (ImGui::Button("Show in viewport")) viewport_.focusOn(ctx_, selection_);
+    drawPointSection();                                // a linked object's control point, set apart below its own fields
 }
 
 // ------------------------------------------------------------------------------------------

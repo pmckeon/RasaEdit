@@ -104,8 +104,19 @@ public:
 
     // World-space ray through a point of the viewport (normalised device coordinates, +y up).
     void viewRay(float ndcX, float ndcY, tr::Vec3& origin, tr::Vec3& direction) const;
-    // Where a ray meets the ground: the terrain if there is one, else the horizontal plane y = fallbackY.
+    // Where a ray meets the ground: the terrain if there is one (its holes let the ray through), else the plane y = fallbackY.
     bool groundPoint(const tr::Vec3& origin, const tr::Vec3& direction, float fallbackY, tr::Vec3& point) const;
+    // Where a ray first meets a surface: the nearer of the ground (groundPoint) and the drawn map entities' model triangles -
+    // where new objects are put (a floor, platform or roof rather than the terrain under or beyond it). excludeEntity: a map
+    // entity not to count (the one being dragged).
+    bool surfacePoint(const tr::Vec3& origin, const tr::Vec3& direction, float fallbackY, tr::Vec3& point, int excludeEntity = -1) const;
+    // The nearest model triangle of a drawn map entity the ray hits within maxT (t along the normalised direction).
+    bool modelSurfaceHit(const tr::Vec3& origin, const tr::Vec3& direction, float maxT, float& t, int excludeEntity = -1) const;
+    // Snap to ground: the first surface straight down from (x, fromY, z) - architecture or terrain, holes excluded; fallback
+    // when there is none (e.g. under the terrain with no cave floor loaded).
+    float surfaceHeightBelow(float x, float z, float fromY, float fallback, int excludeEntity = -1) const;
+    // The terrain height where the terrain is drawn (not in a hole: flag 0 interpolated >= 0.5, as terrain.hlsl discards).
+    bool solidTerrainHeight(float x, float z, float& height) const;
     // Terrain height at (x, z), or fallback where there is no terrain.
     float groundHeight(float x, float z, float fallback) const;
 
@@ -170,6 +181,19 @@ public:
     bool showServer = true;             // spawn pools, teleporters, links, objects
     bool showRegions = false;           // map regions (large outlines)
     bool showMissionAreas = true;
+    // Control point garrisons: which side's linked pools are drawn (Rasa.NET ControlPoints: only the holder's garrison spawns, the
+    // other side's pools are suspended), per control point id: 0 (or absent) = the side that holds it at start (default_owner),
+    // 1 = the Bane's (link kind 1), 2 = the AFS's (kind 2). The other side's pools are not drawn or picked (selected: in full).
+    std::unordered_map<int64_t, int> garrisonViews;
+    int garrisonViewOf(int64_t pointId) const {
+        const auto v = garrisonViews.find(pointId);
+        return v == garrisonViews.end() ? 0 : v->second;
+    }
+    bool garrisonHidden(int64_t pointId, int32_t kind) const;  // a garrison of this link kind (1 / 2) at that point is not shown
+    // A spawn pool (index into the server content) of the side its point's garrison view leaves out (the Overview's rule too).
+    bool spawnPoolHidden(size_t poolIndex) const {
+        return poolIndex < poolGarrisons_.size() && garrisonHidden(poolGarrisons_[poolIndex].point, poolGarrisons_[poolIndex].kind);
+    }
     // Sky lighting (.sky of the map's regions). setRegionSkies gives (region id, .sky file name) pairs from the map's
     // RegionSettings (MapRegion.sky resolved through the string table); each distinct sky is loaded once.
     struct SkyChoice {
@@ -478,6 +502,11 @@ private:
         float ringRadius = 0;           // spawn radius / trigger radius (0: none)
         bool linked = false;            // draw a line to linkTarget (an arrival point's spawn pool, a patrol step's next step)
         tr::Vec3 linkTarget;
+        bool pointLink = false;         // the line goes to a control point: drawn only while it or this object is selected
+        Selection pointSelection;       // that control point
+        int64_t garrisonPoint = 0;      // a garrison pool's control point id (control_point_link kind 1 / 2; 0 = none)
+        int32_t garrisonKind = 0;       // 1 Bane garrison, 2 AFS garrison
+        bool extraFigure = false;       // a spawn pool's second and later figures (the first carries ring, arrow and link)
         bool facing = false;            // draw a facing arrow
         bool area = false;              // region or mission area outline
         AreaShape shape;
@@ -490,6 +519,14 @@ private:
     // A server object's model beyond the game's draw distance for its class's culling layer (with gameDistances): not posed,
     // drawn or picked - the marker box stands in (the selection is always drawn).
     bool serverModelCulled(const ServerPlacement& s) const;
+    // A garrison pool of the side its point's garrison view does not show: not drawn or picked unless selected.
+    bool garrisonSuspended(const ServerPlacement& s) const;
+    std::unordered_map<int64_t, int64_t> pointDefaultOwner_;   // control point id -> default_owner (0 Bane, 1 AFS)
+    struct PoolGarrison {
+        int64_t point = 0;
+        int32_t kind = 0;                                       // 0: not a garrison pool
+    };
+    std::vector<PoolGarrison> poolGarrisons_;                   // per spawn pool of the server content
     std::function<int32_t(int32_t)> cullingLayerForClass_;
     std::function<std::string(int32_t)> meshForClass_;
     std::function<bool(int32_t)> classKnown_;

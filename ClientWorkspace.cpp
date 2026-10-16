@@ -25,6 +25,7 @@ void ClientWorkspace::buildDefaultLayout(ImGuiID dockspace) {
     ImGui::DockBuilderDockWindow("Assets###Client.Assets", bottom);
     ImGui::DockBuilderDockWindow("Entities###Client.Entities", bottom);
     ImGui::DockBuilderDockWindow("Lights###Client.Lights", bottom);
+    ImGui::DockBuilderDockWindow("Blender###Client.Blender", bottom);
     ImGui::DockBuilderDockWindow("Map###Client.Map", right);
     ImGui::DockBuilderDockWindow("Entity###Client.Entity", right);
     ImGui::DockBuilderFinish(dockspace);
@@ -294,7 +295,7 @@ void ClientWorkspace::addEntity(int32_t classId) {
     if (!ctx_.map || !ctx_.scene) return;
     tr::Vec3 origin, direction, point;
     ctx_.scene->viewRay(0, 0, origin, direction);
-    if (!ctx_.scene->groundPoint(origin, direction, origin.y - 10.0f, point)) point = add(origin, scaled(direction, 20.0f));
+    if (!ctx_.scene->surfacePoint(origin, direction, origin.y - 10.0f, point)) point = add(origin, scaled(direction, 20.0f));
     beginEdit();
     tr::MapEntity e;
     e.classId = classId;
@@ -435,6 +436,18 @@ void ClientWorkspace::drawPanels() {
     layers.showInViewport = [this](const Selection& s) { viewport_.focusOn(ctx_, s); };
     overview_.draw(ctx_, "Overview###Client.Overview", layers);
     assets_.draw(ctx_, "Assets###Client.Assets");
+    {
+        // The selected map entity's model is offered for export.
+        std::string model;
+        if (selection_.kind == SelectionKind::MapEntity && ctx_.map && selection_.index < ctx_.map->map.entities.size())
+            model = ctx_.classInfo(int32_t(ctx_.map->map.entities[selection_.index].classId)).mesh;
+        // Else the model selected in the Assets panel.
+        if (model.empty() && tr::toLowerAscii(assets_.selectedName()).find(".geo") != std::string::npos) model = assets_.selectedName();
+        blender_.draw(ctx_, "Blender###Client.Blender", model, assets_);
+        // Preview hook: RASAEDIT_CLIENT_FOCUS=<panel title> brings that panel to the front once (e.g. Blender###Client.Blender).
+        static int frame = 0;
+        if (const char* focus = std::getenv("RASAEDIT_CLIENT_FOCUS"); focus && *focus && ++frame == 10) ImGui::SetWindowFocus(focus);   // once the layout is built
+    }
     // Drawn last: on first creation the newest window becomes the selected tab of a shared dock node.
     // New class's bounds once its model is loaded (2.45 maps store per-entity bounds the game culls and picks with).
     if (ctx_.map && ctx_.scene)
@@ -714,10 +727,11 @@ void ClientWorkspace::drawEntityPanel() {
     ImGui::TextDisabled("Rotation  w %.3f  x %.3f  y %.3f  z %.3f", e.orientation.w, e.orientation.x, e.orientation.y, e.orientation.z);
     ImGui::SetNextItemWidth(fieldWidth);
     edited(ImGui::DragFloat("Scale", &e.scale, 0.01f, 0.01f, 100.0f, "%.3f"));
-    if (ctx_.map->hasTerrain) {
-        float ground = 0;
-        if (ctx_.map->terrain.heightAtWorld(e.location.x, e.location.z, ground)) {
-            ImGui::Text("Terrain   %.2f (entity %+.2f)", ground, e.location.y - ground);
+    if (ctx_.scene) {
+        // The first surface straight below (architecture or terrain, not this entity; holes excluded) - as the viewport's snap.
+        const float ground = ctx_.scene->surfaceHeightBelow(e.location.x, e.location.z, e.location.y + 2.0f, NAN, int(index));
+        if (!std::isnan(ground)) {
+            ImGui::Text("Ground    %.2f (entity %+.2f)", ground, e.location.y - ground);
             ImGui::SameLine();
             if (ImGui::SmallButton("Snap to ground")) {
                 beginEdit();

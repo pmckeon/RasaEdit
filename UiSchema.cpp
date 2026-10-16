@@ -361,7 +361,7 @@ std::string checkValue(const Attribute& a, const std::string& v, const tr::UiExp
             return ui.font(v) ? "" : "no font \"" + v + "\" (the text would not draw)";
         case Type::TextId:
             if (v.empty() || !game) return "";
-            return game->uiText(v).empty() ? "no text with id \"" + v + "\" in uielement / uielementlanguage" : "";
+            return game->uiTextExists(v) ? "" : "no text with id \"" + v + "\" in uielement / uielementlanguage";
         case Type::WidgetAnim:
             if (v.empty()) return "";
             return hasAnimation(ui, v, "Widget") ? "" : "no Widget animation \"" + v + "\"";

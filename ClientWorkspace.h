@@ -1,5 +1,6 @@
 #pragma once
 
+#include "BlenderPanel.h"
 #include "Panels.h"
 #include "Workspace.h"
 
@@ -82,6 +83,7 @@ private:
     char entityFilter_[128] = "";
     MapsPanel maps_;
     AssetsPanel assets_;
+    BlenderPanel blender_;
     OverviewPanel overview_;
     ViewportPanel viewport_{false};
 };

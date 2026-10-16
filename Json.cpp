@@ -1,6 +1,7 @@
 #include "Json.h"
 
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 
 const JsonValue* JsonValue::member(const std::string& name) const {
@@ -196,4 +197,120 @@ bool parseJson(const std::string& textIn, JsonValue& out, std::string& error) {
         return false;
     }
     return true;
+}
+
+JsonValue& JsonValue::push(JsonValue value) {
+    type = Type::Array;
+    items.push_back(std::move(value));
+    return items.back();
+}
+
+JsonValue& JsonValue::set(const std::string& name, JsonValue value) {
+    type = Type::Object;
+    for (auto& m : members)
+        if (m.first == name) return m.second = std::move(value);
+    members.emplace_back(name, std::move(value));
+    return members.back().second;
+}
+
+JsonValue jsonBool(bool value) {
+    JsonValue v;
+    v.type = JsonValue::Type::Bool;
+    v.boolean = value;
+    return v;
+}
+
+JsonValue jsonNumber(double value) {
+    JsonValue v;
+    v.type = JsonValue::Type::Number;
+    if (!std::isfinite(value)) value = 0;
+    char text[32];
+    std::snprintf(text, sizeof text, "%.9g", value);
+    v.text = text;
+    return v;
+}
+
+JsonValue jsonInteger(int64_t value) {
+    JsonValue v;
+    v.type = JsonValue::Type::Number;
+    v.text = std::to_string(value);
+    return v;
+}
+
+JsonValue jsonString(std::string value) {
+    JsonValue v;
+    v.type = JsonValue::Type::String;
+    v.text = std::move(value);
+    return v;
+}
+
+JsonValue jsonArray() {
+    JsonValue v;
+    v.type = JsonValue::Type::Array;
+    return v;
+}
+
+JsonValue jsonObject() {
+    JsonValue v;
+    v.type = JsonValue::Type::Object;
+    return v;
+}
+
+namespace {
+
+void writeString(const std::string& s, std::string& out) {
+    out += '"';
+    for (unsigned char c : s) {
+        switch (c) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (c < 0x20) {
+                    char text[8];
+                    std::snprintf(text, sizeof text, "\\u%04x", c);
+                    out += text;
+                } else {
+                    out += char(c);
+                }
+        }
+    }
+    out += '"';
+}
+
+void writeValue(const JsonValue& v, std::string& out) {
+    switch (v.type) {
+        case JsonValue::Type::Null: out += "null"; break;
+        case JsonValue::Type::Bool: out += v.boolean ? "true" : "false"; break;
+        case JsonValue::Type::Number: out += v.text.empty() ? "0" : v.text; break;
+        case JsonValue::Type::String: writeString(v.text, out); break;
+        case JsonValue::Type::Array:
+            out += '[';
+            for (size_t k = 0; k < v.items.size(); ++k) {
+                if (k) out += ',';
+                writeValue(v.items[k], out);
+            }
+            out += ']';
+            break;
+        case JsonValue::Type::Object:
+            out += '{';
+            for (size_t k = 0; k < v.members.size(); ++k) {
+                if (k) out += ',';
+                writeString(v.members[k].first, out);
+                out += ':';
+                writeValue(v.members[k].second, out);
+            }
+            out += '}';
+            break;
+    }
+}
+
+}  // namespace
+
+std::string writeJson(const JsonValue& value) {
+    std::string out;
+    writeValue(value, out);
+    return out;
 }

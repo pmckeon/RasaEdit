@@ -1,8 +1,8 @@
 #pragma once
 
-// A small JSON reader for the documents the World database stores in text columns (Rasa.NET's mission channel radio sources,
-// mission item intents, mission scene bindings). Read-only: objects keep their member order; numbers keep their text so
-// 64-bit ids survive.
+// A small JSON reader and writer: the documents the World database stores in text columns (Rasa.NET's mission channel radio
+// sources, mission item intents, mission scene bindings) and glTF files (ModelExchange). Objects keep their member order;
+// numbers keep their text so 64-bit ids survive.
 
 #include <cstdint>
 #include <memory>
@@ -26,7 +26,20 @@ struct JsonValue {
     const JsonValue* member(const std::string& name) const;     // nullptr if absent (or not an object)
     double number() const;                                       // 0 unless a number
     bool integer(int64_t& out) const;                            // a number that is a whole value
+
+    // Building: append to an array / set a member of an object (replacing one of that name); both return the stored value.
+    JsonValue& push(JsonValue value);
+    JsonValue& set(const std::string& name, JsonValue value);
 };
+
+JsonValue jsonBool(bool value);
+JsonValue jsonNumber(double value);                              // written with 9 significant digits (exact for float)
+JsonValue jsonInteger(int64_t value);
+JsonValue jsonString(std::string value);
+JsonValue jsonArray();
+JsonValue jsonObject();
+// Compact JSON text (UTF-8 strings written as they are, control characters escaped).
+std::string writeJson(const JsonValue& value);
 
 // Parses a whole document; false with `error` set (what and where) when it is not well-formed JSON.
 bool parseJson(const std::string& textIn, JsonValue& out, std::string& error);

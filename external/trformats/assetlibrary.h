@@ -17,6 +17,7 @@
 #include "trformats.h"
 
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -69,10 +70,17 @@ public:
 
     // Any asset by bare file name (case-insensitive), e.g. "arch_hum_tent_medic_01_v01.geo".
     std::optional<AssetLocation> locate(const std::string& name) const;
-    bool exists(const std::string& name) const { return locate(name).has_value(); }
+    bool exists(const std::string& name) const { return hasOverride(name) || locate(name).has_value(); }
     Bytes read(const std::string& name) const;                       // throws FormatError if absent
     bool tryRead(const std::string& name, Bytes& out) const;
     std::vector<std::string> namesWithExtension(const std::string& extension) const;   // e.g. ".geo"
+
+    // In-memory files that shadow the mounted ones (by name, case-insensitive) for read / tryRead / exists / namesWithExtension:
+    // models and textures imported from glTF, previewed before they go into the patch archive. Thread-safe.
+    void setOverride(const std::string& name, Bytes data);
+    void clearOverrides();
+    bool hasOverride(const std::string& name) const;
+    std::vector<std::string> overrideNames() const;
 
     // Maps.
     std::vector<std::string> mapNames() const;                       // folder names under the Maps directory
@@ -92,6 +100,8 @@ private:
     std::vector<LooseDirectory> loose_;
     std::unordered_map<std::string, AssetLocation> index_;          // lower-case name -> location
     std::vector<std::string> warnings_;
+    mutable std::mutex overridesMutex_;
+    std::unordered_map<std::string, std::pair<std::string, Bytes>> overrides_;   // lower-case name -> (name, data)
 };
 
 // Everything the editor needs for one map, loaded through the library.

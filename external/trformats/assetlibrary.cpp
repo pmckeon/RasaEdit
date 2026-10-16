@@ -93,9 +93,17 @@ std::string AssetLibrary::resolve(const std::string& relative) const {
 }
 
 void AssetLibrary::mountSection(const ConfigFile& cfg, const std::string& name) {
-    const auto* items = cfg.section(name);
-    if (!items) return;
-    for (const ConfigFile::Item& item : *items) {
+    const auto* section = cfg.section(name);
+    if (!section) return;
+    // The game takes a section's entries in alphabetical key order, first registration winning - not file order (verified in
+    // game 2026-10-15: a patch archive under the key AAA_RasaEdit, or RasaEditPatch / S, replaced a texture of Texture03's
+    // whether its line came first or last; under U it did not). Shipped file names are unique across archives, so the order
+    // only matters for a patch archive.
+    std::vector<ConfigFile::Item> items(section->begin(), section->end());
+    std::stable_sort(items.begin(), items.end(), [](const ConfigFile::Item& a, const ConfigFile::Item& b) {
+        return toLowerAscii(a.key) < toLowerAscii(b.key);
+    });
+    for (const ConfigFile::Item& item : items) {
         const std::string& value = item.value;
         if (value.find(".glm") != std::string::npos) {                 // archive (client: rfind(".glm"))
             const std::string path = resolve(value);
@@ -163,7 +171,34 @@ std::optional<AssetLocation> AssetLibrary::locate(const std::string& name) const
     return it->second;
 }
 
+void AssetLibrary::setOverride(const std::string& name, Bytes data) {
+    std::lock_guard<std::mutex> lock(overridesMutex_);
+    overrides_[toLowerAscii(name)] = {name, std::move(data)};
+}
+
+void AssetLibrary::clearOverrides() {
+    std::lock_guard<std::mutex> lock(overridesMutex_);
+    overrides_.clear();
+}
+
+bool AssetLibrary::hasOverride(const std::string& name) const {
+    std::lock_guard<std::mutex> lock(overridesMutex_);
+    return overrides_.count(toLowerAscii(name)) != 0;
+}
+
+std::vector<std::string> AssetLibrary::overrideNames() const {
+    std::lock_guard<std::mutex> lock(overridesMutex_);
+    std::vector<std::string> names;
+    for (const auto& o : overrides_) names.push_back(o.second.first);
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
 Bytes AssetLibrary::read(const std::string& name) const {
+    {
+        std::lock_guard<std::mutex> lock(overridesMutex_);
+        if (auto it = overrides_.find(toLowerAscii(name)); it != overrides_.end()) return it->second.second;
+    }
     const auto location = locate(name);
     if (!location) throw FormatError("asset not found: " + name);
     if (location->inArchive) return archives_[location->archiveIndex].archive->read(*location->entry);
@@ -171,6 +206,13 @@ Bytes AssetLibrary::read(const std::string& name) const {
 }
 
 bool AssetLibrary::tryRead(const std::string& name, Bytes& out) const {
+    {
+        std::lock_guard<std::mutex> lock(overridesMutex_);
+        if (auto it = overrides_.find(toLowerAscii(name)); it != overrides_.end()) {
+            out = it->second.second;
+            return true;
+        }
+    }
     const auto location = locate(name);
     if (!location) return false;
     out = location->inArchive ? archives_[location->archiveIndex].archive->read(*location->entry) : readFile(location->filePath);
@@ -183,6 +225,12 @@ std::vector<std::string> AssetLibrary::namesWithExtension(const std::string& ext
     for (const auto& item : index_)
         if (item.first.size() >= ext.size() && item.first.compare(item.first.size() - ext.size(), ext.size(), ext) == 0)
             names.push_back(item.second.inArchive ? item.second.entry->name : fs::path(item.second.filePath).filename().string());
+    {
+        std::lock_guard<std::mutex> lock(overridesMutex_);
+        for (const auto& o : overrides_)
+            if (o.first.size() >= ext.size() && o.first.compare(o.first.size() - ext.size(), ext.size(), ext) == 0 && !index_.count(o.first))
+                names.push_back(o.second.first);
+    }
     std::sort(names.begin(), names.end());
     return names;
 }

@@ -261,6 +261,9 @@ public:
     // A UI text id ("ID_...", e.g. a UI widget's textId): generated.client.uielement.bystring[name] -> index ->
     // uielementlanguage.lookup[(index, gender)][0]; "" when the id is unknown.
     std::string uiText(const std::string& name, int32_t gender = 1);
+    // Whether the id has a text at all (an empty one counts: ID_DEFAULT_TEXT = 1076, the button placeholder, is "" in
+    // uielementlanguage); its text in `text` when given.
+    bool uiTextExists(const std::string& name, int32_t gender = 1, std::string* text = nullptr);
     // An NPC greeting line: generated.client.language.english.npcgreetinglanguage lookup[(id, gender)][0] (a gender module:
     // clientlanguagemanager.py BuildModuleText; gender 1 = male, 2 = female). "" if none.
     std::string npcGreeting(int32_t greetingId, int32_t gender = 1);

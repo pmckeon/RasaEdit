@@ -27,7 +27,7 @@ bool lookupCombo(const char* label, int64_t& value, const LookupSource& source) 
     const bool isNone = value == 0 && source.none;
     const std::string name = isNone || !source.name ? std::string() : source.name(value);
     const bool missing = !isNone && name.empty();
-    const std::string preview = isNone ? std::string(source.none) : std::to_string(value) + "  " + (missing ? "(not in the list)" : name);
+    const std::string preview = isNone ? std::string(source.none) : std::to_string(value) + "  " + (missing ? "(unknown)" : name);
     if (missing) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
     const bool open = ImGui::BeginCombo(label, preview.c_str(), ImGuiComboFlags_HeightLarge);
     if (missing) ImGui::PopStyleColor();

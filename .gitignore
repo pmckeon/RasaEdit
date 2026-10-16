@@ -2,3 +2,5 @@ out/
 .vs/
 
 tools/missioncheck/obj/
+tools/blender/rasaedit_addon.zip
+tools/blender/rasaedit_addon/__pycache__/

@@ -1,5 +1,6 @@
 // trformats.cpp - see trformats.h for the format notes.
 #include "trformats.h"
+#include "geofile.h"
 
 #include <zlib.h>
 
@@ -1717,6 +1718,18 @@ Vec3 rotate(const Quat& q, const Vec3& v) {
 }
 
 }  // namespace
+
+uint32_t vertexElementSize(uint8_t type) { return elementSize(type); }
+
+void decodeVertexElement(uint8_t type, const uint8_t* p, float out[4]) {
+    const Value4 v = decodeElement(type, p);
+    out[0] = v.x;
+    out[1] = v.y;
+    out[2] = v.z;
+    out[3] = v.w;
+}
+
+float halfToFloatValue(uint16_t half) { return halfToFloat(half); }
 
 GeoModel readGeo(const Bytes& data) {
     if (data.size() < 8 || std::memcmp(data.data(), "CHNK", 4) != 0) throw FormatError("not a chunk file (no CHNK header)");

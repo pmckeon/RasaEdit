@@ -785,7 +785,8 @@ void UiWorkspace::drawElementPanel() {
         const std::string s = canvas_.text(*n);
         ImGui::Text("Text:");
         ImGui::SameLine();
-        if (s.empty()) ImGui::TextDisabled("(unknown text id)");
+        if (!ctx_.gameData || !ctx_.gameData->uiTextExists(n->attribute("textId"))) ImGui::TextDisabled("(unknown text id)");
+        else if (s.empty()) ImGui::TextDisabled("(empty text)");
         else ImGui::TextWrapped("%s", s.c_str());
     }
     if (n->hasAttribute("fontId")) {

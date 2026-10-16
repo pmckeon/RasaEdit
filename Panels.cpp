@@ -181,6 +181,18 @@ void AssetsPanel::draw(EditorContext& ctx, const char* title) {
     ImGui::EndChild();
     ImGui::End();
 }
+void AssetsPanel::showAsset(EditorContext& ctx, const std::string& name) {
+    names_ = ctx.assets ? ctx.assets->namesWithExtension("") : std::vector<std::string>();
+    filter_[0] = 0;
+    rebuild(ctx);
+    for (size_t k = 0; k < names_.size(); ++k)
+        if (tr::toLowerAscii(names_[k]) == tr::toLowerAscii(name)) {
+            selected_ = int(k);
+            preview_.release();                         // a cached model of that name would be the old one
+            preview_.select(ctx, names_[k]);
+        }
+}
+
 void AssetsPanel::reset(EditorContext& ctx) {
     names_ = ctx.assets ? ctx.assets->namesWithExtension("") : std::vector<std::string>();
     preview_.release();                             // its scene refers to the previous asset library
@@ -350,6 +362,10 @@ void OverviewPanel::draw(EditorContext& ctx, const char* title, const OverviewLa
         if (layers.showServer) {
             for (size_t k = 0; k < server.spawnPools.size(); ++k) {
                 const SpawnPool& pool = server.spawnPools[k];
+                // A control point garrison of the side its point does not show (the inspector's "Garrison shown"), as in 3D.
+                if (ctx.scene && ctx.scene->spawnPoolHidden(k) &&
+                    !(layers.selection && sameSelection(*layers.selection, Selection{SelectionKind::SpawnPool, k})))
+                    continue;
                 const Creature* creature = database ? database->creature(pool.slot1.creatureId) : nullptr;
                 const bool npc = creature && database->classIsNpc(creature->classId), vendor = creature && database->classIsVendor(creature->classId);
                 const ImU32 colour = toU32(vendor ? markerColour::vendor : npc ? markerColour::npc : markerColour::hostileCreature);
@@ -722,8 +738,10 @@ void ViewportPanel::draw(EditorContext& ctx, const char* title, Selection& selec
             scene.viewRay(mouseNdcX, mouseNdcY, rayOrigin, rayDirection);
             tr::Vec3* position = hooks->selectedPosition();
             const bool snap = hooks->snapToGround();
+            // Snapping follows the first surface under the cursor - architecture or terrain - not counting a dragged map entity.
+            const int dragged = selection.kind == SelectionKind::MapEntity ? int(selection.index) : -1;
             auto groundHit = [&](float planeY, tr::Vec3& point) {
-                if (snap) return scene.groundPoint(rayOrigin, rayDirection, planeY, point);
+                if (snap) return scene.surfacePoint(rayOrigin, rayDirection, planeY, point, dragged);
                 if (std::fabs(rayDirection.y) < 1e-6f) return false;               // keep the height: horizontal plane
                 const float t = (planeY - rayOrigin.y) / rayDirection.y;
                 if (t <= 0) return false;
@@ -740,7 +758,7 @@ void ViewportPanel::draw(EditorContext& ctx, const char* title, Selection& selec
             } else if (position && groundHit(dragY_, hit)) {
                 position->x = hit.x + dragOffset_.x;
                 position->z = hit.z + dragOffset_.z;
-                position->y = snap ? scene.groundHeight(position->x, position->z, dragY_) : dragY_;
+                position->y = snap ? scene.surfaceHeightBelow(position->x, position->z, hit.y + 2.0f, dragY_, dragged) : dragY_;
                 hooks->contentChanged();
             }
         }

@@ -1,0 +1,15 @@
+schema_version = "1.0.0"
+
+id = "rasaedit_addon"
+version = "0.1.0"
+name = "RasaEdit Tabula Rasa models"
+tagline = "Import and export Tabula Rasa models exchanged with RasaEdit (glTF)"
+maintainer = "RasaEdit"
+type = "add-on"
+
+blender_version_min = "4.2.0"
+
+# Blender add-ons run inside Blender's GPL-licensed Python API.
+license = ["SPDX:GPL-3.0-or-later"]
+
+tags = ["Import-Export"]

@@ -6,6 +6,9 @@
 #include "UiCanvas.h"
 #include "UiSchema.h"
 #include "gamedata.h"
+#include "geofile.h"
+#include "image.h"
+#include "ModelExchange.h"
 #include "MissionValidation.h"
 #include "WorldDatabase.h"
 
@@ -14,7 +17,9 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <sstream>
@@ -213,6 +218,22 @@ int main(int argc, char** argv) {
             return 0;
         }
         const tr::MapBundle map = tr::loadMap(assets, argv[3]);
+        // RASA_GLTFIMPORT with RASA_GLTFPREVIEW=1: the import's files override the archives' before the scene is built (the scene
+        // reads each entity's model properties - its animation - when it is created); the comparison below is then skipped.
+        if (envValue("RASA_GLTFIMPORT") && envValue("RASA_GLTFPREVIEW")) {
+            try {
+                ModelImportOptions options;
+                if (const char* src = envValue("RASA_GLTFSOURCE")) options.source = src;
+                if (const char* name = envValue("RASA_GLTFMODELNAME")) options.modelName = name;
+                const ModelImportResult result = importModelGltf(assets, envValue("RASA_GLTFIMPORT"), options);
+                for (const ImportedFile& f : result.files) assets.setOverride(f.name, f.data);
+                for (const std::string& w : result.warnings) std::printf("gltf import warning: %s\n", w.c_str());
+                std::printf("gltf preview: %zu file(s) override the archives (%s)\n", result.files.size(),
+                            result.files.empty() ? "" : result.files[0].name.c_str());
+            } catch (const std::exception& e) {
+                std::printf("gltf import FAILED: %s\n", e.what());
+            }
+        }
         SceneView scene(renderer, assets, map, [&](int32_t id) { return data.classMeshName(id); },
                         [&](int32_t id) { return !data.className(id).empty(); }, [&](int32_t id) { return data.classCullingLayer(id); },
                         envValue("RASA_TERRAINSTEP") ? uint32_t(std::atoi(envValue("RASA_TERRAINSTEP"))) : 0u);   // 0 = automatic
@@ -465,6 +486,404 @@ int main(int argc, char** argv) {
             } catch (const std::exception& e) {
                 std::printf("pkg %s: %s\n", pkg, e.what());
             }
+        }
+        // RASA_GEOROUNDTRIP=1: every .geo read with tr::readGeoFile and written back must be byte-identical, and decodeGeoFile must
+        // give what readGeo gives (piece / vertex / bone counts).
+        if (envValue("RASA_GEOROUNDTRIP")) {
+            size_t models = 0, identical = 0, failed = 0;
+            for (const std::string& name : assets.namesWithExtension(".geo")) {
+                ++models;
+                try {
+                    const tr::Bytes original = assets.read(name);
+                    const tr::GeoFile file = tr::readGeoFile(original);
+                    const tr::Bytes written = tr::writeGeoFile(file);
+                    if (written == original) {
+                        ++identical;
+                    } else {
+                        size_t at = 0;
+                        while (at < written.size() && at < original.size() && written[at] == original[at]) ++at;
+                        std::printf("geo round trip DIFFERS: %s (sizes %zu / %zu, first difference at %zu)\n", name.c_str(), original.size(),
+                                    written.size(), at);
+                    }
+                } catch (const std::exception& e) {
+                    ++failed;
+                    std::printf("geo round trip FAILED: %s: %s\n", name.c_str(), e.what());
+                }
+            }
+            std::printf("geo round trip: %zu of %zu models byte-identical, %zu not read\n", identical, models, failed);
+            // Bone collision volumes: decoded and written back byte-identical; which definition the BVOL radius follows.
+            {
+                size_t bones = 0, same = 0;
+                std::map<std::string, size_t> radiusRule;
+                for (const std::string& name : assets.namesWithExtension(".geo")) {
+                    tr::GeoFile file;
+                    try { file = tr::readGeoFile(assets.read(name)); } catch (const std::exception&) { continue; }
+                    for (const tr::GeoFileBone& b : file.bones) {
+                        if (b.boundingVolume.empty()) continue;
+                        ++bones;
+                        try {
+                            const std::vector<tr::GeoBoneVolume> volumes = tr::readBoneVolumes(b.boundingVolume);
+                            if (tr::writeBoneVolumes(volumes) == b.boundingVolume) ++same;
+                            else std::printf("bone volume DIFFERS: %s bone %s\n", name.c_str(), b.name.c_str());
+                            for (const tr::GeoBoneVolume& v : volumes) {
+                                const std::string kind = tr::tagName(v.kind);
+                                auto close = [&](float x) { return std::fabs(x - v.radius) <= 1e-3f * std::max(1.0f, v.radius); };
+                                std::vector<std::pair<const char*, float>> candidates;
+                                if (kind == "BVWS" && !v.vertices.empty()) {
+                                    tr::Vec3 lo = v.vertices[0], hi = v.vertices[0];
+                                    float origin = 0;
+                                    for (const tr::Vec3& p : v.vertices) {
+                                        lo = {std::min(lo.x, p.x), std::min(lo.y, p.y), std::min(lo.z, p.z)};
+                                        hi = {std::max(hi.x, p.x), std::max(hi.y, p.y), std::max(hi.z, p.z)};
+                                        origin = std::max(origin, std::sqrt(p.x * p.x + p.y * p.y + p.z * p.z));
+                                    }
+                                    const tr::Vec3 c{(lo.x + hi.x) / 2, (lo.y + hi.y) / 2, (lo.z + hi.z) / 2};
+                                    float fromCentre = 0;
+                                    for (const tr::Vec3& p : v.vertices) {
+                                        const float dx = p.x - c.x, dy = p.y - c.y, dz = p.z - c.z;
+                                        fromCentre = std::max(fromCentre, std::sqrt(dx * dx + dy * dy + dz * dz));
+                                    }
+                                    const float dx = hi.x - lo.x, dy = hi.y - lo.y, dz = hi.z - lo.z;
+                                    candidates = {{"farthest from the origin", origin}, {"farthest from the box centre", fromCentre},
+                                                  {"half the box diagonal", 0.5f * std::sqrt(dx * dx + dy * dy + dz * dz)}};
+                                } else if (kind == "BVBX") {
+                                    const tr::Vec3& h = v.halfExtents;
+                                    const float half = std::sqrt(h.x * h.x + h.y * h.y + h.z * h.z);
+                                    const float c = std::sqrt(v.centre.x * v.centre.x + v.centre.y * v.centre.y + v.centre.z * v.centre.z);
+                                    candidates = {{"half diagonal", half}, {"centre distance + half diagonal", c + half}};
+                                } else if (kind == "BVSP") {
+                                    candidates = {{"sphere radius", v.sphereRadius}};
+                                }
+                                std::string rule = "none";
+                                for (const auto& cand : candidates)
+                                    if (close(cand.second)) {
+                                        rule = cand.first;
+                                        break;
+                                    }
+                                ++radiusRule[kind + ": " + rule];
+                            }
+                        } catch (const std::exception& e) {
+                            std::printf("bone volume FAILED: %s bone %s: %s\n", name.c_str(), b.name.c_str(), e.what());
+                        }
+                    }
+                }
+                std::printf("bone volumes: %zu of %zu bones byte-identical\n", same, bones);
+                for (const auto& r : radiusRule) std::printf("  radius %s: %zu\n", r.first.c_str(), r.second);
+            }
+            // Animations: read / write byte-identical, and every bone / material track's keys decoded and encoded again in the
+            // same key chunk kind reproduce the stored bytes (the half / int16 / float encoders).
+            size_t anims = 0, animIdentical = 0, animFailed = 0, tracks = 0, tracksReencoded = 0;
+            float maxKeyError = 0;
+            for (const std::string& name : assets.namesWithExtension(".anm")) {
+                ++anims;
+                try {
+                    const tr::Bytes original = assets.read(name);
+                    tr::AnimFile file = tr::readAnimFile(original);
+                    if (tr::writeAnimFile(file) == original) ++animIdentical;
+                    else std::printf("anm round trip DIFFERS: %s\n", name.c_str());
+                    for (tr::AnimFileTrack& t : file.tracks) {
+                        if (t.target != tr::fourcc("SKEL") && t.target != tr::fourcc("EFCT")) continue;
+                        ++tracks;
+                        tr::AnimFileTrack again = t;
+                        if (t.target == tr::fourcc("SKEL")) tr::encodeAnimKeys(again, t.keyTag, tr::decodeAnimKeys(t));
+                        else tr::encodeMaterialKeys(again, tr::decodeMaterialKeys(t));
+                        if (again.keyData == t.keyData) {
+                            ++tracksReencoded;
+                        } else if (t.target == tr::fourcc("SKEL")) {
+                            // Rotations are normalised on decoding, so int16 rotations may come back one step off: measure it.
+                            const std::vector<tr::AnimKey> a = tr::decodeAnimKeys(t), b = tr::decodeAnimKeys(again);
+                            for (size_t k = 0; k < a.size(); ++k) {
+                                const float d[] = {a[k].rotation.x - b[k].rotation.x, a[k].rotation.y - b[k].rotation.y, a[k].rotation.z - b[k].rotation.z,
+                                                   a[k].rotation.w - b[k].rotation.w, a[k].translation.x - b[k].translation.x, a[k].translation.y - b[k].translation.y,
+                                                   a[k].translation.z - b[k].translation.z, a[k].scale.x - b[k].scale.x, a[k].time - b[k].time};
+                                for (float x : d) maxKeyError = std::max(maxKeyError, std::fabs(x));
+                            }
+                        } else {
+                            std::printf("anm material keys re-encode DIFFER: %s track %s\n", name.c_str(), t.name.c_str());
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    ++animFailed;
+                    std::printf("anm round trip FAILED: %s: %s\n", name.c_str(), e.what());
+                }
+            }
+            std::printf("anm round trip: %zu of %zu animations byte-identical, %zu not read; keys re-encoded identically in %zu of %zu tracks, "
+                        "largest decoded difference in the others %.6f\n",
+                        animIdentical, anims, animFailed, tracksReencoded, tracks, maxKeyError);
+        }
+        // RASA_GLTFEXPORT=<model.geo>[,<anim.anm>...] with RASA_GLTFOUT=<file.gltf>: exports the model (and the animations; none
+        // named = the model's own) with ModelExchange.
+        if (const char* what = envValue("RASA_GLTFEXPORT")) {
+            std::vector<std::string> parts;
+            std::stringstream list(what);
+            for (std::string part; std::getline(list, part, ',');)
+                if (!part.empty()) parts.push_back(part);
+            const char* out = envValue("RASA_GLTFOUT");
+            if (!parts.empty() && out) {
+                std::vector<std::string> anims(parts.begin() + 1, parts.end());
+                if (anims.empty()) anims = modelOwnAnimations(assets, parts[0]);
+                try {
+                    const auto start = std::chrono::steady_clock::now();
+                    const ModelExchangeReport report = exportModelGltf(assets, parts[0], anims, out);
+                    std::printf("gltf export: %s with %zu animation(s) -> %zu files in %.2f s\n", parts[0].c_str(), anims.size(), report.written.size(),
+                                std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
+                    for (const std::string& w : report.warnings) std::printf("gltf export warning: %s\n", w.c_str());
+                } catch (const std::exception& e) {
+                    std::printf("gltf export FAILED: %s\n", e.what());
+                }
+            }
+        }
+        // RASA_TANGENTCHECK=<n>: for the first n shipped pieces with tangent frames (TANGENT0 / TANGENT1), computeTangentFrames from
+        // their positions, normals and UV set 0 against the stored vectors (mean dot product; 1 = same direction, -1 = opposite).
+        if (const char* count = envValue("RASA_TANGENTCHECK")) {
+            const size_t wanted = size_t(std::max(1, std::atoi(count)));
+            size_t pieces = 0;
+            double sumT = 0, sumB = 0, n = 0;
+            size_t flippedB = 0, sameB = 0;
+            for (const std::string& name : assets.namesWithExtension(".geo")) {
+                if (pieces >= wanted) break;
+                tr::GeoModel geo;
+                try { geo = tr::readGeo(assets.read(name)); } catch (const std::exception&) { continue; }
+                for (const tr::GeoPiece& piece : geo.pieces) {
+                    bool hasT = false;
+                    for (const tr::VertexElement& e : piece.layout) hasT = hasT || (e.usage == 6 && e.usageIndex == 0);
+                    if (!hasT || piece.vertices.empty() || pieces >= wanted) continue;
+                    ++pieces;
+                    std::vector<tr::Vec3> p, nn, t, b;
+                    std::vector<tr::Vec2> uv;
+                    for (const tr::GeoVertex& v : piece.vertices) {
+                        p.push_back(v.position);
+                        nn.push_back(v.normal);
+                        uv.push_back(v.uv);
+                    }
+                    computeTangentFrames(p, nn, uv, piece.indices, t, b);
+                    double pt = 0, pb = 0;
+                    for (size_t k = 0; k < piece.vertices.size(); ++k) {
+                        const tr::GeoVertex& v = piece.vertices[k];
+                        auto unit = [](tr::Vec3 a) { const float l = std::sqrt(a.x * a.x + a.y * a.y + a.z * a.z); return l > 0 ? tr::Vec3{a.x / l, a.y / l, a.z / l} : a; };
+                        const tr::Vec3 st = unit(v.tangent), sb = unit(v.binormal);
+                        pt += st.x * t[k].x + st.y * t[k].y + st.z * t[k].z;
+                        pb += sb.x * b[k].x + sb.y * b[k].y + sb.z * b[k].z;
+                    }
+                    pt /= double(piece.vertices.size());
+                    pb /= double(piece.vertices.size());
+                    sumT += pt;
+                    sumB += pb;
+                    n += 1;
+                    if (pb < 0) ++flippedB; else ++sameB;
+                }
+            }
+            std::printf("tangent check: %zu pieces, mean dot tangent %.3f, binormal %.3f (pieces with the binormal mostly opposite: %zu, same: %zu)\n", pieces,
+                        n ? sumT / n : 0.0, n ? sumB / n : 0.0, flippedB, sameB);
+        }
+        // RASA_GLTFIMPORT=<file.gltf|.glb>: imports with ModelExchange (RASA_GLTFSOURCE names the source model for a file without one),
+        // lists the files it would write and compares the model with its source: per piece of the same index, vertex count, the largest
+        // distance from each source vertex to the nearest imported vertex, UVs, normals, skin bones by name; bones; contact points;
+        // and each animation's keys against the source .anm (bind-adjusted where a component was left out).
+        if (const char* importPath = envValue("RASA_GLTFPREVIEW") ? nullptr : envValue("RASA_GLTFIMPORT")) {
+            try {
+                ModelImportOptions options;
+                if (const char* src = envValue("RASA_GLTFSOURCE")) options.source = src;
+                // RASA_GLTFMODELNAME: write the model under this name (e.g. an existing map entity's model, to see a new model in
+                // place); RASA_GLTFPREVIEW=1: the imported files override the archives' for this run (AssetLibrary::setOverride).
+                if (const char* name = envValue("RASA_GLTFMODELNAME")) options.modelName = name;
+                const auto start = std::chrono::steady_clock::now();
+                const ModelImportResult result = importModelGltf(assets, importPath, options);
+                std::printf("gltf import: %zu file(s) in %.2f s\n", result.files.size(),
+                            std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
+                for (const ImportedFile& f : result.files) std::printf("  %s (%zu bytes): %s\n", f.name.c_str(), f.data.size(), f.note.c_str());
+                for (const std::string& w : result.warnings) std::printf("gltf import warning: %s\n", w.c_str());
+                if (const char* dump = envValue("RASA_GLTFIMPORTDIR"))
+                    for (const ImportedFile& f : result.files) {
+                        std::ofstream o(std::filesystem::path(dump) / f.name, std::ios::binary);
+                        o.write(reinterpret_cast<const char*>(f.data.data()), std::streamsize(f.data.size()));
+                    }
+                if (!result.files.empty()) {
+                    const tr::GeoModel built = tr::readGeo(result.files[0].data);
+                    tr::Bytes sourceData;
+                    const std::string sourceName = result.files[0].name;
+                    if (assets.tryRead(sourceName, sourceData)) {
+                        const tr::GeoModel original = tr::readGeo(sourceData);
+                        std::printf("compare: pieces %zu / %zu, bones %zu / %zu, contact points %zu / %zu\n", original.pieces.size(), built.pieces.size(),
+                                    original.bones.size(), built.bones.size(), original.contactPoints.size(), built.contactPoints.size());
+                        size_t sameBones = 0;
+                        for (size_t b = 0; b < std::min(original.bones.size(), built.bones.size()); ++b) {
+                            const tr::GeoBone &x = original.bones[b], &y = built.bones[b];
+                            if (x.name == y.name && x.parent == y.parent && std::memcmp(&x.rotation, &y.rotation, sizeof x.rotation) == 0 &&
+                                std::memcmp(&x.translation, &y.translation, sizeof x.translation) == 0)
+                                ++sameBones;
+                        }
+                        std::printf("compare: %zu bones identical (name, parent, bind)\n", sameBones);
+                        for (size_t k = 0; k < std::min(original.pieces.size(), built.pieces.size()); ++k) {
+                            const tr::GeoPiece &a = original.pieces[k], &b = built.pieces[k];
+                            float worst = 0, worstUv = 0, worstNormal = 0;
+                            size_t skinMismatch = 0;
+                            const bool sameOrder = a.vertices.size() == b.vertices.size();   // RasaEdit's own export keeps the order
+                            for (size_t vi = 0; vi < a.vertices.size(); ++vi) {
+                                const tr::GeoVertex& va = a.vertices[vi];
+                                float best = 1e30f;
+                                const tr::GeoVertex* nearest = sameOrder ? &b.vertices[vi] : nullptr;
+                                if (sameOrder) {
+                                    const float dx = va.position.x - nearest->position.x, dy = va.position.y - nearest->position.y, dz = va.position.z - nearest->position.z;
+                                    best = dx * dx + dy * dy + dz * dz;
+                                }
+                                static const std::vector<tr::GeoVertex> none;
+                                const std::vector<tr::GeoVertex>& candidates = sameOrder ? none : b.vertices;
+                                for (const tr::GeoVertex& vb : candidates) {
+                                    const float dx = va.position.x - vb.position.x, dy = va.position.y - vb.position.y, dz = va.position.z - vb.position.z;
+                                    // Vertices at one position (seams, hard edges) are told apart by their UVs and normals.
+                                    const float nd = 1.0f - (va.normal.x * vb.normal.x + va.normal.y * vb.normal.y + va.normal.z * vb.normal.z);
+                                    const float d = dx * dx + dy * dy + dz * dz + 1e-7f * (nd + std::fabs(va.uv.x - vb.uv.x) + std::fabs(va.uv.y - vb.uv.y));
+                                    if (d < best) { best = d; nearest = &vb; }
+                                }
+                                if (!nearest) continue;
+                                worst = std::max(worst, std::sqrt(std::max(0.0f, best)));
+                                worstUv = std::max(worstUv, std::max(std::fabs(va.uv.x - nearest->uv.x), std::fabs(va.uv.y - nearest->uv.y)));
+                                const float dot = va.normal.x * nearest->normal.x + va.normal.y * nearest->normal.y + va.normal.z * nearest->normal.z;
+                                const float la = std::sqrt(va.normal.x * va.normal.x + va.normal.y * va.normal.y + va.normal.z * va.normal.z);
+                                worstNormal = std::max(worstNormal, la > 0 ? 1.0f - dot / la : 0.0f);
+                                if (a.skinned && b.skinned) {
+                                    const uint32_t ia = tr::blendIndex(va, 0), ib = tr::blendIndex(*nearest, 0);
+                                    const std::string na = ia < a.skinBones.size() ? a.skinBones[ia] : "", nb = ib < b.skinBones.size() ? b.skinBones[ib] : "";
+                                    if (tr::toLowerAscii(na) != tr::toLowerAscii(nb) && tr::blendWeight(va, 0) > 0.6f) {
+                                        if (++skinMismatch <= 2) {
+                                            auto describe = [](const tr::GeoPiece& p, const tr::GeoVertex& v) {
+                                                std::string s;
+                                                for (uint32_t i = 0; i < 3; ++i) {
+                                                    const uint32_t slot = tr::blendIndex(v, i);
+                                                    s += (slot < p.skinBones.size() ? p.skinBones[slot] : "?") + "=" + std::to_string(tr::blendWeight(v, i)) + " ";
+                                                }
+                                                return s;
+                                            };
+                                            std::printf("    skin differs at (%.3f %.3f %.3f): source %s/ imported %s\n", va.position.x, va.position.y, va.position.z,
+                                                        describe(a, va).c_str(), describe(b, *nearest).c_str());
+                                        }
+                                    }
+                                }
+                            }
+                            std::printf("  piece %zu %-28s %-40s verts %zu / %zu, tris %zu / %zu, max dist %.5f, uv %.5f, normal 1-cos %.5f, main bone differs %zu\n", k,
+                                        a.pieceName.c_str(), a.effectName.c_str(), a.vertices.size(), b.vertices.size(), a.indices.size() / 3, b.indices.size() / 3,
+                                        worst, worstUv, worstNormal, skinMismatch);
+                        }
+                        float worstCp = 0;
+                        for (const tr::GeoContactPoint& ca : original.contactPoints)
+                            for (const tr::GeoContactPoint& cb : built.contactPoints)
+                                if (ca.id == cb.id) {
+                                    const float dx = ca.position.x - cb.position.x, dy = ca.position.y - cb.position.y, dz = ca.position.z - cb.position.z;
+                                    worstCp = std::max(worstCp, std::sqrt(dx * dx + dy * dy + dz * dz));
+                                }
+                        std::printf("compare: contact points largest position difference %.5f m\n", worstCp);
+                        // Collision volumes per bone: kind, counts, the largest distance from a source point to the nearest built one.
+                        {
+                            const tr::GeoFile fa = tr::readGeoFile(sourceData), fb = tr::readGeoFile(result.files[0].data);
+                            size_t withA = 0, withB = 0, same = 0;
+                            float worst = 0, worstRadius = 0;
+                            for (const tr::GeoFileBone& ba : fa.bones) {
+                                if (!ba.boundingVolume.empty()) ++withA;
+                                for (const tr::GeoFileBone& bb : fb.bones) {
+                                    if (tr::toLowerAscii(ba.name) != tr::toLowerAscii(bb.name)) continue;
+                                    if (ba.boundingVolume.empty() || bb.boundingVolume.empty()) continue;
+                                    if (ba.boundingVolume == bb.boundingVolume) ++same;
+                                    const auto va = tr::readBoneVolumes(ba.boundingVolume), vb = tr::readBoneVolumes(bb.boundingVolume);
+                                    if (va.size() != vb.size() || va.empty()) continue;
+                                    worstRadius = std::max(worstRadius, std::fabs(va[0].radius - vb[0].radius));
+                                    if (va[0].kind != vb[0].kind) std::printf("  collision of %s changed kind %s -> %s\n", ba.name.c_str(),
+                                                                              tr::tagName(va[0].kind).c_str(), tr::tagName(vb[0].kind).c_str());
+                                    for (const tr::Vec3& p : va[0].vertices) {
+                                        float best = 1e30f;
+                                        for (const tr::Vec3& q : vb[0].vertices)
+                                            best = std::min(best, (p.x - q.x) * (p.x - q.x) + (p.y - q.y) * (p.y - q.y) + (p.z - q.z) * (p.z - q.z));
+                                        worst = std::max(worst, std::sqrt(best));
+                                    }
+                                    const float dc = std::fabs(va[0].centre.x - vb[0].centre.x) + std::fabs(va[0].centre.y - vb[0].centre.y) +
+                                                     std::fabs(va[0].centre.z - vb[0].centre.z) + std::fabs(va[0].halfExtents.x - vb[0].halfExtents.x) +
+                                                     std::fabs(va[0].halfExtents.y - vb[0].halfExtents.y) + std::fabs(va[0].halfExtents.z - vb[0].halfExtents.z);
+                                    worst = std::max(worst, dc);
+                                    if (va[0].kind == tr::fourcc("BVWS"))
+                                        std::printf("  collision %s: surface %zu / %zu vertices, %zu / %zu triangles\n", ba.name.c_str(), va[0].vertices.size(),
+                                                    vb[0].vertices.size(), va[0].indices.size() / 3, vb[0].indices.size() / 3);
+                                }
+                            }
+                            for (const tr::GeoFileBone& bb : fb.bones) withB += bb.boundingVolume.empty() ? 0 : 1;
+                            std::printf("compare: collision on %zu / %zu bones, %zu byte-identical, largest point difference %.5f m, radius %.5f\n", withA, withB, same,
+                                        worst, worstRadius);
+                        }
+                    }
+                    for (size_t f = 1; f < result.files.size(); ++f) {
+                        if (tr::toLowerAscii(result.files[f].name).find(".anm") == std::string::npos) continue;
+                        tr::Bytes origAnim;
+                        if (!assets.tryRead(result.files[f].name, origAnim)) continue;
+                        const tr::Animation a = tr::readAnimation(origAnim), b = tr::readAnimation(result.files[f].data);
+                        float worstT = 0, worstR = 0;
+                        for (const tr::AnimTrack& ta : a.tracks) {
+                            const tr::AnimTrack* tb = tr::findTrack(b, ta.name);
+                            if (!tb) continue;
+                            const tr::GeoBone* bone = nullptr;
+                            for (const tr::GeoBone& x : built.bones)
+                                if (tr::toLowerAscii(x.name) == tr::toLowerAscii(ta.name)) bone = &x;
+                            for (const tr::AnimKey& ka : ta.keys) {
+                                const tr::AnimKey kb = tr::sampleTrack(*tb, ka.time);
+                                const tr::Vec3 tA = ta.hasTranslation ? ka.translation : (bone ? bone->translation : ka.translation);
+                                const tr::Vec3 tB = tb->hasTranslation ? kb.translation : (bone ? bone->translation : kb.translation);
+                                const tr::Quat rA = ta.hasRotation ? ka.rotation : (bone ? bone->rotation : ka.rotation);
+                                const tr::Quat rB = tb->hasRotation ? kb.rotation : (bone ? bone->rotation : kb.rotation);
+                                worstT = std::max(worstT, std::max(std::fabs(tA.x - tB.x), std::max(std::fabs(tA.y - tB.y), std::fabs(tA.z - tB.z))));
+                                const float dot = std::min(1.0f, std::fabs(rA.x * rB.x + rA.y * rB.y + rA.z * rB.z + rA.w * rB.w));
+                                worstR = std::max(worstR, 2.0f * std::acos(dot) * 57.29578f);
+                            }
+                        }
+                        std::printf("compare animation %s: tracks %zu / %zu, material tracks %zu / %zu, duration %.3f / %.3f s, largest translation %.5f, rotation %.3f deg\n",
+                                    result.files[f].name.c_str(), a.tracks.size(), b.tracks.size(), a.materialTracks.size(), b.materialTracks.size(), a.duration,
+                                    b.duration, worstT, worstR);
+                    }
+                }
+            } catch (const std::exception& e) {
+                std::printf("gltf import FAILED: %s\n", e.what());
+            }
+        }
+        // RASA_IMAGETEST=<n>: the first n shipped DXT1 / DXT3 / DXT5 / uncompressed .dds textures: PNG written and read back must
+        // be identical; re-encoded as DDS in their own format, decoded again, the error against the original's decode (PSNR).
+        if (const char* count = envValue("RASA_IMAGETEST")) {
+            const size_t wanted = size_t(std::max(1, std::atoi(count)));
+            size_t tested = 0, pngSame = 0;
+            double worst = 1e9, total = 0;
+            std::map<std::string, size_t> formats;
+            for (const std::string& name : assets.namesWithExtension(".dds")) {
+                if (tested >= wanted) break;
+                try {
+                    const tr::Bytes dds = assets.read(name);
+                    const tr::DdsHeader header = tr::readDdsHeader(dds);
+                    if (header.depth > 1 || header.width < 4 || header.height < 4) continue;
+                    const tr::RgbaImage image = tr::ddsImage(dds);
+                    const tr::RgbaImage png = tr::readPng(tr::writePng(image));
+                    bool same = png.width == image.width && png.height == image.height;
+                    for (size_t k = 0; same && k < image.pixels.size(); ++k)
+                        same = std::memcmp(&png.pixels[k], &image.pixels[k], 4) == 0;
+                    if (same) ++pngSame;
+                    const tr::DdsEncoding encoding = tr::ddsEncodingLike(header);
+                    const tr::RgbaImage again = tr::ddsImage(tr::encodeDds(image, encoding));
+                    double sum = 0;
+                    for (size_t k = 0; k < image.pixels.size(); ++k) {
+                        const int d[4] = {image.pixels[k].red - again.pixels[k].red, image.pixels[k].green - again.pixels[k].green,
+                                          image.pixels[k].blue - again.pixels[k].blue, image.pixels[k].alpha - again.pixels[k].alpha};
+                        for (int x : d) sum += double(x) * x;
+                    }
+                    const double mse = sum / (4.0 * double(image.pixels.size()));
+                    const double psnr = mse <= 0 ? 99.0 : 10 * std::log10(255.0 * 255.0 / mse);
+                    worst = std::min(worst, psnr);
+                    total += psnr;
+                    ++formats[tr::ddsEncodingName(encoding)];
+                    ++tested;
+                    if (psnr < 30) std::printf("image test: %s (%s %ux%u) re-encoded PSNR %.1f dB\n", name.c_str(), tr::ddsEncodingName(encoding),
+                                               header.width, header.height, psnr);
+                } catch (const std::exception& e) {
+                    std::printf("image test: %s: %s\n", name.c_str(), e.what());
+                }
+            }
+            std::printf("image test: %zu textures, PNG identical in %zu; DDS re-encode PSNR mean %.1f dB, worst %.1f dB (", tested, pngSame,
+                        tested ? total / double(tested) : 0.0, worst);
+            for (const auto& f : formats) std::printf(" %s %zu", f.first.c_str(), f.second);
+            std::printf(" )\n");
         }
         // RASA_GEOSCAN=1: every model's pieces whose vertex colours are all zero (colour and alpha), with names.
         if (envValue("RASA_GEOSCAN")) {
@@ -1270,6 +1689,38 @@ int main(int argc, char** argv) {
         if (const char* only = envValue("RASA_ONLY")) scene.onlyEntity = std::atoi(only);   // draw one map entity alone
         if (const char* range = envValue("RASA_ENTITYRANGE")) std::sscanf(range, "%d,%d", &scene.entityFirst, &scene.entityLast);   // bisecting
         if (const char* sel = envValue("RASA_SELECT")) highlighted = Selection{SelectionKind::MapEntity, size_t(std::atoi(sel))};
+        // RASA_SURFACE=1: where Add would put a new object - the view centre's ray on the ground alone and on the nearest surface.
+        if (envValue("RASA_SURFACE")) {
+            tr::Vec3 origin, direction, ground, surface;
+            scene.viewRay(0, 0, origin, direction);
+            const bool g = scene.groundPoint(origin, direction, origin.y - 10.0f, ground);
+            const bool s = scene.surfacePoint(origin, direction, origin.y - 10.0f, surface);
+            std::printf("view centre: ground %s (%.2f %.2f %.2f), surface %s (%.2f %.2f %.2f)\n", g ? "hit" : "none", ground.x, ground.y, ground.z,
+                        s ? "hit" : "none", surface.x, surface.y, surface.z);
+        }
+        // RASA_SNAPAT=x,y,z[;x,y,z...]: what Snap to ground gives there (first surface below y + 2 m) and the raw terrain height.
+        if (const char* spec = envValue("RASA_SNAPAT")) {
+            for (const char* p = spec; p && *p;) {
+                float x = 0, y = 0, z = 0;
+                if (std::sscanf(p, "%f,%f,%f", &x, &y, &z) != 3) break;
+                float terrain = 0, solid = 0;
+                const bool hasTerrain = map.hasTerrain && map.terrain.heightAtWorld(x, z, terrain);
+                const bool isSolid = scene.solidTerrainHeight(x, z, solid);
+                std::printf("snap at (%.2f %.2f %.2f): %.2f   terrain %s%.2f%s\n", x, y, z, scene.surfaceHeightBelow(x, z, y + 2.0f, y),
+                            hasTerrain ? "" : "none ", terrain, hasTerrain && !isSolid ? " (hole)" : "");
+                p = std::strchr(p, ';');
+                if (p) ++p;
+            }
+        }
+        // RASA_GARRISONS=<0|1|2>: the garrison shown at every control point (SceneView::garrisonViews: holder / Bane / AFS);
+        // RASA_SELECTPOINT=<control point id>: draw with that point selected (its link lines shown).
+        if (const char* g = envValue("RASA_GARRISONS"))
+            for (const PlacedObject& o : content.objects)
+                if (o.kind == ObjectKind::ControlPoint) scene.garrisonViews[o.id] = std::atoi(g);
+        if (const char* point = envValue("RASA_SELECTPOINT"))
+            for (size_t k = 0; k < content.objects.size(); ++k)
+                if (content.objects[k].kind == ObjectKind::ControlPoint && content.objects[k].id == std::atoll(point))
+                    highlighted = Selection{SelectionKind::Object, k};
         // RASA_LIGHTMARKERS=1: the map's lights as marker boxes; RASA_SELECTLIGHT=<light index> highlights one (its reach drawn)
         // and checks that a click on its box's top near edge picks it; RASA_SELECTLIGHT=all checks every light that way from a
         // camera 5 m away (other geometry may be in front - use RASA_NOENTITIES / RASA_NOTERRAIN) and restores the camera.

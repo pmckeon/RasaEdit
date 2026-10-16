@@ -3,7 +3,7 @@
 // Dropdowns for values that name something: a row of a table (creatures, item templates, maps, NPC packages, ...), an entry of the
 // client's data (entity classes, texts, audio sets, constants) or an enum. The editor's rule: such a value is picked by its name,
 // never typed as a bare number. The dropdown is searchable (name or id) and lists long tables with a clipper; a value that is not in
-// its list stays as it is, shown as "(not in the list)" in warning colour.
+// its list stays as it is, shown as "(unknown)" in warning colour.
 
 #include <cstdint>
 #include <functional>

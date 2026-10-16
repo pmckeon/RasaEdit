@@ -1295,6 +1295,17 @@ std::string GameData::uiText(const std::string& name, int32_t gender) {
     return line && py::isString(line) ? py::asString(line) : "";
 }
 
+bool GameData::uiTextExists(const std::string& name, int32_t gender, std::string* text) {
+    const int64_t index = py::asInt(py::dictGet(global("generated.client.uielement", "bystring"), name), 0);
+    if (index == 0) return false;
+    const py::Object* lookup = global("generated.client.language.english.uielementlanguage", "lookup");
+    const py::Object* lines = py::dictGetTuple(lookup, {index, gender});
+    const py::Object* line = py::length(lines) > 0 ? py::item(lines, 0) : py::dictGet(lookup, index);
+    if (!line || !py::isString(line)) return false;
+    if (text) *text = py::asString(line);
+    return true;
+}
+
 std::string GameData::missionText(int32_t textId, int32_t gender) {
     const py::Object* lines = py::dictGetTuple(global("generated.client.language.english.missiontextlanguage", "lookup"), {textId, gender});
     const py::Object* line = py::length(lines) > 0 ? py::item(lines, 0) : nullptr;

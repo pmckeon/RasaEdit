@@ -753,8 +753,8 @@ void UiCanvas::drawColour(const tr::XmlNode& widget, const Rect& rect, const Rec
 std::string UiCanvas::text(const tr::XmlNode& widget) {
     const std::string id = widget.attribute("textId");
     if (id.empty() || !game_) return "";
-    const std::string s = game_->uiText(id);
-    if (s.empty()) missingTextIds_.insert(id);
+    std::string s;
+    if (!game_->uiTextExists(id, 1, &s)) missingTextIds_.insert(id);   // an id whose text is "" (ID_DEFAULT_TEXT) is not missing
     return s;
 }
 
