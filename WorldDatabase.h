@@ -440,6 +440,9 @@ public:
     bool saveTables(const std::vector<std::pair<const DbTable*, const DbTable*>>& tables, SaveSummary& summary, std::string& error);
     const CreatureStat* creatureStat(int32_t creatureId) const;                     // nullptr if the creature has no row
     const ItemTemplateInfo* itemTemplate(int32_t templateId) const;                 // nullptr if unknown
+    const std::unordered_map<int32_t, ItemTemplateInfo>& itemTemplates() const { return itemTemplates_; }
+    // The NPC packages creatures use (npc_package, as loaded): package id -> the first comment given for it.
+    std::vector<std::pair<int32_t, std::string>> npcPackageList() const;
     // The creatures a map's spawn pools can spawn (slots with a creature and max_count > 0), ascending - the set Rasa.NET's
     // ordinary loot coverage check walks for a map that requires loot profiles (OrdinaryLootCoverage: spawn pools).
     std::vector<int32_t> spawnableCreatures(int32_t mapContextId) const;

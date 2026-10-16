@@ -1039,6 +1039,32 @@ std::vector<std::pair<int32_t, std::string>> GameData::moduleConstants(const std
     return out;
 }
 
+std::vector<std::pair<int32_t, std::string>> GameData::lookupNames(const std::string& moduleName, const std::string& variable, int32_t gender,
+                                                                  size_t nameIndex) {
+    std::vector<std::pair<int32_t, std::string>> out;
+    const py::Object* dict = global(moduleName, variable);
+    if (!dict || dict->kind != py::Kind::Dict) return out;
+    for (const auto& entry : dict->entries) {
+        const py::Object* key = entry.first.get();
+        int64_t id = 0;
+        if (key->kind == py::Kind::Int) {
+            id = key->integer;
+        } else if (key->kind == py::Kind::Tuple && py::length(key) == 2) {
+            if (py::asInt(py::item(key, 1)) != gender) continue;              // (id, gender) keys: the wanted gender only
+            id = py::asInt(py::item(key, 0));
+        } else {
+            continue;
+        }
+        // The value itself when a string; else its element nameIndex, or that element's first line when it is a list of lines.
+        const py::Object* v = entry.second.get();
+        if (!py::isString(v)) v = py::item(v, nameIndex);
+        if (v && !py::isString(v)) v = py::item(v, 0);
+        out.push_back({int32_t(id), v && py::isString(v) ? py::asString(v) : std::string()});
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
 std::string GameData::effectTooltip(int32_t effectId) {
     const py::Object* tip = py::dictGet(global("generated.client.gameeffectdata", "tooltip"), effectId);
     if (!tip || py::isNone(tip)) return "";

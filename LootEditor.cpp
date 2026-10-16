@@ -1,6 +1,7 @@
 #include "LootEditor.h"
 
 #include "EditorContext.h"
+#include "Lookups.h"
 
 #include "imgui.h"
 
@@ -482,8 +483,8 @@ void LootEditor::drawProfile(EditorContext& ctx, const WorldDatabase& database, 
             }
             if (removeItem >= 0) it.rows.erase(it.rows.begin() + removeItem);
             if (writable) {
-                ImGui::SetNextItemWidth(w * 1.5f);
-                ImGui::InputInt("##newitem", &newItemTemplate_, 0);
+                ImGui::SetNextItemWidth(w * 3.0f);
+                lookupCombo("##newitem", newItemTemplate_, lookup::itemTemplate(ctx, database, "(choose an item)"));
                 ImGui::SameLine();
                 const ItemTemplateInfo* candidate = database.itemTemplate(newItemTemplate_);
                 bool already = false;
@@ -498,8 +499,6 @@ void LootEditor::drawProfile(EditorContext& ctx, const WorldDatabase& database, 
                     it.rows.push_back(row);
                 }
                 if (!candidate || already) ImGui::EndDisabled();
-                ImGui::SameLine();
-                ImGui::TextDisabled("%s", candidate ? itemLabel(ctx, database, newItemTemplate_).c_str() : "(enter an itemtemplate id)");
                 if (ImGui::SmallButton("Remove group")) removeGroup = groupKey;
             }
             ImGui::TreePop();

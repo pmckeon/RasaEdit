@@ -1,6 +1,7 @@
 #include "RecipeEditor.h"
 
 #include "EditorContext.h"
+#include "Lookups.h"
 #include "gamedata.h"
 
 #include "imgui.h"
@@ -267,9 +268,11 @@ void RecipeEditor::draw(EditorContext& ctx, const WorldDatabase& database, bool 
     ImGui::Text("Schematic %lld: %s", static_cast<long long>(selected_), itemLabel(ctx, database, int32_t(selected_)).c_str());
     intColumn("Energy cost", r, rt, "energy_cost", 0, INT32_MAX, 140, "Credits charged when the job is started (EnergyUnitCost).");
     intColumn("Seconds", r, rt, "kraftwerks_seconds", 0, INT32_MAX, 140, "How long the station works on it (KraftwerksTimeSeconds).");
-    intColumn("Result template", r, rt, "result_template_id", 0, INT32_MAX, 140);
-    ImGui::SameLine();
-    ImGui::TextDisabled("%s", itemLabel(ctx, database, int32_t(intAt(r, rt, "result_template_id"))).c_str());
+    {
+        int64_t v = intAt(r, rt, "result_template_id");
+        ImGui::SetNextItemWidth(320);
+        if (lookupCombo("Result template", v, lookup::itemTemplate(ctx, database))) setInt(r, rt, "result_template_id", v);
+    }
     intColumn("Result amount", r, rt, "result_amount", 1, INT32_MAX, 140);
     intColumn("Minimum level", r, rt, "min_level", 0, 50, 140, "MinimumPlayerLevel.");
     ImGui::SeparatorText("Inputs (recipe_input)");
@@ -289,8 +292,8 @@ void RecipeEditor::draw(EditorContext& ctx, const WorldDatabase& database, bool 
     }
     if (remove >= 0) in.rows.erase(in.rows.begin() + remove);
     if (writable) {
-        ImGui::SetNextItemWidth(120);
-        ImGui::InputInt("##newinput", &newInputClass_, 0);
+        ImGui::SetNextItemWidth(260);
+        lookupCombo("##newinput", newInputClass_, lookup::entityClass(ctx, "(choose a class)"));
         ImGui::SameLine();
         ImGui::BeginDisabled(newInputClass_ <= 0 || !ctx.classInfo(newInputClass_).known);
         if (ImGui::Button("Add input class")) {

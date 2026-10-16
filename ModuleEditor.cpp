@@ -1,6 +1,7 @@
 #include "ModuleEditor.h"
 
 #include "EditorContext.h"
+#include "Lookups.h"
 
 #include "imgui.h"
 
@@ -49,6 +50,16 @@ void replaceAll(std::string& s, const std::string& from, const std::string& to) 
     for (size_t p = s.find(from); p != std::string::npos; p = s.find(from, p + to.size())) s.replace(p, from.size(), to);
 }
 
+// A column that names something, picked by name (Lookups.h); true when changed.
+bool lookupColumn(const char* label, std::vector<DbValue>& row, const DbTable& t, const char* column, const LookupSource& source, float width,
+                  const char* tooltip = nullptr) {
+    int64_t v = row[size_t(t.column(column))].asInt();
+    ImGui::SetNextItemWidth(width);
+    const bool changed = lookupCombo(label, v, source);
+    if (tooltip) ImGui::SetItemTooltip("%s", tooltip);
+    if (changed) row[size_t(t.column(column))] = DbValue::integer(v);
+    return changed;
+}
 // An integer column as an input; true when changed.
 bool intColumn(const char* label, std::vector<DbValue>& row, const DbTable& t, const char* column, int64_t minimum, int64_t maximum, float width = 140.0f,
                const char* tooltip = nullptr) {
@@ -377,37 +388,25 @@ void ModuleEditor::drawModule(EditorContext& ctx, const WorldDatabase& database,
         }
         ImGui::SetItemTooltip("The item classes it goes into (modifiable_class): 212 armor, 1212 weapons, 1273 tools, 1274 only salvaged, 0 none.");
     }
-    intColumn("Item template", row, t, "item_template_id", 0, INT32_MAX, 140, "ModuleItemTemplateId: the module as an item in a pack (what an extraction makes); 0 none.");
-    {
-        const int32_t templ = int32_t(intAt(row, t, "item_template_id"));
-        if (templ > 0) {
-            const ItemTemplateInfo* info = database.itemTemplate(templ);
-            std::string name;
-            if (info && ctx.gameData) {
-                try { name = ctx.gameData->itemName(templ, info->classId); } catch (const std::exception&) {}
-            }
-            ImGui::SameLine();
-            ImGui::TextDisabled("%s", info ? name.c_str() : "(no such item template)");
-        }
-    }
-    intColumn("Item class", row, t, "item_class_id", 0, INT32_MAX, 140, "That item's entity class; 0 none.");
-    if (intAt(row, t, "item_class_id") > 0) {
-        ImGui::SameLine();
-        ImGui::TextDisabled("%s", ctx.classInfo(int32_t(intAt(row, t, "item_class_id"))).name.c_str());
-    }
+    lookupColumn("Item template", row, t, "item_template_id", lookup::itemTemplate(ctx, database, "(none)"), 320,
+                 "ModuleItemTemplateId: the module as an item in a pack (what an extraction makes).");
+    lookupColumn("Item class", row, t, "item_class_id", lookup::entityClass(ctx, "(none)"), 320, "That item's entity class.");
     intColumn("Extract cost", row, t, "extract_cost", 0, INT32_MAX, 140, "MimeogelCostToExtract; 0: it cannot be taken out again.");
     intColumn("Integrate cost", row, t, "integrate_cost", 0, INT32_MAX, 140, "MimeogelCostToIntegrate, before the client's formula scales it.");
     intColumn("Salvage gain", row, t, "salvage_gain", 0, INT32_MAX, 140, "MimeogelGainFromSalvage.");
     intColumn("Upgrade cost", row, t, "upgrade_cost", 0, INT32_MAX, 140, "MimeogelCostToUpgrade; 0: it cannot be upgraded.");
-    intColumn("Upgrade to", row, t, "upgrade_module_id", 0, INT64_MAX, 140, "UpgradeModuleClassId: the module an upgrade makes of this one; 0 none.");
     {
-        const int64_t upgrade = intAt(row, t, "upgrade_module_id");
-        if (upgrade > 0) {
-            const int u = moduleRow(upgrade);
-            ImGui::SameLine();
-            if (u >= 0) ImGui::TextDisabled("%s", at(t.rows[size_t(u)], t, "comment").t.c_str());
-            else ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "(no such module)");
-        }
+        // The modules of this table (as edited), by comment.
+        LookupSource modules;
+        modules.none = "(none)";
+        modules.name = [this](int64_t id) -> std::string {
+            const int u = moduleRow(id);
+            return u < 0 ? std::string() : at(classes_.edited.rows[size_t(u)], classes_.edited, "comment").t;
+        };
+        modules.fill = [this](LookupList& out) {
+            for (const auto& r : classes_.edited.rows) out.push_back(LookupChoice{intAt(r, classes_.edited, "id"), at(r, classes_.edited, "comment").t});
+        };
+        lookupColumn("Upgrade to", row, t, "upgrade_module_id", modules, 320, "UpgradeModuleClassId: the module an upgrade makes of this one.");
     }
 
     // Effects.
@@ -530,8 +529,8 @@ void ModuleEditor::drawModule(EditorContext& ctx, const WorldDatabase& database,
     if (removeItem >= 0) it.rows.erase(it.rows.begin() + removeItem);
     if (count == 0) ImGui::TextDisabled("None.");
     if (writable) {
-        ImGui::SetNextItemWidth(120);
-        ImGui::InputInt("##newtemplate", &newTemplate_, 0);
+        ImGui::SetNextItemWidth(320);
+        lookupCombo("##newtemplate", newTemplate_, lookup::itemTemplate(ctx, database, "(choose an item)"));
         ImGui::SameLine();
         bool taken = false;
         for (const auto& ir : it.rows) taken = taken || intAt(ir, it, "id") == newTemplate_;
@@ -560,8 +559,8 @@ void ModuleEditor::drawModifiable(EditorContext& ctx, bool writable) {
     ImGui::InputTextWithHint("##classfilter", "filter (id or class name)", classFilter_, sizeof classFilter_);
     if (writable) {
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(100);
-        ImGui::InputInt("##newclass", &newClass_, 0);
+        ImGui::SetNextItemWidth(260);
+        lookupCombo("##newclass", newClass_, lookup::entityClass(ctx, "(choose a class)"));
         ImGui::SameLine();
         ImGui::SetNextItemWidth(110);
         static const int32_t sets[] = {212, 1212, 1273};

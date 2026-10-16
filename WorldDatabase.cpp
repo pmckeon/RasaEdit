@@ -573,6 +573,15 @@ std::vector<int32_t> WorldDatabase::spawnableCreatures(int32_t mapContextId) con
     return std::vector<int32_t>(ids.begin(), ids.end());
 }
 
+std::vector<std::pair<int32_t, std::string>> WorldDatabase::npcPackageList() const {
+    std::map<int32_t, std::string> packages;
+    for (const auto& entry : npcPackages_) {
+        auto& comment = packages[entry.second.first];
+        if (comment.empty()) comment = entry.second.second;
+    }
+    return std::vector<std::pair<int32_t, std::string>>(packages.begin(), packages.end());
+}
+
 const ItemTemplateInfo* WorldDatabase::itemTemplate(int32_t templateId) const {
     const auto it = itemTemplates_.find(templateId);
     return it == itemTemplates_.end() ? nullptr : &it->second;

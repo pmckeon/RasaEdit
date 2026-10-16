@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <set>
 
 // ------------------------------------------------------------------------------------------
@@ -39,6 +40,8 @@ namespace {
 
 // Rasa.NET enums (Rasa.DBL/Structures/World/Mission*Entry.cs, Rasa.Missions/Definitions, Rasa.Data).
 const EnumList kRequirement = {{1, "required"}, {2, "optional"}};
+// Rasa.Missions/Definitions/MissionState.cs (prerequisite required_mission_state).
+const lookup::EnumValues kMissionState = {{0, "active"}, {1, "success"}, {2, "failed"}, {3, "not assigned"}, {4, "completed"}};
 const EnumList kAbandonment = {{1, "allowed"}, {2, "prohibited"}};
 const EnumList kObjectiveState = {{0, "not assigned"}, {1, "incomplete"}, {2, "completed"}, {3, "failed"}, {4, "inactive"}};
 const EnumList kChannel = {{1, "NPC"}, {2, "radio"}, {3, "mixed (NPC + radio)"}};
@@ -199,6 +202,28 @@ void MissionEditor::load(const WorldDatabase& database) {
     savedValidation_ = validateTables(false);
     validation_ = savedValidation_;
     validationDirty_ = false;
+}
+
+LookupSource MissionEditor::missionSource(EditorContext& ctx) {
+    LookupSource s;
+    s.name = [this, &ctx](int64_t id) -> std::string {
+        if (tables_.empty()) return "";
+        const DbTable& d = tables_.front().edited;
+        for (const auto& r : d.rows)
+            if (r[size_t(d.column("mission_id"))].asInt() == id) return missionLabel(ctx, r);
+        return "";
+    };
+    s.fill = [this, &ctx](LookupList& out) {
+        if (tables_.empty()) return;
+        const DbTable& d = tables_.front().edited;
+        std::set<int64_t> seen;
+        for (const auto& r : d.rows) {
+            const int64_t id = r[size_t(d.column("mission_id"))].asInt();
+            if (seen.insert(id).second) out.push_back(LookupChoice{id, missionLabel(ctx, r)});
+        }
+        std::sort(out.begin(), out.end(), [](const LookupChoice& a, const LookupChoice& b) { return a.id < b.id; });
+    };
+    return s;
 }
 
 void MissionEditor::selectMission(int64_t missionId) {
@@ -518,59 +543,54 @@ bool MissionEditor::drawRowFields(EditorContext& ctx, const WorldDatabase& datab
             }
             default: {
                 int64_t i = v.asInt();
-                ImGui::SetNextItemWidth(width);
-                if (ImGui::InputScalar(f.label, ImGuiDataType_S64, &i)) { v = DbValue::integer(i); changed = true; }
-                // What the number refers to.
-                std::string hint;
-                // An id of another row of this mission (objective, reward, spawn group, scenario, area, indicator, spawn, or a mission):
-                // a picker of the rows it can name, and a warning when it names none.
+                // A value that names something is picked by name (Lookups.h): another row of this mission (objective, reward, spawn
+                // group, scenario, area, indicator, spawn, or a mission), a database row, or an entry of the client's data.
+                LookupSource source;
+                bool named = true;
                 if (const MissionReference ref = missionReference(f.column); ref.table) {
-                    std::vector<std::pair<int64_t, std::string>> choices = referenceChoices(ctx, d, row, ref);
-                    ImGui::SameLine();
-                    if (ImGui::BeginCombo("##pick", "", ImGuiComboFlags_NoPreview | ImGuiComboFlags_HeightLarge)) {
-                        for (const auto& choice : choices)
-                            if (ImGui::Selectable(choice.second.c_str(), choice.first == i)) {
-                                v = DbValue::integer(choice.first);
-                                i = choice.first;
-                                changed = true;
-                            }
-                        if (choices.empty()) ImGui::TextDisabled("(none in this mission)");
-                        ImGui::EndCombo();
-                    }
-                    ImGui::SetItemTooltip("Pick from this mission's %s", ref.what);
-                    bool found = false;
-                    for (const auto& choice : choices)
-                        if (choice.first == i) {
-                            found = true;
-                            hint = choice.second;
-                        }
-                    if (!found) {
-                        ImGui::SameLine();
-                        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "(no such %s)", ref.what);
-                    }
-                }
-                if (f.kind == FieldKind::Creature) {
-                    const Creature* cr = database.creature(int32_t(i));
-                    hint = cr ? cr->comment : i ? "(not in creature)" : "";
+                    auto choices = std::make_shared<std::vector<std::pair<int64_t, std::string>>>(referenceChoices(ctx, d, row, ref));
+                    source.name = [choices](int64_t id) {
+                        for (const auto& c : *choices)
+                            if (c.first == id) return c.second;
+                        return std::string();
+                    };
+                    source.fill = [choices](LookupList& out) {
+                        for (const auto& c : *choices) out.push_back(LookupChoice{c.first, c.second});
+                    };
+                } else if (f.kind == FieldKind::Creature) {
+                    source = lookup::creature(ctx, database);
                 } else if (f.kind == FieldKind::ItemTemplate) {
-                    const ItemTemplateInfo* info = database.itemTemplate(int32_t(i));
-                    hint = info ? ctx.classInfo(info->classId).name : "(not in itemtemplate)";
+                    source = lookup::itemTemplate(ctx, database);
                 } else if (f.kind == FieldKind::EntityClass) {
-                    hint = ctx.classInfo(int32_t(i)).name;
-                } else if (f.kind == FieldKind::MissionText && ctx.gameData && i > 0) {
-                    try { hint = ctx.gameData->missionText(int32_t(i)); } catch (const std::exception&) {}
-                    if (hint.empty()) hint = "(not in missiontextlanguage)";
+                    source = lookup::entityClass(ctx);
+                } else if (f.kind == FieldKind::MissionText) {
+                    source = lookup::missionText(ctx, "(none)");
                 } else if (f.kind == FieldKind::MapContext) {
-                    for (const MapInfo& m : database.maps())
-                        if (m.mapContextId == i) hint = m.name;
-                } else if (f.kind == FieldKind::Enum) {
-                    hint = enumName(f.values, i);
+                    source = lookup::map(database);
+                } else if (std::strcmp(f.column, "npc_package_id") == 0) {
+                    source = lookup::npcPackage(database);
+                    source.allowOther = true;
+                } else if (std::strcmp(f.column, "tutorial_id") == 0) {
+                    source = lookup::constants(ctx, "generated.client.tutorialdata");      // Rasa.Game TutorialId = the client's ids
+                } else if (std::strcmp(f.column, "skill_id") == 0) {
+                    source = lookup::constants(ctx, "generated.client.skilldata");         // Rasa.Game SkillId = skilldata's ids
+                } else if (std::strcmp(f.column, "qualification_key") == 0) {
+                    source = lookup::values(lookup::kQualificationKeys);
+                } else if (std::strcmp(f.column, "audio_set_id") == 0) {
+                    source = lookup::audioSet(ctx);
+                } else if (std::strcmp(f.column, "category_id") == 0) {
+                    source = lookup::missionCategory(ctx, "(none)");
+                } else if (std::strcmp(f.column, "required_mission_state") == 0) {
+                    source = lookup::values(kMissionState);
+                } else {
+                    named = false;
                 }
-                if (!hint.empty()) {
-                    ImGui::SameLine();
-                    if (hint.size() > 70) ImGui::TextDisabled("%s...", hint.substr(0, 70).c_str());
-                    else ImGui::TextDisabled("%s", hint.c_str());
-                    if (hint.size() > 70) ImGui::SetItemTooltip("%s", hint.c_str());
+                if (named) {
+                    ImGui::SetNextItemWidth(width * 1.6f);
+                    if (lookupCombo(f.label, i, source)) { v = DbValue::integer(i); changed = true; }
+                } else {
+                    ImGui::SetNextItemWidth(width);
+                    if (ImGui::InputScalar(f.label, ImGuiDataType_S64, &i)) { v = DbValue::integer(i); changed = true; }
                 }
                 break;
             }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Lookups.h"
 #include "MissionValidation.h"
 #include "WorldDatabase.h"
 
@@ -31,6 +32,8 @@ public:
     const MissionValidationResult& validation();
     const MissionValidationResult& savedValidation() const { return savedValidation_; }
     void selectMission(int64_t missionId);            // its enabled revision, else its first
+    // Missions by id (mission_content_definition as edited), labelled with their client name: for fields elsewhere that name one.
+    LookupSource missionSource(EditorContext& ctx);
     struct MissionReference {
         const char* table = nullptr;                  // the table the column names a row of (nullptr: not a reference)
         const char* key = nullptr;                    // that row's own key column

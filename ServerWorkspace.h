@@ -117,6 +117,9 @@ private:
     void insertPatrolStep(int64_t poolId, int32_t afterStep, const tr::Vec3& position);
     void sortPatrolSteps(int64_t selectPool, int32_t selectStep);
     bool creatureCombo(const char* id, int32_t& creatureId, bool allowNone);
+    // Every teleporter row of the database (all maps): id -> "description - map (type)", read once per database / save.
+    const LookupList& allTeleporters();
+    LookupList allTeleporters_;
     // Creatures panel: creature definitions (creature, creature_stat, creature_appearance), database-wide, with its own
     // Save / Revert (no undo).
     void drawCreaturePanel();

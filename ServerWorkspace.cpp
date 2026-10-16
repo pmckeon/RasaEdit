@@ -278,6 +278,7 @@ void ServerWorkspace::loadServerContent() {
     }
     if (context < 0) return;
     clientMarkers_.clear();
+    allTeleporters_.clear();                          // re-read with the content (teleporters may have been saved)
     if (ctx_.gameData && ctx_.mapTemplateId >= 0) {
         try { clientMarkers_ = ctx_.gameData->factionedMapMarkers(ctx_.mapTemplateId); } catch (const std::exception&) {}
     }
@@ -1487,6 +1488,25 @@ bool ServerWorkspace::fxPackageCombo(const char* id, int64_t& packageId) {
     return changed;
 }
 
+const LookupList& ServerWorkspace::allTeleporters() {
+    if (allTeleporters_.empty() && database_ && database_->hasTable("teleporter")) {
+        try {
+            const DbTable t = database_->loadTable("teleporter");
+            const int id = t.column("id"), description = t.column("description"), map = t.column("map_context_id"), type = t.column("type");
+            for (const auto& r : t.rows) {
+                std::string where = std::to_string(r[size_t(map)].asInt());
+                for (const MapInfo& m : database_->maps())
+                    if (m.mapContextId == r[size_t(map)].asInt()) where = m.name;
+                std::string kind = "type " + std::to_string(r[size_t(type)].asInt());
+                for (const auto& v : lookup::kWaypointTypes)
+                    if (v.first == r[size_t(type)].asInt()) kind = v.second;
+                allTeleporters_.push_back(LookupChoice{r[size_t(id)].asInt(), r[size_t(description)].t + " - " + where + " (" + kind + ")"});
+            }
+        } catch (const std::exception&) {}
+    }
+    return allTeleporters_;
+}
+
 bool ServerWorkspace::creatureCombo(const char* id, int32_t& creatureId, bool allowNone) {
     const Creature* current = database_->creature(creatureId);
     char preview[160];
@@ -1599,12 +1619,15 @@ void ServerWorkspace::drawServerObjectEditor() {
             contentChanged();
         }
     };
-    auto classField = [&](const char* label, int32_t& classId) {
-        integer(label, classId);
-        ImGui::SameLine();
-        const ClassInfo& info = ctx_.classInfo(classId);
-        ImGui::TextDisabled("%s", info.known ? info.name.c_str() : "(unknown class)");
+    // Values that name something are picked by name (Lookups.h).
+    auto pick = [&](const char* label, auto& value, const LookupSource& source) {
+        ImGui::SetNextItemWidth(fieldWidth);
+        if (lookupCombo(label, value, source)) {
+            noteEdit();
+            contentChanged();
+        }
     };
+    auto classField = [&](const char* label, int32_t& classId) { pick(label, classId, lookup::entityClass(ctx_)); };
     auto area = [&](AreaShape& a, bool heightRange) {
         position("Centre", a.position);
         int32_t shape = a.shape == 2 ? 1 : 0;
@@ -1790,13 +1813,20 @@ void ServerWorkspace::drawServerObjectEditor() {
                 ImGui::EndCombo();
             }
             if (a.kind == 2) {
-                long long entity = a.entityId;
-                ImGui::SetNextItemWidth(fieldWidth);
-                if (ImGui::InputScalar("Teleporter entity id", ImGuiDataType_S64, &entity)) {
-                    noteEdit();
-                    a.entityId = entity;
-                    contentChanged();
-                }
+                // The map's own entities (the Bane teleporter is one of them), by class name.
+                LookupSource entities;
+                entities.name = [this](int64_t id) -> std::string {
+                    if (!ctx_.map) return "";
+                    for (const tr::MapEntity& e : ctx_.map->map.entities)
+                        if (int64_t(e.entityId) == id) return ctx_.classInfo(int32_t(e.classId)).name;
+                    return "";
+                };
+                entities.fill = [this](LookupList& out) {
+                    if (!ctx_.map) return;
+                    for (const tr::MapEntity& e : ctx_.map->map.entities)
+                        out.push_back(LookupChoice{int64_t(e.entityId), ctx_.classInfo(int32_t(e.classId)).name});
+                };
+                pick("Teleporter entity", a.entityId, entities);
                 ImGui::TextDisabled("The map's own entity id of the Bane teleporter switched on for the arrival.");
             }
             text("Comment", a.comment);
@@ -1810,7 +1840,7 @@ void ServerWorkspace::drawServerObjectEditor() {
             position("Position", t.position);
             angle("Facing", t.rotation);
             classField("Class", t.classId);
-            integer("Type", t.type);
+            pick("Type", t.type, lookup::values(lookup::kWaypointTypes));
             text("Description", t.description);
             drawMarkerBinding(1, t.id, t.position, {2, 3, 19});
             break;
@@ -1876,15 +1906,15 @@ void ServerWorkspace::drawServerObjectEditor() {
             if (o.kind == ObjectKind::WorldUsable) {
                 ImGui::SeparatorText("Usable (0 = the kind's default)");
                 UsableSettings& u = o.usable;
-                whole("Start state (UseObjectState)", u.state);
+                pick("Start state", u.state, lookup::constants(ctx_, "generated.client.usabledata", "(the kind's default)"));
                 bool usable = u.usable != 0;
                 if (ImGui::Checkbox("Usable by players", &usable)) {
                     noteEdit();
                     u.usable = usable ? 1 : 0;
                     contentChanged();
                 }
-                whole("Dispensed item (itemtemplate.id)", u.itemTemplateId);
-                whole("Accepted / bomb item class", u.itemClassId);
+                pick("Dispensed item", u.itemTemplateId, lookup::itemTemplate(ctx_, *database_, "(none)"));
+                pick("Accepted / bomb item class", u.itemClassId, lookup::entityClass(ctx_, "(none)"));
                 whole("Item count", u.itemCount);
                 whole("Reset (s)", u.resetSeconds);
                 whole("Interval min (s) / bomb fuse", u.intervalMinSeconds);
@@ -1905,7 +1935,7 @@ void ServerWorkspace::drawServerObjectEditor() {
                 ImGui::SeparatorText("Destructible (0 = the class's default)");
                 DestructibleSettings& d = o.destructible;
                 whole("Hit points", d.hitPoints);
-                whole("Spawned creature (creature.id)", d.creatureId);
+                pick("Spawned creature", d.creatureId, lookup::creature(ctx_, *database_, "(the class's default)"));
                 whole("Creatures at a time", d.creatureCount);
                 int side = int(d.side);
                 ImGui::SetNextItemWidth(fieldWidth);
@@ -1921,22 +1951,17 @@ void ServerWorkspace::drawServerObjectEditor() {
             if (i >= serverContent_.wormholeLocks.size()) break;
             WormholeLock& w = serverContent_.wormholeLocks[i];
             ImGui::TextDisabled("id %lld - every lock that matches a trip must be met (Rasa.NET Wormholes)", static_cast<long long>(w.id));
-            auto teleporter = [&](const char* label, int64_t& id) {
-                long long v = id;
-                ImGui::SetNextItemWidth(fieldWidth);
-                if (ImGui::InputScalar(label, ImGuiDataType_S64, &v)) {
-                    noteEdit();
-                    id = std::max<long long>(v, 0);
-                    contentChanged();
-                }
-                ImGui::SameLine();
-                std::string where = id == 0 ? "any wormhole" : "a teleporter on another map";
-                for (const Teleporter& t : serverContent_.teleporters)
-                    if (t.id == id) where = t.description + (t.type == 3 ? "" : " (not a wormhole: type " + std::to_string(t.type) + ")");
-                ImGui::TextDisabled("%s", where.c_str());
+            // Teleporters of every map (wormholes are type 3), by description and map.
+            LookupSource wormholes;
+            wormholes.none = "(any wormhole)";
+            wormholes.name = [this](int64_t id) {
+                for (const LookupChoice& c : allTeleporters())
+                    if (c.id == id) return c.label;
+                return std::string();
             };
-            teleporter("From teleporter id", w.fromTeleporterId);
-            teleporter("To teleporter id", w.toTeleporterId);
+            wormholes.fill = [this](LookupList& out) { out = allTeleporters(); };
+            pick("From teleporter", w.fromTeleporterId, wormholes);
+            pick("To teleporter", w.toTeleporterId, wormholes);
             int kindIndex = w.kind == 2 ? 1 : 0;
             ImGui::SetNextItemWidth(fieldWidth);
             if (ImGui::Combo("Kind", &kindIndex, "1 mission accepted\0" "2 required level (not enforced yet)\0")) {
@@ -1944,7 +1969,9 @@ void ServerWorkspace::drawServerObjectEditor() {
                 w.kind = kindIndex == 1 ? 2 : 1;
                 contentChanged();
             }
-            {
+            if (w.kind == 1 && missions_.loaded()) {
+                pick("Mission", w.value, missions_.missionSource(ctx_));
+            } else {
                 long long v = w.value;
                 ImGui::SetNextItemWidth(fieldWidth);
                 if (ImGui::InputScalar(w.kind == 2 ? "Level" : "Mission id", ImGuiDataType_S64, &v)) {
@@ -1964,7 +1991,10 @@ void ServerWorkspace::drawServerObjectEditor() {
             position("Position", l.position);
             number("Radius (m)", l.radius, 0.1f, 0.0f, 500.0f);
             flag("Enabled", l.enabled);
-            integer("Kind", l.kind);
+            {
+                static const lookup::EnumValues kinds = {{0, "border (zones / hub maps)"}, {1, "instance (either end an instance map)"}};
+                pick("Kind", l.kind, lookup::values(kinds));      // Rasa.NET MapLinkEntry.KindBorder / KindInstance
+            }
             ImGui::SeparatorText("Destination");
             std::string destination = std::to_string(l.destinationMapContextId);
             for (const MapInfo& m : database_->maps()) if (m.mapContextId == l.destinationMapContextId) destination = m.name;
@@ -2415,8 +2445,11 @@ void ServerWorkspace::drawCreatureEditor(CreatureDefinition& d, bool isNew) {
         ImGui::SetNextItemWidth(fieldWidth * 1.5f);
         if (ImGui::InputText("Comment", buffer, 51)) c.comment = buffer;          // varchar(50)
     }
-    integer("Name id", c.nameId);
-    ImGui::SameLine();
+    auto pick = [&](const char* label, auto& value, const LookupSource& source, float width = 0) {
+        ImGui::SetNextItemWidth(width > 0 ? width : fieldWidth * 1.6f);
+        return lookupCombo(label, value, source);
+    };
+    pick("Name", c.nameId, lookup::creatureName(ctx_, "(none)"));
     {
         std::string text;
         if (ctx_.gameData && c.nameId > 0) {
@@ -2426,11 +2459,9 @@ void ServerWorkspace::drawCreatureEditor(CreatureDefinition& d, bool isNew) {
         else ImGui::TextDisabled("in game: \"%s\"%s", creatureDisplayName(d).c_str(),
                                  c.nameId > 0 ? "" : d.hasActorName ? " (actor name)" : " (class name: no name id or actor name)");
     }
-    integer("Class", c.classId);
-    ImGui::SameLine();
+    pick("Class", c.classId, lookup::entityClass(ctx_));
     {
         const ClassInfo& info = ctx_.classInfo(c.classId);
-        ImGui::TextDisabled("%s", info.known ? info.name.c_str() : "(unknown class)");
         if (info.known && !info.mesh.empty()) ImGui::SetItemTooltip("%s", info.mesh.c_str());
     }
     {
@@ -2482,16 +2513,9 @@ void ServerWorkspace::drawCreatureEditor(CreatureDefinition& d, bool isNew) {
     for (size_t k = 0; k < d.appearance.size(); ++k) {
         AppearanceSlot& slot = d.appearance[k];
         ImGui::PushID(int(k));
-        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 4);
-        int slotId = slot.slotId;
-        if (ImGui::InputInt("##slot", &slotId, 0)) slot.slotId = slotId;
+        pick("##slot", slot.slotId, lookup::values(lookup::kEquipmentSlots), ImGui::GetFontSize() * 7);
         ImGui::SameLine();
-        ImGui::TextDisabled("%-8s", equipmentSlotName(slot.slotId));
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 5);
-        int classId = slot.classId;
-        if (ImGui::InputInt("##class", &classId, 0)) slot.classId = classId;
-        ImGui::SetItemTooltip("%s", ctx_.classInfo(slot.classId).name.c_str());
+        pick("##class", slot.classId, lookup::entityClass(ctx_), ImGui::GetFontSize() * 14);
         ImGui::SameLine();
         // ABGR, red in the low byte.
         float colour[4] = {float(slot.colour & 0xFF) / 255.0f, float((slot.colour >> 8) & 0xFF) / 255.0f, float((slot.colour >> 16) & 0xFF) / 255.0f,
@@ -2517,7 +2541,9 @@ void ServerWorkspace::drawCreatureEditor(CreatureDefinition& d, bool isNew) {
         if (!npcClass) ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.4f, 1.0f), "Its class has no NPC augmentation: the server ignores these.");
         ImGui::Checkbox("Conversation package (npc_package)", &d.hasNpcPackage);
         if (d.hasNpcPackage) {
-            integer("Package id", d.npcPackageId);
+            LookupSource packages = lookup::npcPackage(*database_);
+            packages.allowOther = true;                     // a new conversation package is a new id
+            pick("Package", d.npcPackageId, packages);
             char buffer[64];
             std::snprintf(buffer, sizeof buffer, "%s", d.npcPackageComment.c_str());
             ImGui::SetNextItemWidth(fieldWidth * 1.5f);
@@ -2525,12 +2551,7 @@ void ServerWorkspace::drawCreatureEditor(CreatureDefinition& d, bool isNew) {
         }
         ImGui::Checkbox("Greeting (npc_greeting)", &d.hasGreeting);
         if (d.hasGreeting) {
-            integer("Greeting id", d.greetingId);
-            std::string line;
-            if (ctx_.gameData && d.greetingId > 0) {
-                try { line = ctx_.gameData->npcGreeting(d.greetingId); } catch (const std::exception&) {}
-            }
-            ImGui::TextWrapped("%s", line.empty() ? "(no such line in npcgreetinglanguage)" : ("\"" + line + "\"").c_str());
+            pick("Greeting", d.greetingId, lookup::npcGreeting(ctx_));
             if (database_ && database_->hasColumn("npc_greeting", "important")) {
                 ImGui::Checkbox("Important", &d.greetingImportant);
                 ImGui::SetItemTooltip("npc_greeting.important: a speech bubble over the NPC until the character has read this line\n"
@@ -2551,7 +2572,7 @@ void ServerWorkspace::drawCreatureEditor(CreatureDefinition& d, bool isNew) {
         ImGui::SeparatorText("Vendor");
         if (!vendorClass) ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.4f, 1.0f), "Its class has no vendor augmentation: the server ignores these.");
         ImGui::Checkbox("Vendor row (vendor)", &d.hasVendor);
-        if (d.hasVendor) integer("Vendor package id", d.vendorPackageId);
+        if (d.hasVendor) pick("Vendor package", d.vendorPackageId, lookup::vendorPackage(ctx_));
         ImGui::Checkbox("One price for everything (vendor_price)", &d.hasVendorPrice);
         if (d.hasVendorPrice) integer("Price (credits)", d.vendorPrice);
         ImGui::Text("Stock: %zu item template(s)", d.vendorItems.size());
@@ -2582,16 +2603,9 @@ void ServerWorkspace::drawCreatureEditor(CreatureDefinition& d, bool isNew) {
             ImGui::EndTable();
         }
         if (removeItem >= 0) d.vendorItems.erase(d.vendorItems.begin() + removeItem);
-        static int newItem = 0;
-        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7);
-        ImGui::InputInt("##newitem", &newItem, 0);
-        ImGui::SameLine();
-        const ItemTemplateInfo* candidate = database_->itemTemplate(newItem);
-        if (!candidate) ImGui::BeginDisabled();
-        if (ImGui::SmallButton("Add item template")) d.vendorItems.push_back(newItem);
-        if (!candidate) ImGui::EndDisabled();
-        ImGui::SameLine();
-        ImGui::TextDisabled("%s", candidate ? ctx_.classInfo(candidate->classId).name.c_str() : "(enter an itemtemplate id)");
+        int32_t newItem = 0;
+        if (pick("Add item", newItem, lookup::itemTemplate(ctx_, *database_, "(pick an item template to add)")) && newItem != 0)
+            d.vendorItems.push_back(newItem);
     }
     ImGui::SeparatorText("Used on this map");
     int uses = 0;

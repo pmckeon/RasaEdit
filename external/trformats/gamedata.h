@@ -208,6 +208,10 @@ public:
     std::vector<MapScreenMarker> factionedMapMarkers(int32_t templateId);   // in table order
     // A module's integer constants as (value, name), sorted by value (e.g. "generated.client.constant.creatureflag": 5 BIOLOGICAL).
     std::vector<std::pair<int32_t, std::string>> moduleConstants(const std::string& module);
+    // Every entry of a lookup dict (module.variable) with an int key - or an (id, gender) key, of that gender only - and its name:
+    // the value when a string, else its element nameIndex (or that element's first line). Sorted by id; "" when it has no name.
+    std::vector<std::pair<int32_t, std::string>> lookupNames(const std::string& module, const std::string& variable, int32_t gender = 1,
+                                                             size_t nameIndex = 0);
     // A game effect's tooltip line as the client looks it up (tooltipwindow.py _AddModuleEffects): generated.client.gameeffectdata
     // tooltip[effectId] -> tooltiplanguage.lookup[id] (e.g. "Body: %(amount)s"); "" when the effect has none (no line drawn).
     std::string effectTooltip(int32_t effectId);

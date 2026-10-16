@@ -1,5 +1,7 @@
 #include "ClientWorkspace.h"
 
+#include "Lookups.h"
+
 #include "imgui_internal.h"   // DockBuilder
 
 #include <algorithm>
@@ -662,10 +664,10 @@ void ClientWorkspace::drawEntityPanel() {
         ImGui::TextDisabled("Nothing selected.");
         if (ctx_.map) {
             ImGui::SeparatorText("Add an entity");
-            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8);
-            ImGui::InputInt("Class id", &newClass_, 0);
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 18);
+            lookupCombo("Class", newClass_, lookup::entityClass(ctx_, "(pick an entity class)"));
             const ClassInfo& info = ctx_.classInfo(newClass_);
-            ImGui::TextDisabled("%s", newClass_ > 0 && info.known ? (info.name + "  " + info.mesh).c_str() : "(enter an entity class id)");
+            if (newClass_ > 0 && info.known) ImGui::TextDisabled("%s", info.mesh.empty() ? "(no mesh)" : info.mesh.c_str());
             if (!(newClass_ > 0 && info.known)) ImGui::BeginDisabled();
             if (ImGui::Button("Add at the view's centre")) addEntity(newClass_);
             if (!(newClass_ > 0 && info.known)) ImGui::EndDisabled();
@@ -683,13 +685,15 @@ void ClientWorkspace::drawEntityPanel() {
         if (c) changed = true;
     };
     int32_t classId = e.classId;
-    ImGui::SetNextItemWidth(fieldWidth);
-    edited(ImGui::InputInt("Class", &classId, 0));
+    ImGui::SetNextItemWidth(fieldWidth * 1.6f);
+    if (lookupCombo("Class", classId, lookup::entityClass(ctx_))) {
+        noteEdit();
+        changed = true;
+    }
     if (classId != e.classId) {
         e.classId = classId;
         fitBounds_.push_back(index);                 // the new model's bounds once it is loaded
     }
-    ImGui::TextUnformatted(info.known ? info.name.c_str() : "(unknown class)");
     ImGui::Text("Mesh  %s", info.mesh.empty() ? "(none)" : info.mesh.c_str());
     if (!info.mesh.empty() && ctx_.assets && !ctx_.assets->exists(info.mesh))
         ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.4f, 1.0f), "mesh file not found in the archives");
