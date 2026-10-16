@@ -6,10 +6,13 @@ Editor::Editor(SDL_Window* window, SDL_GPUDevice* device)
     : context_(std::make_unique<EditorContext>(window, device)),
       client_(std::make_unique<ClientWorkspace>(*context_)),
       ui_(std::make_unique<UiWorkspace>(*context_)),
-      server_(std::make_unique<ServerWorkspace>(*context_)) {
+      server_(std::make_unique<ServerWorkspace>(*context_)),
+      assets_(std::make_unique<AssetsWorkspace>(*context_)) {
     const std::string workspace = context_->setting("workspace");
-    active_ = workspace == "client" ? static_cast<Workspace*>(client_.get()) : workspace == "ui" ? static_cast<Workspace*>(ui_.get())
-                                                                                                 : static_cast<Workspace*>(server_.get());
+    active_ = workspace == "client"   ? static_cast<Workspace*>(client_.get())
+              : workspace == "ui"     ? static_cast<Workspace*>(ui_.get())
+              : workspace == "assets" ? static_cast<Workspace*>(assets_.get())
+                                      : static_cast<Workspace*>(server_.get());
     // Reopen the last game, server database and map on start-up.
     const std::string root = context_->setting("gameRoot");
     if (!root.empty()) context_->queueGameRoot(root);
@@ -32,7 +35,7 @@ Editor::~Editor() = default;
 
 void Editor::setActive(Workspace* workspace) {
     active_ = workspace;
-    context_->setSetting("workspace", workspace == client_.get() ? "client" : workspace == ui_.get() ? "ui" : "server");
+    context_->setSetting("workspace", workspace == client_.get() ? "client" : workspace == ui_.get() ? "ui" : workspace == assets_.get() ? "assets" : "server");
 }
 
 // ------------------------------------------------------------------------------------------
@@ -57,6 +60,7 @@ void Editor::processPendingActions() {
         client_->onGameOpened();
         ui_->onGameOpened();
         server_->onGameOpened();
+        assets_->onGameOpened();
     }
     if (!pending.database.empty() && mayReplaceServerContent(PromptAction::OpenDatabase, pending.database)) server_->openDatabase(pending.database);
     if (!pending.map.empty() && mayReplaceServerContent(PromptAction::OpenMap, pending.map) && context_->openMap(pending.map)) {
@@ -70,6 +74,11 @@ void Editor::processPendingActions() {
 // Frame
 // ------------------------------------------------------------------------------------------
 void Editor::drawUi() {
+    if (!context_->showAssetRequest.empty()) {          // "Open in Assets" from another workspace
+        setActive(assets_.get());
+        assets_->showAsset(context_->showAssetRequest);
+        context_->showAssetRequest.clear();
+    }
     active_->beginFrame();
     active_->handleShortcuts();
     drawMenuBar();
@@ -83,7 +92,8 @@ void Editor::drawUi() {
 void Editor::drawMenuBar() {
     if (!ImGui::BeginMainMenuBar()) return;
     // Workspace tabs.
-    for (Workspace* w : {static_cast<Workspace*>(client_.get()), static_cast<Workspace*>(ui_.get()), static_cast<Workspace*>(server_.get())}) {
+    for (Workspace* w : {static_cast<Workspace*>(client_.get()), static_cast<Workspace*>(ui_.get()), static_cast<Workspace*>(server_.get()),
+                         static_cast<Workspace*>(assets_.get())}) {
         const bool current = w == active_;
         if (current) ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_CheckMark));
         if (ImGui::MenuItem(w->name(), nullptr, current) && !current) setActive(w);
@@ -132,8 +142,8 @@ void Editor::drawMenuBar() {
 void Editor::renderViewport(SDL_GPUCommandBuffer* commands) { active_->renderViewport(commands); }
 
 void Editor::releaseGpuResources() {
-    client_->releaseGpuResources();
     ui_->releaseGpuResources();
+    assets_->releaseGpuResources();
     context_->releaseGpuResources();
 }
 

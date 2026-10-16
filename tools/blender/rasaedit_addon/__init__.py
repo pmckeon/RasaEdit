@@ -338,8 +338,19 @@ class RASAEDIT_OT_import(bpy.types.Operator, ImportHelper):
     filter_glob: StringProperty(default="*.gltf;*.glb", options={'HIDDEN'})
 
     def execute(self, context):
-        bpy.ops.import_scene.gltf(filepath=self.filepath, import_scene_as_collection=True)
+        # No bone shapes: with Bone Dir "Blender" the importer draws every bone as an icosphere scaled to it, shown in front of the
+        # mesh (white balls all over a character).
+        bpy.ops.import_scene.gltf(filepath=self.filepath, import_scene_as_collection=True, disable_bone_shape=True)
         apply_pending_exclusions()
+        # The timeline covers the armature's active animation (the importer leaves the scene's own range, e.g. 1-250).
+        import math
+        for obj in context.scene.objects:
+            ad = obj.animation_data if obj.type == 'ARMATURE' else None
+            if ad and ad.action:
+                start, end = ad.action.frame_range
+                context.scene.frame_start = int(start)
+                context.scene.frame_end = max(int(start) + 1, math.ceil(end))
+                break
         return {'FINISHED'}
 
 

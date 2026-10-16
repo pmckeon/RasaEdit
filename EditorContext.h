@@ -62,6 +62,8 @@ public:
     void setSetting(const std::string& key, const std::string& value);
 
     void setStatus(const std::string& text, bool isError);
+    // An asset to show in the Assets workspace (the editor switches to it next frame; "" = none).
+    std::string showAssetRequest;
     const ClassInfo& classInfo(int32_t classId);
 
     // Loading. Call between frames (they replace GPU textures and the scene). false on failure (status set).

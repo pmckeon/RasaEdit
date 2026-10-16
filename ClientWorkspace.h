@@ -1,6 +1,5 @@
 #pragma once
 
-#include "BlenderPanel.h"
 #include "Panels.h"
 #include "Workspace.h"
 
@@ -38,9 +37,7 @@ public:
     void drawPanels() override;
     void renderViewport(SDL_GPUCommandBuffer* commands) override {
         viewport_.render(ctx_, commands, selection_);
-        assets_.render(ctx_, commands);             // the Assets panel's model preview, when shown
     }
-    void releaseGpuResources() { assets_.releaseGpuResources(); }
     void onGameOpened() override;
     void onMapLoaded() override;
 
@@ -82,8 +79,6 @@ private:
     std::vector<size_t> visibleEntities_;            // indices into the map's entities passing the filter
     char entityFilter_[128] = "";
     MapsPanel maps_;
-    AssetsPanel assets_;
-    BlenderPanel blender_;
     OverviewPanel overview_;
     ViewportPanel viewport_{false};
 };

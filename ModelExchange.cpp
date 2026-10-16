@@ -138,9 +138,15 @@ struct Gltf {
         return accessor(v, 5121, values.size() / 4, type, normalized);
     }
 
-    size_t indices(const std::vector<uint32_t>& values) {
+    // Triangle lists, written with each triangle's second and third index swapped: the z mirror reverses the winding test
+    // (cross(b - a, c - a) . n changes sign under a reflection), and glTF's front faces are counter-clockwise - kept as stored,
+    // 5,497 of npc_redshirt_f_electric_pistol_mech_v01's 5,500 triangles faced away from their normals and Blender culled the
+    // outside (user report 2026-10-17). The import swaps them back, so a round trip keeps the game's order.
+    size_t indices(const std::vector<uint32_t>& triangles) {
         align();
         const size_t offset = bin.size();
+        std::vector<uint32_t> values = triangles;
+        for (size_t k = 0; k + 2 < values.size(); k += 3) std::swap(values[k + 1], values[k + 2]);
         const bool wide = !values.empty() && *std::max_element(values.begin(), values.end()) > 0xFFFF;
         for (uint32_t i : values) {
             if (wide) {
@@ -719,7 +725,7 @@ ModelExchangeReport exportModelGltf(tr::AssetLibrary& assets, const std::string&
                         for (int sgm = 0; sgm < segments; ++sgm) {
                             const uint32_t a0 = uint32_t(r * segments + sgm), a1 = uint32_t(r * segments + (sgm + 1) % segments);
                             const uint32_t b0 = a0 + uint32_t(segments), b1 = a1 + uint32_t(segments);
-                            indices.insert(indices.end(), {a0, b0, a1, a1, b0, b1});
+                            indices.insert(indices.end(), {a0, a1, b0, a1, b1, b0});      // facing outward once written
                         }
                 } else {
                     report.warnings.push_back("bone " + file.bones[b].name + ": collision volume " + tr::tagName(v.kind) + " is not exported");

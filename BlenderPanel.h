@@ -1,30 +1,34 @@
 #pragma once
 
-// The Client workspace's "Blender" panel: models out to glTF for Blender and back (ModelExchange.h), a preview of an import in the
+// The Assets workspace's "Blender" panel: models out to glTF for Blender and back (ModelExchange.h), a preview of an import in the
 // editor (the imported files override the archives' in the asset library), and the patch archive the game reads them from.
 
+#include "ModelAnimations.h"
 #include "ModelExchange.h"
 
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
 
-class AssetsPanel;
 class EditorContext;
 
 class BlenderPanel {
 public:
-    // suggestedModel: the selected map entity's model (offered for export); assets: to show an imported model in its preview.
-    void draw(EditorContext& ctx, const char* title, const std::string& suggestedModel, AssetsPanel& assets);
+    // selectedModel: the model to export (the Assets browser's selection, "" = none); showAsset: shows an imported model in the
+    // preview.
+    // links: what the selected model is and the animations tied to it (offered as checkboxes; nullptr = none).
+    void draw(EditorContext& ctx, const char* title, const std::string& selectedModel, const ModelAnimationLinks* links,
+              const std::function<void(const std::string&)>& showAsset);
 
 private:
-    void drawExport(EditorContext& ctx, const std::string& suggestedModel);
-    void drawImport(EditorContext& ctx, AssetsPanel& assets);
+    void drawExport(EditorContext& ctx, const std::string& selectedModel, const ModelAnimationLinks* links);
+    void drawImport(EditorContext& ctx, const std::function<void(const std::string&)>& showAsset);
     void drawPatchArchive(EditorContext& ctx);
 
     // Export.
-    char exportModel_[256] = "";
+    std::string exportModel_;
     std::string exportModelFor_;                     // the model the animation list was made for
     std::vector<std::string> exportAnimations_;
     char exportFolder_[512] = "";

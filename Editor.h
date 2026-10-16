@@ -1,5 +1,6 @@
 #pragma once
 
+#include "AssetsWorkspace.h"
 #include "ClientWorkspace.h"
 #include "EditorContext.h"
 #include "ServerWorkspace.h"
@@ -10,7 +11,7 @@
 #include <memory>
 #include <string>
 
-// The editor shell: the shared context, the Client, UI and Server workspaces (one active at a time,
+// The editor shell: the shared context, the Client, UI, Server and Assets workspaces (one active at a time,
 // each with its own panels and docking layout), the menu bar, queued loads and unsaved-change prompts.
 class Editor {
 public:
@@ -44,6 +45,7 @@ private:
     std::unique_ptr<ClientWorkspace> client_;
     std::unique_ptr<UiWorkspace> ui_;
     std::unique_ptr<ServerWorkspace> server_;
+    std::unique_ptr<AssetsWorkspace> assets_;
     Workspace* active_ = nullptr;
 
     PromptAction promptAction_ = PromptAction::None;

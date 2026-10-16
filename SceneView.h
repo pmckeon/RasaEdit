@@ -138,6 +138,9 @@ public:
     // refreshEntity rebuilds its placement; after entities were added or removed, rebuildEntities rebuilds them all. Both drop
     // the affected entities' particle systems, which advanceParticles restarts at the new place.
     void refreshEntity(size_t entityIndex);
+    // Plays this animation on a map entity's model instead of its own ("" = its own again), from the start (the light clock is
+    // reset: used by the Assets preview, whose scene holds that one entity).
+    void setEntityAnimation(size_t entityIndex, const std::string& animation);
     void rebuildEntities();
     // After the map's lights.xml text changed (Client workspace light editing): the lights, their modifiers and globe maps again.
     void reloadMapLights();

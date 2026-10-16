@@ -3404,6 +3404,16 @@ void SceneView::refreshEntity(size_t entityIndex) {
                          liveParticles_.end());
 }
 
+void SceneView::setEntityAnimation(size_t entityIndex, const std::string& animation) {
+    if (entityIndex >= placements_.size() || entityIndex >= map_.map.entities.size()) return;
+    refreshEntity(entityIndex);
+    if (!animation.empty() && meshForClass_) {
+        const std::string mesh = meshForClass_(map_.map.entities[entityIndex].classId);
+        if (!mesh.empty()) placements_[entityIndex].model = modelFor(mesh, "@" + animation);
+    }
+    lightTime = 0;
+}
+
 void SceneView::reloadMapLights() {
     mapLights_.clear();
     lightModifiers_.clear();

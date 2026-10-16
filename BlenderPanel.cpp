@@ -1,7 +1,6 @@
 #include "BlenderPanel.h"
 
 #include "EditorContext.h"
-#include "Panels.h"
 #include "assetlibrary.h"
 
 #include "imgui.h"
@@ -60,7 +59,8 @@ void SDLCALL BlenderPanel::exportDialogCallback(void* userdata, const char* cons
     self->dialogExportFolder_ = files[0];
 }
 
-void BlenderPanel::draw(EditorContext& ctx, const char* title, const std::string& suggestedModel, AssetsPanel& assets) {
+void BlenderPanel::draw(EditorContext& ctx, const char* title, const std::string& selectedModel, const ModelAnimationLinks* links,
+                        const std::function<void(const std::string&)>& showAsset) {
     if (!ImGui::Begin(title)) {
         ImGui::End();
         return;
@@ -75,35 +75,63 @@ void BlenderPanel::draw(EditorContext& ctx, const char* title, const std::string
         if (!dialogImportPath_.empty()) copyInto(importPath_, sizeof importPath_, dialogImportPath_), dialogImportPath_.clear();
         if (!dialogExportFolder_.empty()) copyInto(exportFolder_, sizeof exportFolder_, dialogExportFolder_), dialogExportFolder_.clear();
     }
+    if (ImGui::CollapsingHeader("How it works")) {
     ImGui::TextWrapped("Models go to Blender as glTF (.gltf + .bin + PNG textures). Blender: File > Import > glTF 2.0. Back: File > Export > glTF 2.0, "
                        "format glTF Separate, with Include > Custom Properties on (it carries the game's material and piece settings).");
     ImGui::TextWrapped("Easier: the RasaEdit add-on for Blender (tools/blender/rasaedit_addon; make the zip with tools/blender/make_addon_zip.py, then "
                        "Blender: Edit > Preferences > Add-ons > Install from Disk). It adds File > Import / Export > Tabula Rasa model, keeps "
                        "low-detail pieces and collision in hidden collections on every trip, sets 30 fps and checks the game's limits.");
-    if (ImGui::CollapsingHeader("Export a model", ImGuiTreeNodeFlags_DefaultOpen)) drawExport(ctx, suggestedModel);
-    if (ImGui::CollapsingHeader("Import from Blender", ImGuiTreeNodeFlags_DefaultOpen)) drawImport(ctx, assets);
+    }
+    if (ImGui::CollapsingHeader("Export a model", ImGuiTreeNodeFlags_DefaultOpen)) drawExport(ctx, selectedModel, links);
+    if (ImGui::CollapsingHeader("Import from Blender", ImGuiTreeNodeFlags_DefaultOpen)) drawImport(ctx, showAsset);
     if (ImGui::CollapsingHeader("Patch archive", ImGuiTreeNodeFlags_DefaultOpen)) drawPatchArchive(ctx);
     ImGui::End();
 }
 
-void BlenderPanel::drawExport(EditorContext& ctx, const std::string& suggestedModel) {
-    if (!suggestedModel.empty() && exportModel_[0] == 0) copyInto(exportModel_, sizeof exportModel_, suggestedModel);
-    ImGui::SetNextItemWidth(320);
-    ImGui::InputTextWithHint("Model", "file name, e.g. arch_forean_eloh_obelisk_v03.geo", exportModel_, sizeof exportModel_);
-    if (!suggestedModel.empty() && lower(suggestedModel) != lower(exportModel_)) {
-        ImGui::SameLine();
-        if (ImGui::SmallButton(("Use " + suggestedModel).c_str())) copyInto(exportModel_, sizeof exportModel_, suggestedModel);
+void BlenderPanel::drawExport(EditorContext& ctx, const std::string& selectedModel, const ModelAnimationLinks* links) {
+    // The model is the browser's selection (any model of the game: filter the Browser by "models" and pick one).
+    exportModel_ = selectedModel;
+    if (exportModel_.empty()) {
+        ImGui::TextDisabled("Select a model (.geo) in the Browser.");
+        return;
     }
+    ImGui::Text("Model  %s", exportModel_.c_str());
     const std::string model = exportModel_;
-    const bool known = !model.empty() && ctx.assets->exists(model);
-    if (!model.empty() && !known) ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "Not in the archives.");
+    const bool known = ctx.assets->exists(model);
+    if (!known) ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f), "Not in the archives.");
     // The animations to take along: the model's own by default.
     if (known && lower(model) != lower(exportModelFor_)) {
         exportModelFor_ = model;
         exportAnimations_ = modelOwnAnimations(*ctx.assets, model);
         copyInto(exportFolder_, sizeof exportFolder_, utf8(fs::u8path(defaultExportRoot()) / stemOf(model)));
     }
-    ImGui::TextUnformatted("Animations:");
+    // What the model is to the game and every animation tied to it: ticked = exported.
+    if (links && lower(links->model) == lower(model)) {
+        for (const std::string& kind : links->kinds) ImGui::TextColored(ImVec4(0.6f, 0.85f, 1.0f, 1.0f), "%s", kind.c_str());
+        if (!links->groups.empty()) {
+            auto chosen = [&](const std::string& a) {
+                return std::find_if(exportAnimations_.begin(), exportAnimations_.end(), [&](const std::string& x) { return lower(x) == lower(a); });
+            };
+            ImGui::TextUnformatted("Linked animations:");
+            drawAnimationGroups(
+                *links,
+                [&](const AnimationChoice& c) {
+                    bool on = chosen(c.name) != exportAnimations_.end();
+                    const std::string label = c.frequency > 0 ? c.name + "  (weight " + std::to_string(c.frequency) + ")" : c.name;
+                    if (ImGui::Checkbox(label.c_str(), &on)) {
+                        if (on) exportAnimations_.push_back(c.name);
+                        else exportAnimations_.erase(chosen(c.name));
+                    }
+                },
+                [&](const AnimationGroup& g) {
+                    if (ImGui::SmallButton("all"))
+                        for (const AnimationChoice& c : g.animations)
+                            if (chosen(c.name) == exportAnimations_.end()) exportAnimations_.push_back(c.name);
+                    ImGui::SetItemTooltip("Export every animation of this group");
+                });
+        }
+    }
+    ImGui::TextUnformatted("Animations to export:");
     int remove = -1;
     for (size_t k = 0; k < exportAnimations_.size(); ++k) {
         ImGui::PushID(int(k));
@@ -175,7 +203,7 @@ void BlenderPanel::drawExport(EditorContext& ctx, const std::string& suggestedMo
     for (const std::string& line : exportLog_) ImGui::TextWrapped("%s", line.c_str());
 }
 
-void BlenderPanel::drawImport(EditorContext& ctx, AssetsPanel& assets) {
+void BlenderPanel::drawImport(EditorContext& ctx, const std::function<void(const std::string&)>& showAsset) {
     ImGui::SetNextItemWidth(420);
     ImGui::InputTextWithHint("File", ".gltf or .glb from Blender", importPath_, sizeof importPath_);
     ImGui::SameLine();
@@ -228,7 +256,7 @@ void BlenderPanel::drawImport(EditorContext& ctx, AssetsPanel& assets) {
         for (const ImportedFile& f : imported_->files) ctx.assets->setOverride(f.name, f.data);
         previewing_ = true;
         if (!ctx.currentMapName.empty()) ctx.queueMap(ctx.currentMapName);
-        if (!imported_->files.empty()) assets.showAsset(ctx, imported_->files[0].name);
+        if (!imported_->files.empty() && showAsset) showAsset(imported_->files[0].name);
         ctx.setStatus("Previewing " + imported_->files[0].name + " (the map reloads; the game is unchanged)", false);
     }
     ImGui::SetItemTooltip("The editor uses the imported files instead of the game's for this session: map entities with this model and the "

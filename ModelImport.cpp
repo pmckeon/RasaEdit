@@ -254,6 +254,12 @@ void computeTangentFrames(const std::vector<tr::Vec3>& positions, const std::vec
 
 namespace {
 
+// glTF triangles (counter-clockwise front) back to the game's order: each triangle's second and third index swapped, from `first`
+// on - the inverse of the export's swap (the z mirror reverses the winding test).
+void flipWinding(std::vector<uint32_t>& indices, size_t first) {
+    for (size_t k = first; k + 2 < indices.size(); k += 3) std::swap(indices[k + 1], indices[k + 2]);
+}
+
 // ---- building the model ----
 
 struct BuiltVertex {
@@ -887,6 +893,7 @@ ModelImportResult importModelGltf(tr::AssetLibrary& assets, const std::string& p
             } else {
                 for (size_t k = 0; k < pos.count; ++k) indices.push_back(uint32_t(k));
             }
+            flipWinding(indices, 0);                     // glTF counter-clockwise -> the game's order (see the export)
             // Vertices in the game's piece space.
             int64_t pieceBone = skinned ? -1 : boneForNode(int64_t(nodeIndex));
             // Outside every bone (hidden low-detail pieces under their own root, or a mesh unparented in Blender): the bone its piece
@@ -1160,12 +1167,14 @@ ModelImportResult importModelGltf(tr::AssetLibrary& assets, const std::string& p
                     const uint32_t base = uint32_t(points.size());
                     for (size_t i = 0; i < pos.count; ++i)
                         points.push_back(mirror(transformPoint(toBone, tr::Vec3{float(pos.get(i, 0)), float(pos.get(i, 1)), float(pos.get(i, 2))})));
+                    const size_t first = indices.size();
                     if (prim.member("indices")) {
                         const Accessor ia = readAccessor(g, integer(prim.member("indices")));
                         for (size_t k = 0; k < ia.count; ++k) indices.push_back(base + uint32_t(ia.get(k, 0)));
                     } else {
                         for (size_t k = 0; k < pos.count; ++k) indices.push_back(base + uint32_t(k));
                     }
+                    flipWinding(indices, first);
                 }
             std::string kind = text(rc->member("kind"));
             if (kind.empty()) kind = "surface";

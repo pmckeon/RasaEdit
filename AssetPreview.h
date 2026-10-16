@@ -8,6 +8,7 @@
 // - text assets (.xml, .sky, .ltmp, ...): the text.
 // - .anm / .pfx / .pkg: a summary.
 
+#include "ModelAnimations.h"
 #include "Renderer.h"
 #include "SceneView.h"
 #include "assetlibrary.h"
@@ -28,6 +29,8 @@ public:
     AssetPreview& operator=(const AssetPreview&) = delete;
 
     void select(EditorContext& ctx, const std::string& name);   // "" clears
+    // The animations tied to the selected model (listed under the model view: a click plays one); nullptr = none. Call after select.
+    void setAnimationLinks(const ModelAnimationLinks* links) { links_ = links; }
     void draw(EditorContext& ctx);                                // inside the details child window
     void render(EditorContext& ctx, SDL_GPUCommandBuffer* commands);   // records the model preview (after draw)
     void release();                                               // GPU and audio resources (game closed / shutdown)
@@ -61,6 +64,8 @@ private:
     float pitch_ = -0.25f;
     bool modelVisible_ = false;               // drawn this frame (render() records only then)
     float animationTime_ = 0;
+    const ModelAnimationLinks* links_ = nullptr;
+    std::string playing_;                     // the animation chosen in the list ("" = the model's own)
 
     // Texture: decoded top level and the texture shown.
     SDL_GPUDevice* device_ = nullptr;

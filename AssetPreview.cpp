@@ -84,6 +84,8 @@ void AssetPreview::select(EditorContext& ctx, const std::string& name) {
     releaseModel();
     releaseTexture();
     releaseSound();
+    links_ = nullptr;
+    playing_.clear();
     kind_ = Kind::None;
     text_.clear();
     summary_.clear();
@@ -255,7 +257,7 @@ void AssetPreview::drawModel(EditorContext&) {
     const ImVec2 size(width, std::max(160.0f, std::min(width, ImGui::GetContentRegionAvail().y * 0.6f)));
     const float scale = ImGui::GetIO().DisplayFramebufferScale.x;
     renderer_->resize(uint32_t(size.x * scale), uint32_t(size.y * scale));     // before the image is referenced
-    ImGui::InvisibleButton("modelpreview", size, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+    ImGui::InvisibleButton("modelpreview", size, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight | ImGuiButtonFlags_MouseButtonMiddle);
     const ImVec2 origin = ImGui::GetItemRectMin();
     ImGui::GetWindowDrawList()->AddImage(ImTextureRef((ImTextureID)(intptr_t)renderer_->colourTarget()), origin, ImVec2(origin.x + size.x, origin.y + size.y));
     if (ImGui::IsItemActive() && (ImGui::IsMouseDragging(ImGuiMouseButton_Left) || ImGui::IsMouseDragging(ImGuiMouseButton_Right))) {
@@ -263,12 +265,19 @@ void AssetPreview::drawModel(EditorContext&) {
         yaw_ += d.x * 0.01f;
         pitch_ = std::clamp(pitch_ - d.y * 0.01f, -1.5f, 1.5f);
     }
+    // Middle drag moves the camera (and the point it turns about) in the view plane, the model following the cursor.
+    if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
+        const ImVec2 d = ImGui::GetIO().MouseDelta;
+        const ViewCamera& camera = scene_->camera();
+        const float metresPerPixel = 2.0f * distance_ * std::tan(camera.fovY * 0.5f) / size.y;
+        target_ = add(target_, add(scaled(camera.right(), -d.x * metresPerPixel), scaled(camera.up(), d.y * metresPerPixel)));
+    }
     if (ImGui::IsItemHovered() && ImGui::GetIO().MouseWheel != 0) distance_ *= std::pow(0.85f, ImGui::GetIO().MouseWheel);
     modelVisible_ = true;
     const size_t total = scene_->modelsTotal(), loaded = scene_->modelsLoaded(), failed = scene_->modelsFailed();
     if (failed > 0) ImGui::TextColored(ImVec4(1, 0.5f, 0.4f, 1), "The model failed to load.");
     else if (loaded < total) ImGui::TextDisabled("Loading...");
-    else ImGui::TextDisabled("Drag to turn, wheel to zoom.");
+    else ImGui::TextDisabled("Drag to turn, middle drag to move, wheel to zoom.");
     ImGui::SameLine();
     if (ImGui::SmallButton("Reset view")) modelFitted_ = false;
     ImGui::SameLine();
@@ -277,6 +286,25 @@ void AssetPreview::drawModel(EditorContext&) {
     ImGui::Checkbox("Effects", &scene_->showEffects);
     ImGui::SameLine();
     ImGui::Checkbox("Particles", &scene_->showParticles);
+    // The animations the game's files tie to this model (ModelAnimations.h): a click plays one, looping, from its start.
+    if (links_ && !links_->groups.empty() && ImGui::CollapsingHeader("Animations", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Text("Playing: %s", playing_.empty() ? "the model's own animation (if any)" : playing_.c_str());
+        if (!playing_.empty()) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Back to its own")) {
+                playing_.clear();
+                scene_->setEntityAnimation(0, "");
+            }
+        }
+        drawAnimationGroups(*links_, [&](const AnimationChoice& c) {
+            const std::string label = c.frequency > 0 ? c.name + "  (weight " + std::to_string(c.frequency) + ")" : c.name;
+            if (ImGui::Selectable(label.c_str(), tr::toLowerAscii(c.name) == tr::toLowerAscii(playing_))) {
+                playing_ = c.name;
+                scene_->setEntityAnimation(0, c.name);
+            }
+        });
+        ImGui::Spacing();
+    }
 }
 
 void AssetPreview::render(EditorContext&, SDL_GPUCommandBuffer* commands) {

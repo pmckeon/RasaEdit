@@ -1377,6 +1377,97 @@ int32_t GameData::meshSkeletonId(int32_t meshId) {
     return py::isInt(id) ? int32_t(py::asInt(id)) : -1;
 }
 
+std::vector<int32_t> GameData::meshStringIds(const std::string& meshName) {
+    std::vector<int32_t> out;
+    const auto lower = [](std::string s) {
+        for (char& c : s) c = char(std::tolower(static_cast<unsigned char>(c)));
+        return s;
+    };
+    const std::string want = lower(meshName);
+    const py::Object* lookup = global("generated.client.stringtable", "lookup");
+    if (!lookup || lookup->kind != py::Kind::Dict) return out;
+    for (const auto& entry : lookup->entries)
+        if (py::isString(entry.second.get()) && lower(py::asString(entry.second.get())) == want) out.push_back(int32_t(py::asInt(entry.first.get())));
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+std::string GameData::animationFamilyName(int32_t familyId) {
+    const py::Object* name = py::dictGet(global("generated.client.animationdata", "animationFamily"), familyId);
+    return py::isString(name) ? py::asString(name) : std::string();
+}
+
+namespace {
+// The (family, second) tuple keys of an animationdata dict whose second element is `second`, as (family id, family name).
+std::vector<std::pair<int32_t, std::string>> familiesKeyedBy(GameData& data, const char* variable, int32_t second) {
+    std::vector<std::pair<int32_t, std::string>> out;
+    const py::Object* dict = data.global("generated.client.animationdata", variable);
+    if (!dict || dict->kind != py::Kind::Dict) return out;
+    for (const auto& entry : dict->entries) {
+        const py::Object* key = entry.first.get();
+        if (key->kind != py::Kind::Tuple || py::length(key) != 2 || !py::isInt(py::item(key, 0)) || py::asInt(py::item(key, 1)) != second) continue;
+        const int32_t family = int32_t(py::asInt(py::item(key, 0)));
+        out.push_back({family, data.animationFamilyName(family)});
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+}  // namespace
+
+std::vector<std::pair<int32_t, std::string>> GameData::skeletonFamilies(int32_t skeletonId) {
+    return familiesKeyedBy(*this, "animationFamilyData", skeletonId);
+}
+
+std::vector<std::pair<int32_t, std::string>> GameData::objectFamilies(int32_t meshId) { return familiesKeyedBy(*this, "animationFamilyObject", meshId); }
+
+std::vector<GameData::FamilyAnimation> GameData::familyObjectAnimations(int32_t familyId, int32_t meshId) {
+    std::vector<FamilyAnimation> out;
+    const py::Object* list = py::dictGetTuple(global("generated.client.animationdata", "animationFamilyObject"), {familyId, meshId});
+    for (size_t k = 0; k < py::length(list); ++k) {
+        const py::Object* a = py::item(list, k);
+        if (!py::isInt(py::item(a, 0))) continue;
+        FamilyAnimation f;
+        f.name = stringById(int32_t(py::asInt(py::item(a, 0))));
+        f.frequency = py::isInt(py::item(a, 1)) ? int32_t(py::asInt(py::item(a, 1))) : 1;
+        if (!f.name.empty()) out.push_back(std::move(f));
+    }
+    return out;
+}
+
+size_t GameData::skeletonMeshCount(int32_t skeletonId) {
+    size_t count = 0;
+    const py::Object* dict = global("generated.client.animationdata", "meshSkeleton");
+    if (!dict || dict->kind != py::Kind::Dict) return 0;
+    for (const auto& entry : dict->entries) count += py::isInt(entry.second.get()) && py::asInt(entry.second.get()) == skeletonId ? 1 : 0;
+    return count;
+}
+
+std::vector<int32_t> GameData::suitBaseMeshes(int32_t meshId) {
+    std::vector<int32_t> out;
+    const py::Object* suits = global("generated.client.equipmentdata", "suit");
+    const py::Object* swaps = global("generated.client.equipmentdata", "equipableClassMeshSwapset");
+    if (!suits || suits->kind != py::Kind::Dict || !swaps || swaps->kind != py::Kind::Dict) return out;
+    std::vector<int64_t> suitIds;                     // the suits made of this mesh
+    for (const auto& entry : suits->entries) {
+        const py::Object* mesh = py::item(entry.second.get(), 1);
+        if (py::isInt(mesh) && py::asInt(mesh) == meshId && py::isInt(entry.first.get())) suitIds.push_back(py::asInt(entry.first.get()));
+    }
+    if (suitIds.empty()) return out;
+    for (const auto& entry : swaps->entries) {
+        const py::Object* key = entry.first.get();
+        if (key->kind != py::Kind::Tuple || py::length(key) != 2 || !py::isInt(py::item(key, 1))) continue;
+        for (size_t k = 0; k < py::length(entry.second.get()); ++k) {
+            const py::Object* suit = py::item(py::item(entry.second.get(), k), 0);
+            if (py::isInt(suit) && std::find(suitIds.begin(), suitIds.end(), py::asInt(suit)) != suitIds.end())
+                out.push_back(int32_t(py::asInt(py::item(key, 1))));
+        }
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
 std::vector<GameData::FamilyAnimation> GameData::familyAnimations(int32_t familyId, int32_t skeletonId) {
     std::vector<FamilyAnimation> animations;
     const py::Object* list = py::dictGetTuple(global("generated.client.animationdata", "animationFamilyData"), {familyId, skeletonId});

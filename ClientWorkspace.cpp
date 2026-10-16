@@ -22,10 +22,8 @@ void ClientWorkspace::buildDefaultLayout(ImGuiID dockspace) {
     ImGui::DockBuilderDockWindow("Maps###Client.Maps", left);
     ImGui::DockBuilderDockWindow("Viewport###Client.Viewport", centre);      // first docked = the visible tab
     ImGui::DockBuilderDockWindow("Overview###Client.Overview", centre);
-    ImGui::DockBuilderDockWindow("Assets###Client.Assets", bottom);
     ImGui::DockBuilderDockWindow("Entities###Client.Entities", bottom);
     ImGui::DockBuilderDockWindow("Lights###Client.Lights", bottom);
-    ImGui::DockBuilderDockWindow("Blender###Client.Blender", bottom);
     ImGui::DockBuilderDockWindow("Map###Client.Map", right);
     ImGui::DockBuilderDockWindow("Entity###Client.Entity", right);
     ImGui::DockBuilderFinish(dockspace);
@@ -34,7 +32,6 @@ void ClientWorkspace::buildDefaultLayout(ImGuiID dockspace) {
 void ClientWorkspace::onGameOpened() {
     selection_ = Selection{};
     visibleEntities_.clear();
-    assets_.reset(ctx_);
 }
 
 void ClientWorkspace::onMapLoaded() {
@@ -435,16 +432,8 @@ void ClientWorkspace::drawPanels() {
     };
     layers.showInViewport = [this](const Selection& s) { viewport_.focusOn(ctx_, s); };
     overview_.draw(ctx_, "Overview###Client.Overview", layers);
-    assets_.draw(ctx_, "Assets###Client.Assets");
     {
-        // The selected map entity's model is offered for export.
-        std::string model;
-        if (selection_.kind == SelectionKind::MapEntity && ctx_.map && selection_.index < ctx_.map->map.entities.size())
-            model = ctx_.classInfo(int32_t(ctx_.map->map.entities[selection_.index].classId)).mesh;
-        // Else the model selected in the Assets panel.
-        if (model.empty() && tr::toLowerAscii(assets_.selectedName()).find(".geo") != std::string::npos) model = assets_.selectedName();
-        blender_.draw(ctx_, "Blender###Client.Blender", model, assets_);
-        // Preview hook: RASAEDIT_CLIENT_FOCUS=<panel title> brings that panel to the front once (e.g. Blender###Client.Blender).
+        // Preview hook: RASAEDIT_CLIENT_FOCUS=<panel title> brings that panel to the front once (e.g. Lights###Client.Lights).
         static int frame = 0;
         if (const char* focus = std::getenv("RASAEDIT_CLIENT_FOCUS"); focus && *focus && ++frame == 10) ImGui::SetWindowFocus(focus);   // once the layout is built
     }
@@ -708,6 +697,11 @@ void ClientWorkspace::drawEntityPanel() {
         fitBounds_.push_back(index);                 // the new model's bounds once it is loaded
     }
     ImGui::Text("Mesh  %s", info.mesh.empty() ? "(none)" : info.mesh.c_str());
+    if (!info.mesh.empty() && ctx_.assets && ctx_.assets->exists(info.mesh)) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Open in Assets")) ctx_.showAssetRequest = info.mesh;
+        ImGui::SetItemTooltip("The model in the Assets workspace: preview, extract, export to Blender.");
+    }
     if (!info.mesh.empty() && ctx_.assets && !ctx_.assets->exists(info.mesh))
         ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.4f, 1.0f), "mesh file not found in the archives");
     if (ctx_.scene) ImGui::TextWrapped("Viewport: %s", ctx_.scene->modelStatus(index).c_str());

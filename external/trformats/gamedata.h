@@ -304,6 +304,21 @@ public:
         std::vector<FamilyAnimation> animations;
     };
     UsableAnimation usableStateAnimation(int32_t classId, int32_t state0, int32_t state1 = 97);
+    // How a model is tied to its animations in the client's tables (the model exchange offers them):
+    // - the string table ids naming a mesh file (a mesh id is its file name's string id; case-insensitive);
+    // - animationdata.animationFamily[id] = the family's name ("Idle - Non Combat", ...);
+    // - the families with animations for a skeleton (animationFamilyData keys (family, skeleton)) and for an object mesh
+    //   (animationFamilyObject keys (family, mesh id); familyObjectAnimations gives them), as (family id, name), by id;
+    // - how many meshes use a skeleton (meshSkeleton);
+    // - the base body meshes a suit (clothing / hair / face part) mesh is worn on: equipmentdata.equipableClassMeshSwapset
+    //   [(item class, base mesh)] = [(suit, swap set)] with suit[suit][1] = this mesh.
+    std::vector<int32_t> meshStringIds(const std::string& meshName);
+    std::string animationFamilyName(int32_t familyId);
+    std::vector<std::pair<int32_t, std::string>> skeletonFamilies(int32_t skeletonId);
+    std::vector<std::pair<int32_t, std::string>> objectFamilies(int32_t meshId);
+    std::vector<FamilyAnimation> familyObjectAnimations(int32_t familyId, int32_t meshId);
+    size_t skeletonMeshCount(int32_t skeletonId);
+    std::vector<int32_t> suitBaseMeshes(int32_t meshId);
 
 private:
     ZipArchive zip_;

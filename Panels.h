@@ -4,7 +4,6 @@
 // filters or the overview's zoom, is per workspace) and draws them under workspace-specific window
 // IDs, so each workspace keeps its own docking layout.
 
-#include "AssetPreview.h"
 #include "EditorContext.h"
 #include "WorldDatabase.h"
 
@@ -26,23 +25,6 @@ public:
     void draw(EditorContext& ctx, const char* title);
 private:
     char filter_[128] = "";
-};
-
-class AssetsPanel {
-public:
-    void reset(EditorContext& ctx);                  // after a game folder was opened
-    void draw(EditorContext& ctx, const char* title);
-    void render(EditorContext& ctx, SDL_GPUCommandBuffer* commands) { preview_.render(ctx, commands); }   // the model preview
-    void showAsset(EditorContext& ctx, const std::string& name);   // re-reads the list (new names included) and previews `name`
-    std::string selectedName() const { return selected_ >= 0 && size_t(selected_) < names_.size() ? names_[size_t(selected_)] : std::string(); }
-    void releaseGpuResources() { preview_.release(); }
-private:
-    void rebuild(EditorContext& ctx);
-    std::vector<std::string> names_;
-    std::vector<size_t> visible_;
-    char filter_[128] = "";
-    int selected_ = -1;
-    AssetPreview preview_;
 };
 
 // What the overview shows and may select, supplied by the workspace each frame.

@@ -2,6 +2,8 @@
 // real Editor with both workspaces, and the GPU viewport on any Vulkan driver (e.g. lavapipe).
 // Settings come from RASAEDIT_SETTINGS if set (use one that names a COPY of the database: the test saves), else the SDL
 // pref folder (settings.ini: gameRoot, database, map = adv_foreas_concordia_wilderness, workspace = server).
+#include <fstream>                   // before the defines below: the STL's streams must keep their access levels
+#include <mutex>
 #define _ALLOW_KEYWORD_MACROS                // MSVC STL (xkeycheck.h) otherwise rejects the two defines below
 #define private public                       // the test inspects workspace internals
 #define protected public
@@ -9,6 +11,8 @@
 #include "ModelExchange.h"
 #include "assetlibrary.h"
 #include "geofile.h"
+#include "dds.h"
+#include "image.h"
 #include <cmath>
 #undef private
 #undef protected
@@ -707,7 +711,7 @@ int main() {
             ctx.assets->clearOverrides();
             check(!ctx.assets->hasOverride(model), "Blender exchange: overrides cleared");
             frames(editor, device, 2);
-            check(ImGui::FindWindowByName("Blender###Client.Blender") != nullptr, "Blender exchange: the Blender panel is drawn");
+            check(true, "Blender exchange: (the panel is checked in the Assets workspace)");
         }
 
         // Map editing: move, rotate, duplicate, delete, undo; save into a COPY of the map folder (never the game's) and read back.
@@ -776,16 +780,106 @@ int main() {
             ctx.map->folder = realFolder;
         }
 
-        // Assets panel previews: a model (rendered by its own scene and renderer), a texture and a sound.
+        // Assets workspace: "Open in Assets" from the Client workspace selects the model there and the Blender panel offers it; then
+        // previews of a model (rendered by its own scene and renderer), a texture and sounds.
         {
-            ImGuiWindow* w = ImGui::FindWindowByName("Assets###Client.Assets");
+            ctx.showAssetRequest = "arch_forean_eloh_obelisk_v03.geo";
+            frames(editor, device, 3);
+            AssetsWorkspace& assets = *editor.assets_;
+            check(editor.active_ == &assets && dockspaceExists("AssetsDockSpace"), "Open in Assets switches to the Assets workspace");
+            check(assets.selected() == "arch_forean_eloh_obelisk_v03.geo" && assets.blender_.exportModel_ == assets.selected(),
+                  "the Assets browser selects the model and the Blender panel offers it for export");
+            std::printf("      Assets browser: %zu files, %zu kinds, %zu indexed by the library\n", assets.names_.size(), assets.kinds_.size(),
+                        ctx.assets->indexedCount());
+            check(assets.names_.size() == ctx.assets->indexedCount() && assets.kinds_.size() > 10, "the Assets browser lists every file of the game, by kind");
+            size_t models = 0;
+            for (const auto& k : assets.kinds_) models += k.extension == ".geo" ? k.count : 0;
+            check(models > 7000, "the browser's models kind counts every .geo");
+            {
+                // The Blender panel knows what each kind of model is and which animations the game's files tie to it.
+                struct Case {
+                    const char* model;
+                    const char* kindStarts;
+                };
+                const Case cases[] = {{"avatar_hum_m_nude_caucasian_v01.geo", "Creature / avatar body"}, {"npc_hum_m_officer_v01.geo", "Avatar part"},
+                                      {"ambient_m_firingrange_v01.geo", ""}, {"arch_hum_outpost_waypoint_fx.geo", "Special-FX accessory"},
+                                      {"arch_forean_eloh_obelisk_v03.geo", "Animated object"}, {"arch_hum_tent_medic_01_v01.geo", ""}};
+                bool ok = true;
+                for (const Case& c : cases) {
+                    if (!ctx.assets->exists(c.model)) continue;
+                    const ModelAnimationLinks links = assets.animationLinks_.find(*ctx.assets, ctx.gameData.get(), c.model);
+                    size_t animations = 0;
+                    for (const auto& g : links.groups) animations += g.animations.size();
+                    std::string kinds;
+                    for (const std::string& k : links.kinds) kinds += (kinds.empty() ? "" : " | ") + k;
+                    std::printf("      %s: %s; %zu groups, %zu animations\n", c.model, kinds.c_str(), links.groups.size(), animations);
+                    bool hasKind = c.kindStarts[0] == 0;
+                    for (const std::string& k : links.kinds) hasKind = hasKind || k.rfind(c.kindStarts, 0) == 0;
+                    ok = ok && hasKind;
+                }
+                check(ok, "the animation links tell bodies, avatar parts, FX accessories and animated objects apart");
+                // The preview plays a linked animation picked from its list (as a click does): the model is reloaded with it.
+                assets.showAsset("ambient_m_firingrange_v01.geo");
+                frames(editor, device, 20);
+                AssetPreview& p = assets.preview_;
+                const bool listed = p.links_ == &assets.links_ && !assets.links_.groups.empty();
+                std::string reload;
+                for (const auto& g : assets.links_.groups)
+                    for (const auto& a : g.animations)
+                        if (a.name.find("reload") != std::string::npos) reload = a.name;
+                if (p.scene_ && !reload.empty()) {
+                    p.playing_ = reload;
+                    p.scene_->setEntityAnimation(0, reload);
+                }
+                frames(editor, device, 20);
+                const SceneView::Model* m = p.scene_ && !p.scene_->placements_.empty() ? p.scene_->placements_[0].model : nullptr;
+                check(listed && !reload.empty() && m && m->loaded && m->animation.duration > 0 && p.scene_->lightTime < 5.0f,
+                      "the preview lists the linked animations and plays the one picked (the firing-range soldier's reload)");
+            }
+            {
+                // Out and back: Extract writes the file as the game reads it; a texture goes out as PNG and comes back encoded like the
+                // original (into the pending list - nothing reaches the game folder).
+                namespace fs = std::filesystem;
+                const std::string texture = "hum_m_nude_v00_df.dds";
+                std::snprintf(assets.folder_, sizeof assets.folder_, "%s", outputPath("smoke_assets").c_str());
+                std::error_code ec;
+                fs::remove_all(outputPath("smoke_assets"), ec);
+                assets.showAsset(texture);
+                frames(editor, device, 2);
+                const tr::Bytes original = ctx.assets->read(texture);
+                tr::Bytes extracted;
+                {
+                    // as the Extract and Export as PNG buttons do
+                    fs::create_directories(outputPath("smoke_assets"), ec);
+                    std::ofstream(outputPath("smoke_assets") + "/" + texture, std::ios::binary)
+                        .write(reinterpret_cast<const char*>(original.data()), std::streamsize(original.size()));
+                    const tr::Bytes png = tr::writePng(tr::ddsImage(original));
+                    std::ofstream(outputPath("smoke_assets") + "/hum.png", std::ios::binary).write(reinterpret_cast<const char*>(png.data()), std::streamsize(png.size()));
+                }
+                {
+                    std::lock_guard<std::mutex> lock(assets.dialogMutex_);
+                    assets.dialogPng_ = outputPath("smoke_assets") + "/hum.png";
+                }
+                frames(editor, device, 2);
+                bool same = assets.pending_.size() == 1 && assets.pending_[0].name == texture;
+                if (same) {
+                    const tr::DdsHeader a = tr::readDdsHeader(original), b = tr::readDdsHeader(assets.pending_[0].data);
+                    same = a.width == b.width && a.height == b.height && a.fourCC == b.fourCC && (a.mipCount > 1) == (b.mipCount > 1);
+                }
+                check(same, "a texture comes back from PNG under its name, its size and DDS format kept");
+                assets.pending_.clear();
+                assets.log_.clear();
+                check(ImGui::FindWindowByName("Blender###Assets.Blender") != nullptr && ImGui::FindWindowByName("Asset###Assets.Asset") != nullptr,
+                      "the Assets workspace draws its Asset and Blender panels");
+            }
+            ImGuiWindow* w = ImGui::FindWindowByName("Preview###Assets.Preview");
             auto showAssets = [&]() {           // as a click on its tab (the tab bar keeps its own selection)
                 if (!w || !w->DockNode) return;
                 w->DockNode->SelectedTabId = w->TabId;
                 if (w->DockNode->TabBar) w->DockNode->TabBar->NextSelectedTabId = w->TabId;
             };
             showAssets();
-            AssetPreview& preview = editor.client_->assets_.preview_;
+            AssetPreview& preview = editor.assets_->preview_;
             preview.select(ctx, "npc_eloh_hologram_large.geo");
             frames(editor, device, 30);
             check(preview.kind_ == AssetPreview::Kind::Model && preview.scene_ && preview.scene_->modelsLoaded() == 1 && preview.modelFitted_,
