@@ -74,6 +74,18 @@ void ClientWorkspace::beginEdit() {
         if (cleanUndoDepth_ > 0) --cleanUndoDepth_;
         else cleanReachable_ = false;
     }
+    // The map's .vis visibility data (leaf -> potentially visible leaves) was computed from the shipped geometry and is not
+    // rebuilt by the editor: moving or deleting a large occluder (a cave wall, a building) can leave things behind it culled in
+    // game. Warn for entities over 80 m across (the editor's own threshold, not the game's: 87 of Bootcamp's 1,435 entities, 212 of
+    // Concordia's 5,758 by their bounding spheres; at 30 m it was a third of all entities).
+    const int k = selectedEntity();
+    tr::Vec3 centre;
+    float radius = 0;
+    if (k >= 0 && ctx_.scene && ctx_.scene->entityBounds(size_t(k), centre, radius) && radius >= 40.0f)
+        ctx_.setStatus("Editing a large entity (" + std::to_string(int(radius * 2.0f + 0.5f)) +
+                           " m across): the map's .vis visibility data is not rebuilt, so moving or deleting it can leave what was behind "
+                           "it hidden in game.",
+                       true);
 }
 
 void ClientWorkspace::noteEdit() {
