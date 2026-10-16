@@ -884,6 +884,67 @@ int main(int argc, char** argv) {
                 scene.setServerContent(&content, database.get(), [&](int32_t id) { return data.classMeshName(id); },
                                        [&](const Creature& c) { return resolveAvatar(data, *database, c); });
             }
+            // RASA_SAVETEST with control points (worlds with marker_entity_id / default_owner): flip the first point's owner and add a
+            // point (id = largest + 1), save, reload; link the new point, save; then restore, which deletes the new point and its link.
+            const auto firstPoint = std::find_if(content.objects.begin(), content.objects.end(), [](const PlacedObject& o) { return o.kind == ObjectKind::ControlPoint; });
+            if (envValue("RASA_SAVETEST") && database->hasColumn("control_point", "marker_entity_id") && database->hasColumn("control_point", "default_owner") &&
+                firstPoint != content.objects.end()) {
+                const WorldContent original = content;
+                const auto largestId = [&] {
+                    const DbTable t = database->loadTable("control_point");
+                    int64_t m = 0;
+                    for (const auto& r : t.rows) m = std::max<int64_t>(m, r[size_t(t.column("id"))].asInt());
+                    return m;
+                };
+                const int64_t before = largestId();
+                WorldContent edited = content;
+                PlacedObject& first = *std::find_if(edited.objects.begin(), edited.objects.end(), [](const PlacedObject& o) { return o.kind == ObjectKind::ControlPoint; });
+                first.controlPoint.defaultOwner = first.controlPoint.defaultOwner == 1 ? 0 : 1;
+                PlacedObject added = first;
+                added.id = 0;
+                added.name = "save test point";
+                added.position.x += 3.0f;
+                added.controlPoint.markerEntityId = 0;
+                edited.objects.push_back(added);
+                WorldDatabase::SaveSummary summary;
+                std::string error;
+                bool ok = database->save(original, edited, summary, error);
+                const WorldContent reloaded = database->loadMap(content.mapContextId);
+                const PlacedObject* newPoint = nullptr;
+                const PlacedObject* flipped = nullptr;
+                for (const PlacedObject& o : reloaded.objects) {
+                    if (o.kind == ObjectKind::ControlPoint && o.name == "save test point") newPoint = &o;
+                    if (o.kind == ObjectKind::ControlPoint && o.id == first.id) flipped = &o;
+                }
+                ok = ok && newPoint && newPoint->id == before + 1 && newPoint->classId == added.classId && newPoint->controlPoint.markerEntityId == 0 &&
+                     newPoint->controlPoint.defaultOwner == added.controlPoint.defaultOwner && flipped &&
+                     flipped->controlPoint.defaultOwner == first.controlPoint.defaultOwner;
+                const int64_t newId = newPoint ? newPoint->id : 0;
+                WorldContent linked = reloaded;
+                if (newId) linked.controlPointLinks.push_back(ControlPointLink{newId, 5, 999002});
+                ok = database->save(reloaded, linked, summary, error) && ok;
+                const WorldContent withLink = database->loadMap(content.mapContextId);
+                bool linkSaved = false;
+                for (const ControlPointLink& l : withLink.controlPointLinks) linkSaved = linkSaved || (l.controlPointId == newId && l.objectId == 999002);
+                const bool restored = database->save(withLink, original, summary, error);
+                const DbTable links = database->loadTable("control_point_link");
+                bool linkGone = true;
+                for (const auto& r : links.rows) linkGone = linkGone && r[size_t(links.column("control_point_id"))].asInt() != newId;
+                const bool pointGone = largestId() == before;
+                const WorldContent back = database->loadMap(content.mapContextId);
+                const PlacedObject* firstBack = nullptr;
+                for (const PlacedObject& o : back.objects)
+                    if (o.kind == ObjectKind::ControlPoint && o.id == first.id) firstBack = &o;
+                const bool ownerBack = firstBack && firstBack->controlPoint.defaultOwner == firstPoint->controlPoint.defaultOwner;
+                std::printf("control point save test: %s (new id %lld after %lld, owner flipped and read back, link %s); restored %d: point %s, its links %s, "
+                            "owner %s%s%s\n",
+                            ok ? "saved" : "FAILED", static_cast<long long>(newId), static_cast<long long>(before), linkSaved ? "saved" : "NOT saved", restored,
+                            pointGone ? "deleted" : "STILL THERE", linkGone ? "deleted" : "STILL THERE", ownerBack ? "back" : "NOT back",
+                            error.empty() ? "" : ": ", error.c_str());
+                content = back;
+                scene.setServerContent(&content, database.get(), [&](int32_t id) { return data.classMeshName(id); },
+                                       [&](const Creature& c) { return resolveAvatar(data, *database, c); });
+            }
             // RASA_SAVETEST also round-trips the creature definitions: change the first creature with stats and appearance (level,
             // stat row removed, a slot recoloured), add a new creature, save, reload and check (the copy keeps the changes).
             if (envValue("RASA_SAVETEST")) {

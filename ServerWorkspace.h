@@ -144,6 +144,8 @@ private:
     // Control points: a point's links (garrison pools, hospital, waypoint, bosses, clan lockbox) and, for a pool / teleporter /
     // footlocker, the point it belongs to.
     void drawControlPointLinks(const PlacedObject& point);
+    void drawControlPointFields(PlacedObject& point);           // marker_entity_id / default_owner (Rasa.NET ControlPointEntry)
+    bool controlPointsEditable() const;                         // the world has those columns: points can be added and deleted
     void drawControlPointMembership(std::initializer_list<int32_t> kinds, int64_t objectId);
     void removeControlPointLinks(std::initializer_list<int32_t> kinds, int64_t objectId);   // the object is gone
     std::string linkedObjectLabel(int32_t kind, int64_t objectId) const;

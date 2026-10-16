@@ -439,6 +439,7 @@ void ServerWorkspace::drawServerPanel() {
                 addServerObject(SelectionKind::WormholeLock, ObjectKind::Footlocker);
             if (ImGui::MenuItem("Kraftwerk")) addServerObject(SelectionKind::Object, ObjectKind::Kraftwerk);
             if (ImGui::MenuItem("Logos stone")) addServerObject(SelectionKind::Object, ObjectKind::Logos);
+            if (controlPointsEditable() && ImGui::MenuItem("Control point")) addServerObject(SelectionKind::Object, ObjectKind::ControlPoint);
             ImGui::EndPopup();
         }
         const bool serverSelected = isSelected(selection_) && selection_.kind != SelectionKind::MapEntity;
@@ -780,12 +781,18 @@ void ServerWorkspace::deleteSelected() {
             break;
         case SelectionKind::Object:
             if (i >= serverContent_.objects.size()) return;
-            if (serverContent_.objects[i].kind == ObjectKind::ControlPoint) {
-                ctx_.setStatus("Control points can be edited but not deleted.", true);
+            if (serverContent_.objects[i].kind == ObjectKind::ControlPoint && !controlPointsEditable()) {
+                ctx_.setStatus("Control points can be edited but not deleted (this world's control_point table has no marker / owner columns).", true);
                 return;
             }
             beginEdit();
             what = objectKindName(serverContent_.objects[i].kind);
+            if (serverContent_.objects[i].kind == ObjectKind::ControlPoint) {
+                // Its links go with it (the save deletes them too).
+                const int64_t id = serverContent_.objects[i].id;
+                auto& links = serverContent_.controlPointLinks;
+                links.erase(std::remove_if(links.begin(), links.end(), [&](const ControlPointLink& l) { return l.controlPointId == id; }), links.end());
+            }
             if (serverContent_.objects[i].kind == ObjectKind::Footlocker && serverContent_.objects[i].id > 0)
                 removeControlPointLinks({6}, serverContent_.objects[i].id);
             if (serverContent_.objects[i].kind == ObjectKind::Kraftwerk && serverContent_.objects[i].id > 0) removeMarkerBindings(2, serverContent_.objects[i].id);
@@ -867,12 +874,13 @@ void ServerWorkspace::duplicateSelected() {
             break;
         }
         case SelectionKind::Object: {
-            if (i >= serverContent_.objects.size() || serverContent_.objects[i].kind == ObjectKind::ControlPoint) {
-                ctx_.setStatus("Control points cannot be duplicated.", true);
+            if (i >= serverContent_.objects.size() || (serverContent_.objects[i].kind == ObjectKind::ControlPoint && !controlPointsEditable())) {
+                ctx_.setStatus("Control points cannot be duplicated (this world's control_point table has no marker / owner columns).", true);
                 return;
             }
             PlacedObject copy = serverContent_.objects[i];
             copy.id = 0;
+            copy.controlPoint.markerEntityId = 0;               // a marker belongs to one point
             copy.position = shifted(copy.position);
             beginEdit();
             serverContent_.objects.push_back(copy);
@@ -1023,6 +1031,22 @@ void ServerWorkspace::addServerObject(SelectionKind kind, ObjectKind objectKind)
             o.mapContextId = serverContent_.mapContextId;
             o.position = point;
             o.name = std::string("New ") + objectKindName(objectKind);
+            if (objectKind == ObjectKind::ControlPoint) {
+                // The Eloh control point unless the map's points use another class; the first client control point marker no point
+                // has yet, else none.
+                if (o.classId == 0) o.classId = 3814;
+                for (const tr::MapScreenMarker& m : clientMarkers_) {
+                    if (m.type != 1) continue;
+                    bool used = false;
+                    for (const PlacedObject& existing : serverContent_.objects)
+                        if (existing.kind == ObjectKind::ControlPoint && existing.controlPoint.markerEntityId == m.entityId) used = true;
+                    if (!used) {
+                        o.controlPoint.markerEntityId = m.entityId;
+                        if (!m.name.empty()) o.name = m.name;
+                        break;
+                    }
+                }
+            }
             if (objectKind == ObjectKind::Emitter) {
                 o.classId = kEmitterClassId;
                 // The package of the emitter last chosen on this map, else none yet (the inspector asks for one).
@@ -1224,6 +1248,80 @@ void ServerWorkspace::drawControlPointMembership(std::initializer_list<int32_t> 
             ImGui::PopID();
         }
     }
+}
+
+bool ServerWorkspace::controlPointsEditable() const {
+    return database_ && database_->hasColumn("control_point", "marker_entity_id") && database_->hasColumn("control_point", "default_owner");
+}
+
+void ServerWorkspace::drawControlPointFields(PlacedObject& point) {
+    // Rasa.NET ControlPointEntry: the client's map marker the point's owner is sent under (MapMarkerManager: UpdateMapMarker with
+    // the marker's entity id; 0 = none sent), and the side that holds it until it first changes hands.
+    ImGui::SeparatorText("Control point");
+    const ImVec4 warn(1.0f, 0.8f, 0.3f, 1.0f);
+    const float fieldWidth = ImGui::GetFontSize() * 14;
+    ControlPointSettings& c = point.controlPoint;
+    const tr::MapScreenMarker* marker = c.markerEntityId ? clientMarker(c.markerEntityId) : nullptr;
+    const auto markerLabel = [&](const tr::MapScreenMarker& m) {
+        const float dx = m.x - point.position.x, dy = m.y - point.position.y, dz = m.z - point.position.z;
+        char buf[256];
+        std::snprintf(buf, sizeof buf, "%s  (%lld, %.0f m)", m.name.empty() ? tr::mapScreenMarkerTypeName(m.type) : m.name.c_str(),
+                      static_cast<long long>(m.entityId), std::sqrt(dx * dx + dy * dy + dz * dz));
+        return std::string(buf);
+    };
+    const std::string current = c.markerEntityId == 0 ? std::string("(none)")
+                                : marker              ? markerLabel(*marker)
+                                                      : std::to_string(c.markerEntityId) + "  (not a marker of this map)";
+    ImGui::SetNextItemWidth(fieldWidth);
+    if (ImGui::BeginCombo("Map marker", current.c_str())) {
+        if (ImGui::Selectable("(none)", c.markerEntityId == 0)) {
+            noteEdit();
+            c.markerEntityId = 0;
+            contentChanged();
+        }
+        // The client's control point markers of this map (uimapmarker type 1, CONTROL_POINT).
+        for (const tr::MapScreenMarker& m : clientMarkers_) {
+            if (m.type != 1) continue;
+            ImGui::PushID(static_cast<int>(m.entityId & 0x7FFFFFFF));
+            if (ImGui::Selectable(markerLabel(m).c_str(), m.entityId == c.markerEntityId)) {
+                noteEdit();
+                c.markerEntityId = m.entityId;
+                contentChanged();
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndCombo();
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("The client's control point marker on the map screen (uimapmarker); the server sends the point's owner under it.");
+    if (marker) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Move here")) {
+            // The seeds put a point at its marker (Rasa.NET ControlPointSeed); the server sets it on the ground beneath.
+            noteEdit();
+            point.position = tr::Vec3{marker->x, marker->y, marker->z};
+            contentChanged();
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Put the point at its marker's position (the server sets it on the ground beneath).");
+    }
+    if (c.markerEntityId != 0 && !marker) ImGui::TextColored(warn, "The client has no marker with this id on this map: no owner is shown on the map screen.");
+    if (marker && marker->type != 1) ImGui::TextColored(warn, "This marker is a %s, not a control point.", tr::mapScreenMarkerTypeName(marker->type));
+    for (const PlacedObject& other : serverContent_.objects)
+        if (&other != &point && other.kind == ObjectKind::ControlPoint && c.markerEntityId != 0 && other.controlPoint.markerEntityId == c.markerEntityId)
+            ImGui::TextColored(warn, "Control point %lld (%s) uses this marker too.", static_cast<long long>(other.id), other.name.c_str());
+    int owner = c.defaultOwner == 1 ? 1 : 0;
+    ImGui::SetNextItemWidth(fieldWidth);
+    if (ImGui::Combo("Starts held by", &owner, "Bane\0AFS\0")) {
+        noteEdit();
+        c.defaultOwner = owner;
+        contentChanged();
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("default_owner: who holds the point until it first changes hands. The server keeps the current owner apart\n"
+                          "(control_point_state), so a change applies to a point that has never changed hands.");
+    if (c.defaultOwner != 0 && c.defaultOwner != 1)
+        ImGui::TextColored(warn, "default_owner %lld: the server reads it as Bane.", static_cast<long long>(c.defaultOwner));
+    if (point.id <= 0) ImGui::TextDisabled("New: saved with the table's largest id + 1.");
 }
 
 void ServerWorkspace::drawControlPointLinks(const PlacedObject& point) {
@@ -1730,6 +1828,7 @@ void ServerWorkspace::drawServerObjectEditor() {
             };
             if (o.kind == ObjectKind::AmbientNpc)
                 ImGui::TextDisabled("A class with the STATELESSSWITCH augmentation (UsableStatelessNPC*): its own looping animations, nothing to use.");
+            if (o.kind == ObjectKind::ControlPoint && controlPointsEditable()) drawControlPointFields(o);
             if (o.kind == ObjectKind::ControlPoint && database_ && database_->hasTable("control_point_link")) drawControlPointLinks(o);
             if (o.kind == ObjectKind::Emitter) {
                 // Rasa.NET EmitterManager: the client attaches the package while the emitter is on (fxpackageemitter.py TurnOn:

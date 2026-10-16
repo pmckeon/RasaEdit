@@ -999,6 +999,17 @@ WorldContent WorldDatabase::loadMap(int32_t mapContextId) {
         s.bindInt(1, mapContextId);
         while (s.step()) content.objects.push_back(PlacedObject{t.kind, s.integer(0), s.int32(1), s.int32(2), s.vec3(3), s.real(6), s.text(7)});
     }
+    // The control points' own columns (Rasa.NET upstream).
+    if (hasColumn("control_point", "marker_entity_id") && hasColumn("control_point", "default_owner")) {
+        Statement s(db_, "SELECT id, marker_entity_id, default_owner FROM control_point WHERE map_context_id = ?1");
+        s.bindInt(1, mapContextId);
+        while (s.step())
+            for (PlacedObject& o : content.objects)
+                if (o.kind == ObjectKind::ControlPoint && o.id == s.integer(0)) {
+                    o.controlPoint.markerEntityId = s.integer(1);
+                    o.controlPoint.defaultOwner = s.integer(2);
+                }
+    }
     // Rasa.NET upstream object tables (older worlds have none of them).
     if (hasTable("ambient_npc") && requireColumns("ambient_npc", {"id", "map_context_id", "class_id", "pos_x", "pos_y", "pos_z", "rotation", "comment"})) {
         Statement s(db_, "SELECT id, class_id, map_context_id, pos_x, pos_y, pos_z, rotation, comment FROM ambient_npc WHERE map_context_id = ?1 ORDER BY id");
@@ -1142,7 +1153,9 @@ bool same(const DestructibleSettings& a, const DestructibleSettings& b) {
 bool same(const PlacedObject& a, const PlacedObject& b) {
     return a.classId == b.classId && sameVec(a.position, b.position) && a.rotation == b.rotation && a.name == b.name &&
            (a.kind != ObjectKind::WorldUsable || same(a.usable, b.usable)) && (a.kind != ObjectKind::WorldDestructible || same(a.destructible, b.destructible)) &&
-           (a.kind != ObjectKind::Emitter || (a.emitter.packageId == b.emitter.packageId && a.emitter.isOn == b.emitter.isOn));
+           (a.kind != ObjectKind::Emitter || (a.emitter.packageId == b.emitter.packageId && a.emitter.isOn == b.emitter.isOn)) &&
+           (a.kind != ObjectKind::ControlPoint ||
+            (a.controlPoint.markerEntityId == b.controlPoint.markerEntityId && a.controlPoint.defaultOwner == b.controlPoint.defaultOwner));
 }
 bool same(const WormholeLock& a, const WormholeLock& b) {
     return a.fromTeleporterId == b.fromTeleporterId && a.toTeleporterId == b.toTeleporterId && a.kind == b.kind && a.value == b.value &&
@@ -1387,7 +1400,13 @@ bool WorldDatabase::save(const WorldContent& saved, const WorldContent& edited, 
         for (const PlacedObject& b : saved.objects) {
             bool kept = false;
             for (const PlacedObject& a : edited.objects) if (a.kind == b.kind && a.id == b.id) { kept = true; break; }
-            if (kept || b.kind == ObjectKind::ControlPoint) continue;          // control points are never deleted
+            if (kept) continue;
+            if (b.kind == ObjectKind::ControlPoint && hasTable("control_point_link")) {
+                // Its links go with it (the server logs a link to a missing point as an error).
+                Statement links(db_, "DELETE FROM control_point_link WHERE control_point_id = ?1");
+                links.bindInt(1, b.id);
+                links.run(db_);
+            }
             Statement s(db_, std::string("DELETE FROM ") + objectTable(b.kind) + " WHERE id = ?1");
             s.bindInt(1, b.id);
             s.run(db_);
@@ -1397,7 +1416,37 @@ bool WorldDatabase::save(const WorldContent& saved, const WorldContent& edited, 
             const PlacedObject* before = nullptr;
             for (const PlacedObject& b : saved.objects) if (b.kind == o.kind && b.id == o.id) { before = &b; break; }
             if (o.id != 0 && (!before || same(*before, o))) continue;
-            if (o.id == 0 && o.kind == ObjectKind::ControlPoint) continue;     // not creatable
+            if (o.kind == ObjectKind::ControlPoint) {
+                // Columns per Rasa.NET ControlPointEntry; the id is not generated (largest + 1).
+                const bool extra = hasColumn("control_point", "marker_entity_id") && hasColumn("control_point", "default_owner");
+                int64_t id = o.id;
+                if (id == 0) {
+                    Statement next(db_, "SELECT COALESCE(MAX(id), 0) + 1 FROM control_point");
+                    if (next.step()) id = next.integer(0);
+                }
+                const std::string sql =
+                    o.id == 0 ? std::string("INSERT INTO control_point (class_id, map_context_id, pos_x, pos_y, pos_z, name, rotation") +
+                                    (extra ? ", marker_entity_id, default_owner" : "") + ", id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7" +
+                                    (extra ? ", ?8, ?9" : "") + ", ?10)"
+                              : std::string("UPDATE control_point SET class_id = ?1, map_context_id = ?2, pos_x = ?3, pos_y = ?4, pos_z = ?5, name = ?6, "
+                                            "rotation = ?7") + (extra ? ", marker_entity_id = ?8, default_owner = ?9" : "") + " WHERE id = ?10";
+                Statement s(db_, sql);
+                s.bindInt(1, o.classId);
+                s.bindInt(2, context);
+                s.bindReal(3, o.position.x);
+                s.bindReal(4, o.position.y);
+                s.bindReal(5, o.position.z);
+                s.bindText(6, o.name);
+                s.bindReal(7, o.rotation);
+                if (extra) {
+                    s.bindInt(8, o.controlPoint.markerEntityId);
+                    s.bindInt(9, o.controlPoint.defaultOwner);
+                }
+                s.bindInt(10, id);
+                s.run(db_);
+                ++(o.id == 0 ? summary.inserted : summary.updated);
+                continue;
+            }
             if (o.kind == ObjectKind::Emitter) {
                 // Columns per Rasa.NET MapEmitterEntry (no class column: always FXPackageEmitter).
                 Statement s(db_, o.id == 0 ? "INSERT INTO map_emitter (map_context_id, pos_x, pos_y, pos_z, rotation, package_id, is_on, comment) "

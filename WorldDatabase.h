@@ -243,6 +243,16 @@ struct DestructibleSettings {
     int64_t side = 0;                    // a force field's side: 0 the class's default (Bane's), 1 AFS, 2 Bane
 };
 
+// control_point columns beyond the common ones (Rasa.NET ControlPointEntry; both NOT NULL): the client's entity id of the point's
+// map marker (a CONTROL_POINT entry of uimapmarker.factionedmarkers - the point's owner is sent under it, 0 = no marker state), and
+// who holds it until it first changes hands (0 Bane, 1 AFS; the server reads anything else as Bane). The id is not generated:
+// the editor gives a new point the table's largest id + 1 (the server keeps each point's current owner by id in
+// control_point_state, so an id is never reused).
+struct ControlPointSettings {
+    int64_t markerEntityId = 0;
+    int64_t defaultOwner = 1;
+};
+
 // map_emitter columns.
 struct EmitterSettings {
     int64_t packageId = 0;               // the client's string table id of the .pkg
@@ -260,6 +270,7 @@ struct PlacedObject {
     UsableSettings usable;               // WorldUsable only
     DestructibleSettings destructible;   // WorldDestructible only
     EmitterSettings emitter;             // Emitter only
+    ControlPointSettings controlPoint;   // ControlPoint only
 };
 
 // wormhole_lock (Rasa.NET upstream WormholeLockEntry, Managers.Wormholes): a condition on travelling between world wormholes
