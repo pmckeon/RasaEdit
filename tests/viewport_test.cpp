@@ -686,6 +686,18 @@ int main(int argc, char** argv) {
             content = database->loadMap(database->contextIdForMap(map.name));
             scene.setServerContent(&content, database.get(), [&](int32_t id) { return data.classMeshName(id); },
                                    [&](const Creature& c) { return resolveAvatar(data, *database, c); });
+            // The client's map-screen markers, as the Server workspace sets them (drawn with the server layer).
+            try {
+                const int32_t templateId = int32_t(tr::py::asInt(
+                    tr::py::item(tr::py::dictGet(data.global("generated.client.gamecontext", "lookup"), content.mapContextId), 3), -1));
+                std::vector<SceneView::ClientMapMarker> drawn;
+                for (const tr::MapScreenMarker& m : data.factionedMapMarkers(templateId))
+                    drawn.push_back(SceneView::ClientMapMarker{m.entityId, m.type, tr::Vec3{m.x, m.y, m.z}});
+                std::printf("client map-screen markers: %zu\n", drawn.size());
+                scene.setClientMapMarkers(std::move(drawn));
+            } catch (const std::exception& e) {
+                std::printf("client map-screen markers: %s\n", e.what());
+            }
             // RASA_SAVETEST=1 (use a COPY of the database): edit the arrival points - move the first, add one to its pool, delete
             // the last - save, reload and check the rows; then restore and save again.
             if (envValue("RASA_SAVETEST") && content.arrivals.size() >= 2) {

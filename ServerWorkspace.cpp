@@ -173,6 +173,7 @@ void ServerWorkspace::drawPanels() {
     layers.showServer = viewport_.options.showServer;
     layers.showMissionAreas = viewport_.options.showMissionAreas;
     layers.showRegions = viewport_.options.showRegions;
+    layers.clientMarkers = &clientMarkers_;
     layers.label = [this](const Selection& s) { return serverObjectLabel(s); };
     layers.position = [this](const Selection& s, tr::Vec3& p) { return selectionPosition(s, p); };
     layers.showInViewport = [this](const Selection& s) { viewport_.focusOn(ctx_, s); };
@@ -275,6 +276,11 @@ void ServerWorkspace::loadServerContent() {
     clientMarkers_.clear();
     if (ctx_.gameData && ctx_.mapTemplateId >= 0) {
         try { clientMarkers_ = ctx_.gameData->factionedMapMarkers(ctx_.mapTemplateId); } catch (const std::exception&) {}
+    }
+    if (ctx_.scene) {
+        std::vector<SceneView::ClientMapMarker> drawn;
+        for (const tr::MapScreenMarker& m : clientMarkers_) drawn.push_back(SceneView::ClientMapMarker{m.entityId, m.type, tr::Vec3{m.x, m.y, m.z}});
+        ctx_.scene->setClientMapMarkers(std::move(drawn));
     }
     try {
         serverContent_ = database_->loadMap(context);

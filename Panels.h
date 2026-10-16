@@ -57,6 +57,7 @@ struct OverviewLayers {
     std::function<std::string(const Selection&)> label;            // tooltip text for server objects
     std::function<bool(const Selection&, tr::Vec3&)> position;     // world position of a selection
     std::function<void(const Selection&)> showInViewport;          // double-click on a marker: select it and focus the 3D view
+    const std::vector<tr::MapScreenMarker>* clientMarkers = nullptr;   // the client's map-screen markers (drawn with the Server layer)
 };
 
 class OverviewPanel {

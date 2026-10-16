@@ -2949,7 +2949,63 @@ void SceneView::queueDraws(const Selection& selection) {
             }
         }
     }
+
+    // The client's map-screen markers (with the Server layer): a 6 m pole and a 1 m ring, a line to the bound object.
+    if (showServer) {
+        for (const ClientMapMarker& m : clientMapMarkers_) {
+            const tr::Vec3 d = subtract(m.position, camera_.position);
+            if (dot(d, d) > maxDistance2) continue;
+            tr::Vec3 target;
+            const bool bound = clientMarkerTarget(m.entityId, target);
+            if (!visible(m.position, 6.0f) && !(bound && visible(target, 3.0f))) continue;
+            const Vec4f& colour = bound ? markerColour::mapScreenMarker : markerColour::mapScreenMarkerUnbound;
+            Mat4 pole = identityMatrix();
+            pole.row0 = {1, 0, 0, m.position.x};
+            pole.row1 = {0, 6, 0, m.position.y};
+            pole.row2 = {0, 0, 1, m.position.z};
+            renderer_.draw(pole_, pole, colour, false);
+            Mat4 ring = identityMatrix();
+            ring.row0 = {1, 0, 0, m.position.x};
+            ring.row1 = {0, 1, 0, m.position.y + 6.0f};
+            ring.row2 = {0, 0, 1, m.position.z};
+            renderer_.draw(unitCircle_, ring, colour, false);
+            if (bound) {
+                const tr::Vec3 t = subtract(target, m.position);
+                Mat4 line = identityMatrix();
+                line.row0 = {1, t.x, 0, m.position.x};
+                line.row1 = {0, t.y, 0, m.position.y + 0.3f};
+                line.row2 = {0, t.z, 1, m.position.z};
+                renderer_.draw(pole_, line, colour, false);
+            }
+        }
+    }
     endSection(5);
+}
+
+bool SceneView::clientMarkerTarget(int64_t entityId, tr::Vec3& position) const {
+    if (!serverContent_ || entityId == 0) return false;
+    // A control point's own marker (control_point.marker_entity_id), else a map_marker binding (object kind 1 teleporter, 2 Kraftwerk).
+    for (const PlacedObject& o : serverContent_->objects)
+        if (o.kind == ObjectKind::ControlPoint && o.controlPoint.markerEntityId == entityId) {
+            position = o.position;
+            return true;
+        }
+    for (const MapMarkerBinding& b : serverContent_->mapMarkers) {
+        if (b.markerEntityId != entityId) continue;
+        if (b.objectKind == 1)
+            for (const Teleporter& t : serverContent_->teleporters)
+                if (t.id == b.objectId) {
+                    position = t.position;
+                    return true;
+                }
+        if (b.objectKind == 2)
+            for (const PlacedObject& o : serverContent_->objects)
+                if (o.kind == ObjectKind::Kraftwerk && o.id == b.objectId) {
+                    position = o.position;
+                    return true;
+                }
+    }
+    return false;
 }
 
 namespace {

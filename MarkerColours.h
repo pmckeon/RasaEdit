@@ -21,6 +21,8 @@ inline const Vec4f emitter{1.0f, 0.45f, 0.55f, 1};             // FX emitters (m
 inline const Vec4f arrival{0.8f, 0.15f, 0.2f, 1};              // spawn arrival points (dropship pads, Bane teleporters)
 inline const Vec4f patrol{0.1f, 0.75f, 0.6f, 1};                // spawn pool patrol steps and the circuit between them
 inline const Vec4f mapLink{1.0f, 0.35f, 0.85f, 1};             // map links (enabled)
+inline const Vec4f mapScreenMarker{1.0f, 0.75f, 0.88f, 1};     // the client's map-screen markers (uimapmarker), line to the object bound to it
+inline const Vec4f mapScreenMarkerUnbound{0.6f, 0.5f, 0.56f, 1};   // ... with no object bound (no state sent for it)
 inline const Vec4f mapLinkDisabled{0.55f, 0.45f, 0.55f, 1};    // map links (disabled)
 inline const Vec4f missionArea{0.8f, 0.65f, 0.45f, 1};         // mission areas
 inline const Vec4f region{0.85f, 0.85f, 0.85f, 1};             // regions (surface)

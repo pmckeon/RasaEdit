@@ -91,6 +91,16 @@ public:
                           AvatarResolver avatarFor = nullptr);
     // Rebuilds the server placements after the content was edited (same content object).
     void refreshServerContent();
+    // The client's map-screen markers of this map (uimapmarker.factionedmarkers), drawn with the Server layer: a pole and ring at
+    // each, a line to the teleporter / Kraftwerk (map_marker) or control point (marker_entity_id) bound to it, dim when none is.
+    struct ClientMapMarker {
+        int64_t entityId = 0;
+        int32_t type = 0;
+        tr::Vec3 position;
+    };
+    void setClientMapMarkers(std::vector<ClientMapMarker> markers) { clientMapMarkers_ = std::move(markers); }
+    // Where the object bound to a client marker is (false: none bound, or not on this map).
+    bool clientMarkerTarget(int64_t entityId, tr::Vec3& position) const;
 
     // World-space ray through a point of the viewport (normalised device coordinates, +y up).
     void viewRay(float ndcX, float ndcY, tr::Vec3& origin, tr::Vec3& direction) const;
@@ -547,6 +557,7 @@ private:
     std::string mapLightsError_;
     std::vector<ServerPlacement> serverPlacements_;
     const WorldContent* serverContent_ = nullptr;
+    std::vector<ClientMapMarker> clientMapMarkers_;
     const WorldDatabase* serverDatabase_ = nullptr;
     std::function<std::string(int32_t)> serverMeshForClass_;
     std::function<std::string(int32_t, int32_t)> usablePackageFor_;

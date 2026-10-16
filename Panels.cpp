@@ -45,6 +45,8 @@ void drawMarkerLegend() {
     row(markerColour::patrol, "Patrol step, lines along the pool's circuit");
     row(markerColour::mapLink, "Map link");
     row(markerColour::mapLinkDisabled, "Map link (disabled)");
+    row(markerColour::mapScreenMarker, "Client map-screen marker, line to its bound object");
+    row(markerColour::mapScreenMarkerUnbound, "Client map-screen marker, nothing bound");
     row(markerColour::missionArea, "Mission area");
     row(markerColour::region, "Region");
     row(markerColour::regionUnderground, "Region (underground)");
@@ -336,6 +338,7 @@ void OverviewPanel::draw(EditorContext& ctx, const char* title, const OverviewLa
     // objects (yellow), map links (magenta), mission areas (orange), regions (green).
     Selection nearestServer;
     float nearestServerDistance = 8.0f * 8.0f;
+    const tr::MapScreenMarker* hoveredMarker = nullptr;      // a client map-screen marker under the cursor (tooltip only)
     auto consider = [&](const ImVec2& p, const Selection& s) {
         if (!hovered || !layers.selectServer) return;
         const float dx = p.x - io.MousePos.x, dy = p.y - io.MousePos.y;
@@ -387,6 +390,26 @@ void OverviewPanel::draw(EditorContext& ctx, const char* title, const OverviewLa
                                   toU32(markerColour::patrol) & 0xC0FFFFFF, 1.5f);
                 draw->AddCircleFilled(p, 3.5f, toU32(markerColour::patrol), 8);
                 consider(p, Selection{SelectionKind::PatrolStep, k});
+            }
+            // The client's map-screen markers: a ring, a line to the object bound to it (map_marker, or a control point's
+            // marker_entity_id); the tooltip names the marker and its binding.
+            if (layers.clientMarkers && ctx.scene) {
+                float hoveredDistance = 7.0f * 7.0f;
+                for (const tr::MapScreenMarker& m : *layers.clientMarkers) {
+                    const ImVec2 p = toScreen(m.x, m.z);
+                    tr::Vec3 target;
+                    const bool bound = ctx.scene->clientMarkerTarget(m.entityId, target);
+                    const ImU32 colour = toU32(bound ? markerColour::mapScreenMarker : markerColour::mapScreenMarkerUnbound);
+                    if (bound) draw->AddLine(p, toScreen(target.x, target.z), colour & 0xA0FFFFFF, 1.0f);
+                    draw->AddCircle(p, 6.0f, colour, 16, 2.0f);
+                    if (hovered) {
+                        const float dx = p.x - io.MousePos.x, dy = p.y - io.MousePos.y;
+                        if (dx * dx + dy * dy < hoveredDistance) {
+                            hoveredDistance = dx * dx + dy * dy;
+                            hoveredMarker = &m;
+                        }
+                    }
+                }
             }
             for (size_t k = 0; k < server.mapLinks.size(); ++k) {
                 const MapLink& l = server.mapLinks[k];
@@ -449,6 +472,12 @@ void OverviewPanel::draw(EditorContext& ctx, const char* title, const OverviewLa
             *layers.selection = nearestServer;
             if (layers.showInViewport) layers.showInViewport(nearestServer);
         }
+    } else if (hoveredMarker && ctx.scene) {
+        tr::Vec3 target;
+        const bool bound = ctx.scene->clientMarkerTarget(hoveredMarker->entityId, target);
+        ImGui::SetTooltip("Map-screen marker: %s [%s]\nentity %lld at (%.1f, %.1f, %.1f)\n%s", hoveredMarker->name.c_str(),
+                          tr::mapScreenMarkerTypeName(hoveredMarker->type), static_cast<long long>(hoveredMarker->entityId), hoveredMarker->x,
+                          hoveredMarker->y, hoveredMarker->z, bound ? "bound to a server object (line)" : "nothing bound: the server sends no state for it");
     } else if (nearest >= 0) {
         const ClassInfo& info = ctx.classInfo(entities[size_t(nearest)].classId);
         ImGui::SetTooltip("%s\n%s\n%.1f, %.1f, %.1f", info.known ? info.name.c_str() : "(unknown class)", info.mesh.c_str(),
