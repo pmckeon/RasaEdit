@@ -173,7 +173,8 @@ private:
     void drawClassFlags(const CreatureDefinition& d);
     SoundPlayer cryPlayer_;                                       // battle cry previews
     int32_t creatureSelected_ = 0;                    // creature id shown in the editor (0: none)
-    int focusModules_ = 0;                            // likewise the Modules panel
+    int focusModules_ = 0;
+    int focusMissions_ = 0;                           // likewise the Missions panel                            // likewise the Modules panel
     int focusCreatures_ = 0;                          // frames left to bring the Creatures panel to the front (preview hook)
     char creatureListFilter_[64] = "";
     bool creatureMapOnly_ = false;

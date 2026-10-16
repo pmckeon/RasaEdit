@@ -586,6 +586,17 @@ int main() {
                     server.missions_.validationDirty_ = true;
                 }
                 check(!server.missions_.changed() && server.missions_.validation().diagnostics.empty(), "mission content back as saved");
+                // Reference pickers: an action's target objective is among the objectives its mission lists.
+                const int targetColumn = missionActions->column("target_objective_id");
+                bool listed = false, tried = false;
+                for (const auto& a : missionActions->rows) {
+                    if (a[size_t(targetColumn)].isNull()) continue;
+                    tried = true;
+                    const auto choices = server.missions_.referenceChoices(ctx, *missionActions, a, MissionEditor::missionReference("target_objective_id"));
+                    for (const auto& c : choices) listed = listed || c.first == a[size_t(targetColumn)].asInt();
+                    break;
+                }
+                check(tried && listed, "reference picker lists the action's target objective");
             }
         }
 

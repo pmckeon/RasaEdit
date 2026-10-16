@@ -36,7 +36,7 @@ void ServerWorkspace::buildDefaultLayout(ImGuiID dockspace) {
 
 void ServerWorkspace::beginFrame() {
     if (!ImGui::IsAnyItemActive() && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) editItem_ = 0;     // interaction finished
-    // RASAEDIT_SERVER_SELECT=<pool|teleporter|object|creature|module|recipe>:<database id>: start with that server object (or creature, in the
+    // RASAEDIT_SERVER_SELECT=<pool|teleporter|object|creature|module|recipe|mission>:<database id>: start with that server object (or creature, in the
     // Creatures panel) selected (previews), once the
     // map's content is loaded.
     static bool preselected = false;
@@ -62,6 +62,10 @@ void ServerWorkspace::beginFrame() {
                 recipes_.selected_ = id;
                 craftingTab_ = 2;
                 focusModules_ = 10;
+            }
+            if (kind == "mission") {
+                missions_.selectMission(id);
+                focusMissions_ = 10;
             }
             if (kind == "creature") {
                 creatureSelected_ = int32_t(id);
@@ -2021,6 +2025,10 @@ void ServerWorkspace::drawServerObjectEditor() {
 // Missions
 // ------------------------------------------------------------------------------------------
 void ServerWorkspace::drawMissionPanel() {
+    if (focusMissions_ > 0) {
+        ImGui::SetNextWindowFocus();
+        --focusMissions_;
+    }
     if (!ImGui::Begin("Missions###Server.Missions")) { ImGui::End(); return; }
     if (!database_) ImGui::TextDisabled("Open a server database first.");
     else if (!missions_.loaded()) ImGui::TextDisabled("This database has no mission tables.");

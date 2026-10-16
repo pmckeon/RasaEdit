@@ -30,6 +30,17 @@ public:
     // The server's start-up checks on the edited content (MissionValidation.h), recomputed after each change.
     const MissionValidationResult& validation();
     const MissionValidationResult& savedValidation() const { return savedValidation_; }
+    void selectMission(int64_t missionId);            // its enabled revision, else its first
+    struct MissionReference {
+        const char* table = nullptr;                  // the table the column names a row of (nullptr: not a reference)
+        const char* key = nullptr;                    // that row's own key column
+        const char* what = "";
+    };
+    static MissionReference missionReference(const char* column);
+    // The rows a reference column of `row` (in `table`) can name: this mission's (and revision's) rows of the target table; spawns of
+    // the row's spawn group; every mission for required_mission_id. (id, label)
+    std::vector<std::pair<int64_t, std::string>> referenceChoices(EditorContext& ctx, const DbTable& table, const std::vector<DbValue>& row,
+                                                                  const MissionReference& ref);
 
 private:
     struct Table {

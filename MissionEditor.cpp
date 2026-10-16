@@ -201,6 +201,19 @@ void MissionEditor::load(const WorldDatabase& database) {
     validationDirty_ = false;
 }
 
+void MissionEditor::selectMission(int64_t missionId) {
+    if (tables_.empty()) return;
+    const DbTable& d = tables_.front().edited;
+    const int id = d.column("mission_id"), revision = d.column("content_revision"), enabled = d.column("enabled");
+    for (const auto& r : d.rows) {
+        if (r[size_t(id)].asInt() != missionId) continue;
+        if (selectedMission_ != missionId || r[size_t(enabled)].asInt() != 0) {
+            selectedMission_ = missionId;
+            selectedRevision_ = r[size_t(revision)].t;
+        }
+    }
+}
+
 MissionValidationResult MissionEditor::validateTables(bool edited) const {
     std::map<std::string, const DbTable*> byName;
     for (const Table& t : tables_) byName[t.spec->table] = edited ? &t.edited : &t.saved;
@@ -356,6 +369,68 @@ std::string MissionEditor::missionLabel(EditorContext& ctx, const std::vector<Db
     return text;
 }
 
+// Columns that name another row of the same mission (Rasa.NET's mission content keys) or a mission.
+MissionEditor::MissionReference MissionEditor::missionReference(const char* column) {
+    static const struct { const char* column; MissionReference ref; } kRefs[] = {
+        {"target_objective_id", {"mission_objective_definition", "objective_id", "objective"}},
+        {"related_objective_id", {"mission_objective_definition", "objective_id", "objective"}},
+        {"reward_id", {"mission_reward_definition", "reward_id", "reward"}},
+        {"spawn_group_id", {"mission_spawn_group", "spawn_group_id", "spawn group"}},
+        {"scenario_id", {"mission_scenario", "scenario_id", "scenario"}},
+        {"target_scenario_id", {"mission_scenario", "scenario_id", "scenario"}},
+        {"area_id", {"mission_area", "area_id", "area"}},
+        {"indicator_id", {"mission_indicator", "indicator_id", "indicator"}},
+        {"spawn_id", {"mission_spawn", "spawn_id", "spawn"}},
+        {"required_mission_id", {"mission_content_definition", "mission_id", "mission"}}};
+    for (const auto& r : kRefs)
+        if (std::strcmp(r.column, column) == 0) return r.ref;
+    return MissionReference{};
+}
+
+std::vector<std::pair<int64_t, std::string>> MissionEditor::referenceChoices(EditorContext& ctx, const DbTable& table, const std::vector<DbValue>& row,
+                                                                            const MissionReference& ref) {
+    std::vector<std::pair<int64_t, std::string>> out;
+    const Table* target = this->table(ref.table);
+    if (!target) return out;
+    const DbTable& t = target->edited;
+    const int key = t.column(ref.key);
+    if (key < 0) return out;
+    const auto value = [](const DbTable& tt, const std::vector<DbValue>& r, const char* column) -> const DbValue* {
+        const int c = tt.column(column);
+        return c < 0 ? nullptr : &r[size_t(c)];
+    };
+    const DbValue* mission = value(table, row, "mission_id");
+    const DbValue* revision = value(table, row, "content_revision");
+    const DbValue* group = value(table, row, "spawn_group_id");
+    const bool missions = std::strcmp(ref.table, "mission_content_definition") == 0;
+    std::set<int64_t> seen;
+    for (const auto& r : t.rows) {
+        if (!missions) {
+            const DbValue* m = value(t, r, "mission_id");
+            const DbValue* rv = value(t, r, "content_revision");
+            if (!mission || !revision || !m || !rv || *m != *mission || *rv != *revision) continue;
+            if (std::strcmp(ref.table, "mission_spawn") == 0) {
+                const DbValue* g = value(t, r, "spawn_group_id");
+                if (!group || !g || *g != *group) continue;
+            }
+        }
+        const int64_t id = r[size_t(key)].asInt();
+        if (!seen.insert(id).second) continue;
+        std::string label = std::to_string(id);
+        if (missions) {
+            label = missionLabel(ctx, r);
+        } else {
+            for (const char* column : {"name", "comment"})
+                if (const DbValue* text = value(t, r, column); text && !text->t.empty()) {
+                    label += "  " + text->t;
+                    break;
+                }
+        }
+        out.emplace_back(id, label);
+    }
+    return out;
+}
+
 bool MissionEditor::drawRowFields(EditorContext& ctx, const WorldDatabase& database, Table& t, std::vector<DbValue>& row, bool writable) {
     const DbTable& d = t.edited;
     const float width = ImGui::GetFontSize() * 11;
@@ -447,6 +522,33 @@ bool MissionEditor::drawRowFields(EditorContext& ctx, const WorldDatabase& datab
                 if (ImGui::InputScalar(f.label, ImGuiDataType_S64, &i)) { v = DbValue::integer(i); changed = true; }
                 // What the number refers to.
                 std::string hint;
+                // An id of another row of this mission (objective, reward, spawn group, scenario, area, indicator, spawn, or a mission):
+                // a picker of the rows it can name, and a warning when it names none.
+                if (const MissionReference ref = missionReference(f.column); ref.table) {
+                    std::vector<std::pair<int64_t, std::string>> choices = referenceChoices(ctx, d, row, ref);
+                    ImGui::SameLine();
+                    if (ImGui::BeginCombo("##pick", "", ImGuiComboFlags_NoPreview | ImGuiComboFlags_HeightLarge)) {
+                        for (const auto& choice : choices)
+                            if (ImGui::Selectable(choice.second.c_str(), choice.first == i)) {
+                                v = DbValue::integer(choice.first);
+                                i = choice.first;
+                                changed = true;
+                            }
+                        if (choices.empty()) ImGui::TextDisabled("(none in this mission)");
+                        ImGui::EndCombo();
+                    }
+                    ImGui::SetItemTooltip("Pick from this mission's %s", ref.what);
+                    bool found = false;
+                    for (const auto& choice : choices)
+                        if (choice.first == i) {
+                            found = true;
+                            hint = choice.second;
+                        }
+                    if (!found) {
+                        ImGui::SameLine();
+                        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "(no such %s)", ref.what);
+                    }
+                }
                 if (f.kind == FieldKind::Creature) {
                     const Creature* cr = database.creature(int32_t(i));
                     hint = cr ? cr->comment : i ? "(not in creature)" : "";
@@ -616,7 +718,27 @@ void MissionEditor::draw(EditorContext& ctx, WorldDatabase& database, int32_t ma
         ImGui::SameLine();
         if (ImGui::Button("Revert")) revert();
         if (!changedNow) ImGui::EndDisabled();
-        ImGui::SameLine();
+    }
+    ImGui::Checkbox("On this map", &mapOnly_);
+    ImGui::SetItemTooltip("Missions whose giver or receiver spawns here, or with a spawn group or area on this map.");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    ImGui::InputTextWithHint("##missionfilter", "filter by id, name or comment", filter_, sizeof filter_);
+    const std::string needle = tr::toLowerAscii(filter_);
+    std::set<std::pair<int64_t, std::string>> onMap;
+    if (mapOnly_) {
+        const std::set<int32_t> creatures(mapCreatures.begin(), mapCreatures.end());
+        for (const auto& r : missions.rows)
+            if ((!r[size_t(giverColumn)].isNull() && creatures.count(int32_t(r[size_t(giverColumn)].asInt()))) ||
+                (!r[size_t(receiverColumn)].isNull() && creatures.count(int32_t(r[size_t(receiverColumn)].asInt()))))
+                onMap.insert({r[size_t(idColumn)].asInt(), r[size_t(revisionColumn)].t});
+        for (const char* name : {"mission_spawn_group", "mission_area"}) {
+            const Table* t = table(name);
+            if (!t) continue;
+            const int map = t->edited.column("map_context_id"), id = t->edited.column("mission_id"), rev = t->edited.column("content_revision");
+            for (const auto& r : t->edited.rows)
+                if (r[size_t(map)].asInt() == mapContextId) onMap.insert({r[size_t(id)].asInt(), r[size_t(rev)].t});
+        }
     }
     // The server's start-up checks on the edited content.
     {
@@ -629,9 +751,9 @@ void MissionEditor::draw(EditorContext& ctx, WorldDatabase& database, int32_t ma
         if (v.diagnostics.empty())
             std::snprintf(summary, sizeof summary, "Server checks: all %zu enabled missions pass", v.enabledMissions);
         else
-            std::snprintf(summary, sizeof summary, "Server checks: %s%zu of %zu enabled missions left out, %zu problem(s)%s###servercheck",
-                          v.startupFails ? "THE SERVER WOULD NOT START - " : "", v.inactiveMissions.size(), v.enabledMissions, v.diagnostics.size() - startupCount,
-                          v.blocksReadiness ? "; a required mission keeps the server from reporting ready" : "");
+            std::snprintf(summary, sizeof summary, "%s%zu/%zu missions left out, %zu problem(s)%s###servercheck",
+                          v.startupFails ? "SERVER WOULD NOT START. " : "", v.inactiveMissions.size(), v.enabledMissions, v.diagnostics.size() - startupCount,
+                          v.blocksReadiness ? ", not ready" : "");
         ImGui::PushStyleColor(ImGuiCol_Text, colour);
         const bool open = !v.diagnostics.empty() && ImGui::TreeNode(summary);
         if (v.diagnostics.empty()) ImGui::TextUnformatted(summary);
@@ -664,26 +786,6 @@ void MissionEditor::draw(EditorContext& ctx, WorldDatabase& database, int32_t ma
             }
             ImGui::EndChild();
             ImGui::TreePop();
-        }
-    }
-    ImGui::Checkbox("On this map", &mapOnly_);
-    ImGui::SetItemTooltip("Missions whose giver or receiver spawns here, or with a spawn group or area on this map.");
-    ImGui::SetNextItemWidth(-FLT_MIN);
-    ImGui::InputTextWithHint("##missionfilter", "filter by id, name or comment", filter_, sizeof filter_);
-    const std::string needle = tr::toLowerAscii(filter_);
-    std::set<std::pair<int64_t, std::string>> onMap;
-    if (mapOnly_) {
-        const std::set<int32_t> creatures(mapCreatures.begin(), mapCreatures.end());
-        for (const auto& r : missions.rows)
-            if ((!r[size_t(giverColumn)].isNull() && creatures.count(int32_t(r[size_t(giverColumn)].asInt()))) ||
-                (!r[size_t(receiverColumn)].isNull() && creatures.count(int32_t(r[size_t(receiverColumn)].asInt()))))
-                onMap.insert({r[size_t(idColumn)].asInt(), r[size_t(revisionColumn)].t});
-        for (const char* name : {"mission_spawn_group", "mission_area"}) {
-            const Table* t = table(name);
-            if (!t) continue;
-            const int map = t->edited.column("map_context_id"), id = t->edited.column("mission_id"), rev = t->edited.column("content_revision");
-            for (const auto& r : t->edited.rows)
-                if (r[size_t(map)].asInt() == mapContextId) onMap.insert({r[size_t(id)].asInt(), r[size_t(rev)].t});
         }
     }
     if (ImGui::BeginChild("missionlist", ImVec2(0, ImGui::GetContentRegionAvail().y * 0.3f), ImGuiChildFlags_Borders)) {
@@ -799,8 +901,9 @@ void MissionEditor::draw(EditorContext& ctx, WorldDatabase& database, int32_t ma
                 if (d.objectiveId < 0 && d.scenarioId < 0) own.push_back(&d);
             }
             if (all) {
-                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "The server would leave this mission out: %zu problem(s)%s.", all,
-                                   all > own.size() ? " (rows marked (!) below)" : "");
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
+                ImGui::TextWrapped("The server would leave this mission out: %zu problem(s)%s.", all, all > own.size() ? " (rows marked (!) below)" : "");
+                ImGui::PopStyleColor();
                 drawDiagnostics(own);
             } else if ((*selected)[size_t(missions.column("enabled"))].asInt() != 0) {
                 ImGui::TextColored(ImVec4(0.5f, 0.85f, 0.5f, 1.0f), "Passes the server's checks.");
