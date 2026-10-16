@@ -522,14 +522,17 @@ int main() {
             for (auto& t : server.missions_.tables_)
                 if (t.edited.name == "mission_objective_definition") objectives = &t.edited;
             if (objectives && !objectives->rows.empty()) {
-                objectives->rows.front()[size_t(objectives->column("comment"))] = DbValue::text("smoke test objective");
+                // A value that differs from the stored one (an earlier run on the same copy leaves its edit saved).
+                DbValue& comment = objectives->rows.front()[size_t(objectives->column("comment"))];
+                const std::string written = comment == DbValue::text("smoke test objective") ? "smoke test objective 2" : "smoke test objective";
+                comment = DbValue::text(written);
                 frames(editor, device, 2);
                 check(server.missions_.changed() && server.hasUnsavedChanges(), "mission edit marks unsaved changes");
                 std::string message;
                 check(server.missions_.save(*server.database_, message) && !server.missions_.changed(), "mission save succeeds");
                 const DbTable reloaded = server.database_->loadTable("mission_objective_definition");
                 bool found = false;
-                for (const auto& row : reloaded.rows) found = found || row[size_t(reloaded.column("comment"))].t == "smoke test objective";
+                for (const auto& row : reloaded.rows) found = found || row[size_t(reloaded.column("comment"))].t == written;
                 check(found, "saved mission row reads back");
             }
         }

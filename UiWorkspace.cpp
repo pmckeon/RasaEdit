@@ -192,7 +192,8 @@ void UiWorkspace::drawTreeNode(const tr::XmlNode& node, std::vector<int32_t>& pa
         ImGui::SetNextItemOpen(true);
     const bool hidden = node.attribute("visible") == "false";
     if (hidden) ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-    const bool open = ImGui::TreeNodeEx(std::to_string(path.back()).c_str(), flags, "%s", label(node).c_str());
+    // An integer id: ImGui chains string ids by concatenation, so child "0" of child "2" collided with child "20".
+    const bool open = ImGui::TreeNodeEx(reinterpret_cast<void*>(intptr_t(path.back())), flags, "%s", label(node).c_str());
     if (hidden) ImGui::PopStyleColor();
     if (isFreeElement(path) && ImGui::BeginDragDropSource()) {
         ImGui::SetDragDropPayload("UI_ELEMENT", path.data(), path.size() * sizeof(int32_t));
@@ -524,12 +525,30 @@ void UiWorkspace::drawCanvasPanel() {
             if (sel && !ImGui::GetIO().KeyAlt && !ImGui::GetIO().KeyCtrl)
                 for (const auto& p : selection())
                     if (!p.empty() && canvas_.layout(p).contains(x, y)) insideSelection = true;
+            // An element inside a selected window / composite is dragged itself, not its container: the free element under the
+            // cursor (an owned part, such as a button's bitmap, stands for its control) when it lies below a selected element.
+            std::vector<int32_t> child = under;
+            while (child.size() > 1 && !isFreeElement(child)) child.pop_back();
+            bool dragChild = false;
+            if (insideSelection && isFreeElement(child)) {
+                const std::vector<std::vector<int32_t>> current = selection();
+                if (std::find(current.begin(), current.end(), child) == current.end())
+                    for (const auto& p : current)
+                        if (!p.empty() && p.size() < child.size() && std::equal(p.begin(), p.end(), child.begin())) dragChild = true;
+            }
             if (!under.empty() && !dragging_ && handle < 0) {
-                outline(canvas_.layout(under), IM_COL32(255, 255, 255, 140), 1.0f);
-                ImGui::SetTooltip("%s\n(%d, %d)%s", pathLabel(under).c_str(), x, y, insideSelection ? "\ndrag: move the selection" : "");
+                outline(canvas_.layout(dragChild ? child : under), IM_COL32(255, 255, 255, 140), 1.0f);
+                ImGui::SetTooltip("%s\n(%d, %d)%s", pathLabel(dragChild ? child : under).c_str(), x, y,
+                                  dragChild ? "\ndrag: move this element" : insideSelection ? "\ndrag: move the selection" : "");
             }
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-                if (handle >= 0 || insideSelection) {
+                if (handle < 0 && dragChild) {
+                    select(child, false, true);
+                    dragging_ = true;
+                    dragHandle_ = -1;
+                    dragStart_ = m;
+                    dragStartRect_ = canvas_.layout(selected_);
+                } else if (handle >= 0 || insideSelection) {
                     dragging_ = true;
                     dragHandle_ = handle;
                     dragStart_ = m;
