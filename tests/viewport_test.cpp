@@ -1712,6 +1712,18 @@ int main(int argc, char** argv) {
                 if (p) ++p;
             }
         }
+        // RASA_SOUNDMARKERS=1: the map's sound emitters as marker boxes; RASA_SELECTSOUND=<emitter index> selects one (its distances
+        // drawn) and frames it, overriding the camera.
+        scene.showSoundMarkers = envValue("RASA_SOUNDMARKERS") != nullptr;
+        if (const char* sound = envValue("RASA_SELECTSOUND")) {
+            highlighted = Selection{SelectionKind::AudioEmitter, size_t(std::atoi(sound))};
+            scene.focusOn(highlighted);
+            if (highlighted.index < scene.audioEmitters().size()) {
+                const tr::AudioEmitter& e = scene.audioEmitters()[highlighted.index];
+                std::printf("sound emitter %zu: %s, audio set %u, at %.1f %.1f %.1f, distances %.1f / %.1f\n", highlighted.index, e.name.c_str(), e.audioSetId,
+                            e.position.x, e.position.y, e.position.z, e.minDistance, e.maxDistance);
+            }
+        }
         // RASA_GARRISONS=<0|1|2>: the garrison shown at every control point (SceneView::garrisonViews: holder / Bane / AFS);
         // RASA_SELECTPOINT=<control point id>: draw with that point selected (its link lines shown).
         if (const char* g = envValue("RASA_GARRISONS"))
@@ -1873,7 +1885,7 @@ int main(int argc, char** argv) {
         // RASA_LIGHTSEDITTEST=1: for every map's lights.xml - tr::LightsDocument finds as many lights as readLights; moving light 0,
         // duplicating it (with its modifiers) and removing the copy read back as expected; an untouched document is byte-identical.
         if (envValue("RASA_LIGHTSEDITTEST")) {
-            size_t files = 0, passed = 0;
+            size_t files = 0, passed = 0, modTracksTotal = 0;
             std::error_code ec;
             for (const auto& dir : std::filesystem::directory_iterator(std::filesystem::path(argv[1]) / "data" / "maps", ec)) {
                 const auto path = dir.path() / "lights.xml";
@@ -1904,13 +1916,100 @@ int main(int argc, char** argv) {
                         const auto removed = tr::readLights(doc.bytes());
                         ok = ok && removed.size() == lights.size() && tr::readLightModifiers(doc.bytes()).size() == modsBefore;
                     }
+                    // Modifier tracks: writing every light's tracks back unchanged is byte-identical; a key edit, an added track (on a
+                    // light without one: a new <Mod>, made with its ID) and its removal read back through readLightModifiers.
+                    if (ok) {
+                        tr::LightsDocument mods(xml);
+                        size_t tracks = 0;
+                        for (size_t l = 0; l < mods.count(); ++l) {
+                            const std::vector<tr::LightModTrack> t = mods.modTracks(l);
+                            for (size_t k = 0; k < t.size(); ++k) mods.setModTrack(l, k, t[k]);
+                            tracks += t.size();
+                        }
+                        ok = mods.bytes() == xml;
+                        if (!ok) std::printf("  modifier tracks of %s not written back unchanged\n", dir.path().filename().string().c_str());
+                        modTracksTotal += tracks;
+                        size_t withTrack = SIZE_MAX, without = SIZE_MAX;
+                        for (size_t l = 0; l < mods.count(); ++l) {
+                            const bool hasId = std::strtoull(mods.property(l, "ID").c_str(), nullptr, 10) != 0;
+                            if (hasId && !mods.modTracks(l).empty() && withTrack == SIZE_MAX) withTrack = l;
+                            if (hasId && mods.modTracks(l).empty() && without == SIZE_MAX) without = l;
+                        }
+                        if (ok && withTrack != SIZE_MAX) {
+                            tr::LightModTrack t = mods.modTracks(withTrack)[0];
+                            t.keys[0].second = "0.123";
+                            mods.setModTrack(withTrack, 0, t);
+                            const uint64_t id = std::strtoull(mods.property(withTrack, "ID").c_str(), nullptr, 10);
+                            bool found = false;
+                            for (const auto& m : tr::readLightModifiers(mods.bytes()))
+                                if (m.lightId == id && !m.tracks.empty() && !m.tracks[0].keys.empty()) found = std::fabs(m.tracks[0].keys[0].second - 0.123f) < 1e-6f;
+                            ok = found;
+                            if (!ok) std::printf("  key edit on %s not read back\n", dir.path().filename().string().c_str());
+                        }
+                        if (ok && without != SIZE_MAX) {
+                            const size_t before = tr::readLightModifiers(mods.bytes()).size();
+                            tr::LightModTrack t;
+                            t.className = "IntensityModifier";
+                            t.properties = {{"Enabled", "true", "bool"}, {"Intensity1", "0.5000000", "float"}, {"Intensity2", "1.0000000", "float"}};
+                            t.keys = {{"0", "0"}, {"1", "1"}};
+                            const tr::Bytes beforeAdd = mods.bytes();
+                            ok = mods.addModTrack(without, t) && tr::readLightModifiers(mods.bytes()).size() == before + 1 && mods.modTracks(without).size() == 1 &&
+                                 tr::readLights(mods.bytes()).size() == lights.size();
+                            ok = ok && mods.removeModTrack(without, 0) && mods.bytes() == beforeAdd;
+                            if (!ok) std::printf("  add / remove of a track on %s failed\n", dir.path().filename().string().c_str());
+                        }
+                    }
                     if (ok) ++passed;
                     else std::printf("lights edit test FAILED: %s\n", dir.path().filename().string().c_str());
                 } catch (const std::exception& e) {
                     std::printf("lights edit test ERROR: %s: %s\n", dir.path().filename().string().c_str(), e.what());
                 }
             }
-            std::printf("lights edit test: %zu of %zu lights.xml files passed\n", passed, files);
+            std::printf("lights edit test: %zu of %zu lights.xml files passed (%zu modifier tracks written back unchanged)\n", passed, files, modTracksTotal);
+        }
+        // RASA_AUDIOEDITTEST=1: every map's audioemitters.xml - the document finds as many emitters as readAudioEmitters and writes
+        // back byte-identical untouched; moving emitter 0, duplicating it (new UID) and removing the copy read back; adding one to an
+        // empty file (<AudioEmitters />) and removing it gives the file back.
+        if (envValue("RASA_AUDIOEDITTEST")) {
+            size_t files = 0, passed = 0, emittersTotal = 0;
+            std::error_code ec;
+            for (const auto& dir : std::filesystem::directory_iterator(std::filesystem::path(argv[1]) / "data" / "maps", ec)) {
+                const auto path = dir.path() / "audioemitters.xml";
+                if (!std::filesystem::exists(path, ec)) continue;
+                ++files;
+                try {
+                    const tr::Bytes xml = tr::readFile(path.string());
+                    tr::LightsDocument doc = tr::audioEmittersDocument(xml);
+                    const auto emitters = tr::readAudioEmitters(xml);
+                    emittersTotal += emitters.size();
+                    bool ok = doc.bytes() == xml && doc.count() == emitters.size();
+                    if (ok && doc.count() > 0) {
+                        const float p[3] = {emitters[0].position.x + 3.0f, emitters[0].position.y, emitters[0].position.z};
+                        doc.setProperty(0, "Position", tr::LightsDocument::formatVector(p, 3));
+                        const size_t copy = doc.duplicate(0, 999999999999ull, "RasaEdit copy");
+                        const auto after = tr::readAudioEmitters(doc.bytes());
+                        ok = after.size() == emitters.size() + 1 && std::fabs(after[0].position.x - p[0]) < 1e-4f && after.back().uid == "999999999999" &&
+                             after.back().name == "RasaEdit copy" && after.back().audioSetId == emitters[0].audioSetId;
+                        doc.remove(copy);
+                        ok = ok && tr::readAudioEmitters(doc.bytes()).size() == emitters.size();
+                    }
+                    if (ok && emitters.empty()) {
+                        tr::LightsDocument add = tr::audioEmittersDocument(xml);
+                        const size_t i = add.addElement("AudioEmitterProperties", {{"Name", "New", "string"}, {"UID", "1", "string"}, {"AudioSetID", "30", "uint"},
+                                                                                    {"Position", "1.0000000, 2.0000000, 3.0000000", "string"}});
+                        const auto one = tr::readAudioEmitters(add.bytes());
+                        ok = i == 0 && one.size() == 1 && one[0].audioSetId == 30 && one[0].position.z == 3.0f;
+                        add.remove(0);
+                        // the section stays open (<AudioEmitters> </AudioEmitters>): an equal list, not equal bytes
+                        ok = ok && tr::readAudioEmitters(add.bytes()).empty();
+                    }
+                    if (ok) ++passed;
+                    else std::printf("audio emitter edit test FAILED: %s\n", dir.path().filename().string().c_str());
+                } catch (const std::exception& e) {
+                    std::printf("audio emitter edit test ERROR: %s: %s\n", dir.path().filename().string().c_str(), e.what());
+                }
+            }
+            std::printf("audio emitter edit test: %zu of %zu files passed (%zu emitters)\n", passed, files, emittersTotal);
         }
         if (const char* frames = envValue("RASA_PROFILE")) {
             const int count = std::max(1, std::atoi(frames));

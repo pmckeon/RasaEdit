@@ -1468,6 +1468,47 @@ std::vector<int32_t> GameData::suitBaseMeshes(int32_t meshId) {
     return out;
 }
 
+namespace {
+// The (a, b) tuple keys of an animationdata dict whose list of (animation string id, ...) entries names the animation.
+std::vector<std::pair<int32_t, int32_t>> keysPlaying(GameData& data, const char* variable, int32_t animationStringId) {
+    std::vector<std::pair<int32_t, int32_t>> out;
+    const py::Object* dict = data.global("generated.client.animationdata", variable);
+    if (!dict || dict->kind != py::Kind::Dict) return out;
+    for (const auto& entry : dict->entries) {
+        const py::Object* key = entry.first.get();
+        if (key->kind != py::Kind::Tuple || py::length(key) != 2 || !py::isInt(py::item(key, 0)) || !py::isInt(py::item(key, 1))) continue;
+        for (size_t k = 0; k < py::length(entry.second.get()); ++k) {
+            const py::Object* id = py::item(py::item(entry.second.get(), k), 0);
+            if (py::isInt(id) && py::asInt(id) == animationStringId) {
+                out.push_back({int32_t(py::asInt(py::item(key, 0))), int32_t(py::asInt(py::item(key, 1)))});
+                break;
+            }
+        }
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+}  // namespace
+
+std::vector<std::pair<int32_t, int32_t>> GameData::familiesPlaying(int32_t animationStringId) {
+    return keysPlaying(*this, "animationFamilyData", animationStringId);
+}
+
+std::vector<std::pair<int32_t, int32_t>> GameData::objectFamiliesPlaying(int32_t animationStringId) {
+    return keysPlaying(*this, "animationFamilyObject", animationStringId);
+}
+
+std::vector<int32_t> GameData::skeletonMeshes(int32_t skeletonId) {
+    std::vector<int32_t> out;
+    const py::Object* dict = global("generated.client.animationdata", "meshSkeleton");
+    if (!dict || dict->kind != py::Kind::Dict) return out;
+    for (const auto& entry : dict->entries)
+        if (py::isInt(entry.first.get()) && py::isInt(entry.second.get()) && py::asInt(entry.second.get()) == skeletonId)
+            out.push_back(int32_t(py::asInt(entry.first.get())));
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
 std::vector<GameData::FamilyAnimation> GameData::familyAnimations(int32_t familyId, int32_t skeletonId) {
     std::vector<FamilyAnimation> animations;
     const py::Object* list = py::dictGetTuple(global("generated.client.animationdata", "animationFamilyData"), {familyId, skeletonId});

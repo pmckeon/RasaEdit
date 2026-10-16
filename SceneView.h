@@ -35,7 +35,7 @@ struct ViewCamera {
 };
 
 // What is selected: a map entity (.map file) or a server object (World database).
-enum class SelectionKind : uint8_t { None, MapEntity, SpawnPool, Teleporter, MapLink, Region, MissionArea, Object, Arrival, PatrolStep, WormholeLock, MapLight };
+enum class SelectionKind : uint8_t { None, MapEntity, SpawnPool, Teleporter, MapLink, Region, MissionArea, Object, Arrival, PatrolStep, WormholeLock, MapLight, AudioEmitter };
 
 struct Selection {
     SelectionKind kind = SelectionKind::None;
@@ -141,6 +141,11 @@ public:
     // Plays this animation on a map entity's model instead of its own ("" = its own again), from the start (the light clock is
     // reset: used by the Assets preview, whose scene holds that one entity).
     void setEntityAnimation(size_t entityIndex, const std::string& animation);
+    // A particle system on its own at the origin (the Assets preview of a .pfx): started afresh by each call ("" = none), run by
+    // advanceParticles and drawn with the others while Particles is on.
+    void setStandaloneParticles(const std::string& file);
+    bool standaloneParticleBounds(tr::Vec3& centre, float& radius) const;
+    float standaloneParticleTime() const { return standaloneTime_; }
     void rebuildEntities();
     // After the map's lights.xml text changed (Client workspace light editing): the lights, their modifiers and globe maps again.
     void reloadMapLights();
@@ -165,6 +170,7 @@ public:
     bool showTerrain = true;
     bool showEntities = true;
     bool showPlaceholders = true;
+    bool showSoundMarkers = false;          // the map's audioemitters.xml emitters as small boxes (selectable); the selected one shows its distances
     bool showLightMarkers = false;          // the map's lights.xml lights as small boxes (selectable); the selected one shows its reach
     bool showEffects = true;
     bool showParticles = true;          // particle systems attached to models (.pfx on "psys" contact points)
@@ -276,6 +282,9 @@ public:
     bool showSkyDome = true;                // the sky's layer models (dome, sun / moon discs, stars, clouds, horizon)
     bool showShadows = true;                // sun shadows
     const std::vector<tr::PlacedLight>& mapLights() const { return mapLights_; }
+    const std::vector<tr::AudioEmitter>& audioEmitters() const { return audioEmitters_; }
+    const std::string& audioEmittersError() const { return audioEmittersError_; }
+    void reloadAudioEmitters();                      // after the map's audioemitters.xml text changed
     // A map light as drawn this frame: with its modifiers (lights.xml <Mods>) applied when animateLights is on.
     tr::PlacedLight displayedMapLight(size_t index) const;
     // The lights.xml <Mods> tracks attached to a light (by its ID; none for ID 0).
@@ -614,6 +623,8 @@ private:
     std::vector<tr::LightModifier> lightModifiers_;                // lights.xml <Mods>
     tr::PlacedLight modifiedLight(const tr::PlacedLight& light) const;
     std::string mapLightsError_;
+    std::vector<tr::AudioEmitter> audioEmitters_;
+    std::string audioEmittersError_;
     std::vector<ServerPlacement> serverPlacements_;
     const WorldContent* serverContent_ = nullptr;
     size_t skyCurrent_ = size_t(-1);                 // the sky fading in / shown (npos: not started, use activeSkyIndex at full)
@@ -655,6 +666,9 @@ private:
         std::unique_ptr<ParticleInstance> instance;
     };
     std::vector<LiveParticles> liveParticles_;
+    std::string standaloneFile_;
+    std::unique_ptr<ParticleInstance> standalone_;
+    float standaloneTime_ = 0;
     std::vector<MeshVertex> particleScratch_;
     std::deque<std::string> pending_;
     std::vector<Placement> placements_;

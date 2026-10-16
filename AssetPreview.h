@@ -6,7 +6,9 @@
 // - .dds: the top mip level decoded, shown as colour, alpha or colour over a checkerboard.
 // - .wav / .ogg / .mp3: played through SDL_mixer (WAV built in, Ogg Vorbis via libvorbis, MP3 via mpg123).
 // - text assets (.xml, .sky, .ltmp, ...): the text.
-// - .anm / .pfx / .pkg: a summary.
+// - .anm: a summary, and played on a model that plays it in the game (setAnimationModels: the links the other way round).
+// - .pfx: the particle system on its own at the origin, and its summary.
+// - .pkg: a summary.
 
 #include "ModelAnimations.h"
 #include "Renderer.h"
@@ -31,6 +33,9 @@ public:
     void select(EditorContext& ctx, const std::string& name);   // "" clears
     // The animations tied to the selected model (listed under the model view: a click plays one); nullptr = none. Call after select.
     void setAnimationLinks(const ModelAnimationLinks* links) { links_ = links; }
+    // For a selected .anm: the models it plays on (the list to pick from; the first is shown); "still looking" while the models'
+    // own-animation index is being built. Call after select, again when the list grows.
+    void setAnimationModels(EditorContext& ctx, const std::vector<ModelUse>& models, bool stillLooking);
     void draw(EditorContext& ctx);                                // inside the details child window
     void render(EditorContext& ctx, SDL_GPUCommandBuffer* commands);   // records the model preview (after draw)
     void release();                                               // GPU and audio resources (game closed / shutdown)
@@ -40,6 +45,8 @@ public:
 private:
     enum class Kind { None, Model, Texture, Sound, Text, Info };
     void releaseModel();
+    void openScene(EditorContext& ctx, const std::string& mesh);   // the preview scene: one entity of this model, or none ("")
+    void drawAnimationModels(EditorContext& ctx);
     void releaseTexture();
     void stopSound();
     void releaseSound();
@@ -66,6 +73,11 @@ private:
     float animationTime_ = 0;
     const ModelAnimationLinks* links_ = nullptr;
     std::string playing_;                     // the animation chosen in the list ("" = the model's own)
+    std::string animationFile_;               // a selected .anm
+    std::vector<ModelUse> animationModels_;   // the models it plays on
+    bool animationModelsLooking_ = false;
+    std::string animationModel_;              // the one it plays on now
+    bool particlesOnly_ = false;              // a selected .pfx (the scene holds no entity)
 
     // Texture: decoded top level and the texture shown.
     SDL_GPUDevice* device_ = nullptr;

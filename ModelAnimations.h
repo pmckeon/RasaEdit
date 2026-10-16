@@ -37,14 +37,33 @@ struct ModelAnimationLinks {
     std::vector<AnimationGroup> groups;
 };
 
+// A model that plays an animation, and why (the same links, the other way round).
+struct ModelUse {
+    std::string model;                           // .geo
+    std::string why;                             // e.g. "skeleton 1, Idle - Non Combat"
+};
+
 class AnimationLinkFinder {
 public:
     ModelAnimationLinks find(tr::AssetLibrary& assets, tr::GameData* data, const std::string& model);
-    void reset() { packageAccessories_.clear(), packagesIndexed_ = false; }   // another game
+    // The models an animation plays on: models whose `anim` property names it (complete once modelIndexDone()), special-FX
+    // packages' accessories, object families and the meshes of skeletons whose families hold it (only meshes in the archives).
+    std::vector<ModelUse> modelsPlaying(tr::AssetLibrary& assets, tr::GameData* data, const std::string& animation);
+    // Every model's `anim` property, read a few models at a time (call each frame until done; budget in milliseconds).
+    void indexModels(tr::AssetLibrary& assets, double budgetMs);
+    bool modelIndexDone() const { return modelsIndexed_; }
+    size_t modelsRead() const { return modelCursor_; }
+    size_t modelsToRead() const { return modelQueue_.size(); }
+    void reset();                                // another game
 
 private:
+    void indexPackages(tr::AssetLibrary& assets);
     std::unordered_map<std::string, std::vector<std::pair<std::string, std::string>>> packageAccessories_;   // mesh -> (package, animation)
     bool packagesIndexed_ = false;
+    std::unordered_map<std::string, std::vector<std::string>> animProperty_;   // animation (lower case) -> models naming it
+    std::vector<std::string> modelQueue_;
+    size_t modelCursor_ = 0;
+    bool modelsIndexed_ = false;
 };
 
 // The groups as a tree: groups of their own first (open), then one node per skeleton holding its families. row draws one

@@ -14,6 +14,7 @@
 
 #include "trformats.h"
 
+#include <array>
 #include <map>
 #include <string>
 #include <vector>
@@ -153,9 +154,26 @@ std::vector<LightModifier> readLightModifiers(const Bytes& data);
 // Changing a property rewrites only that property's value="..."; duplicating copies the <Light> block (and the light's <Mod>
 // blocks, by ID) to the end of its section; removing deletes the block and its <Mod> blocks. Numbers are written like the
 // shipped files ("%.7f", vectors ", "-separated).
+// One <Track> of a light's <Mod> blocks, as written: the modifier's PropertyObject (class IntensityModifier, ColorModifier,
+// PositionModifier, RotationModifier, RangeModifier - the five in the shipped maps) with its properties, and its keys.
+struct LightModTrack {
+    std::string className;
+    std::string objectAttributes = "version=\"0\" newObj=\"1\"";   // the PropertyObject's other attributes, as written
+    std::vector<std::array<std::string, 3>> properties;                // name, value, type
+    std::vector<std::pair<std::string, std::string>> keys;             // time, weight (seconds, 0..1), as written
+    std::string property(const std::string& name) const;              // "" if absent
+    void setProperty(const std::string& name, const std::string& value, const std::string& type);
+};
+
 class LightsDocument {
 public:
     explicit LightsDocument(const Bytes& xml);
+    // The same editing for another list of PropertyObject elements of a map folder's XML: section / element tag names and the
+    // property duplicate() gives a new value (audioemitters.xml: "AudioEmitters", "AudioEmitter", "UID").
+    LightsDocument(const Bytes& xml, std::string section, std::string element, std::string idProperty);
+    // A new element at the end of the section: a PropertyObject of this class with these properties (name, value, type), indented
+    // like the file's; an empty section written <Section /> is opened up. Returns its index.
+    size_t addElement(const std::string& className, const std::vector<std::array<std::string, 3>>& properties);
     size_t count() const { return lights_.size(); }
     std::string property(size_t light, const std::string& name) const;              // "" if absent
     // Replaces the property's value, or adds <property name value type> before the light's </PropertyObject>. false if the light
@@ -163,6 +181,14 @@ public:
     bool setProperty(size_t light, const std::string& name, const std::string& value, const std::string& type = "string");
     size_t duplicate(size_t light, uint64_t newId, const std::string& newName);       // returns the copy's index
     void remove(size_t light);
+    // The light's modifier tracks (its <Mod LightID="ID"> blocks, in file order; none while its ID is 0, which the engine skips -
+    // FUN_007df550). setModTrack rewrites that track's lines only (an unchanged track writes back byte for byte); addModTrack
+    // appends to the light's last <Mod>, making a <Mod> (and <Mods>) when there is none - false for ID 0; removeModTrack drops a
+    // <Mod> left without tracks.
+    std::vector<LightModTrack> modTracks(size_t light) const;
+    bool setModTrack(size_t light, size_t index, const LightModTrack& track);
+    bool addModTrack(size_t light, const LightModTrack& track);
+    bool removeModTrack(size_t light, size_t index);
     Bytes bytes() const { return Bytes(text_.begin(), text_.end()); }
     static std::string formatNumber(float v);
     static std::string formatVector(const float* v, size_t n);
@@ -173,9 +199,29 @@ private:
     };
     void scan();
     std::vector<Span> modsOf(uint64_t id) const;     // <Mod LightID="id"> blocks (none for id 0)
+    std::vector<Span> trackSpans(size_t light) const;
     std::string text_;
     std::vector<Span> lights_;
+    std::string section_ = "Lights", element_ = "Light", idProperty_ = "ID";
 };
+
+// A map folder's audioemitters.xml (77 maps; 1,072 emitters, 37 maps with none: <AudioEmitters />), loaded by the client's
+// gamemap.py _LoadAudioEmitters -> gameclient.LoadAudioEmitters(mapName). Every emitter is a PropertyObject of class
+// AudioEmitterProperties with exactly these properties (the exe's Property_AudioEmitterProperties_*Ref setters store them on the
+// emitter: MinDistance at + 0x38 through FUN_007b7df0, MaxDelay at + 0x60; how the engine attenuates by distance and spaces plays by
+// the delays is NOT traced - the names are the file's).
+struct AudioEmitter {
+    std::string name;
+    std::string uid;                     // a 64-bit number as text, unique in the file
+    uint32_t audioSetId = 0;             // audiosetdata.audioSet id (its sounds: GameData::audioSetSounds)
+    Vec3 position;
+    float minDistance = 0, maxDistance = 0;
+    float volume = 1;
+    float fadeInTime = 0, fadeOutTime = 0;
+    float minDelay = 0, maxDelay = 0;
+};
+std::vector<AudioEmitter> readAudioEmitters(const Bytes& data);
+inline LightsDocument audioEmittersDocument(const Bytes& xml) { return LightsDocument(xml, "AudioEmitters", "AudioEmitter", "UID"); }
 float lightModifierWeight(const LightModifierTrack& track, float elapsedSeconds);   // looping, as above
 
 // overrides: property name -> value, applied over every light's own properties (as the engine sets a contact point's

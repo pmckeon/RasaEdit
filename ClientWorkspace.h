@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Panels.h"
+#include "SoundPlayer.h"
 #include "Workspace.h"
 
 #include <vector>
@@ -23,6 +24,7 @@ public:
     void undo();
     void redo();
     void duplicateSelected();
+    void addEmitter();                               // a sound emitter at the view centre's first surface, as Add places things
     // ViewportEditHooks (map entities)
     bool editable() const override { return ctx_.map != nullptr; }
     tr::Vec3* selectedPosition() override;
@@ -46,6 +48,7 @@ private:
     void drawLightsPanel();
     void drawEntityPanel();
     void drawLightInspector(size_t index);
+    void drawLightModifiers(size_t index, const tr::PlacedLight& light);   // its <Mod> tracks, edited (lights.xml)
     void rebuildEntityFilter();
     int selectedEntity() const { return selection_.kind == SelectionKind::MapEntity ? int(selection_.index) : -1; }
     // Map editing: whole snapshots of the entities and the generated collision volumes (keyed by entity id) for undo.
@@ -53,7 +56,16 @@ private:
         std::vector<tr::MapEntity> entities;
         std::vector<tr::MapGeneratedAbv> abvs;
         tr::Bytes lights;                            // the map's lights.xml text
+        tr::Bytes emitters;                          // the map's audioemitters.xml text
     };
+    // Sound emitters (audioemitters.xml), edited as text like the lights (tr::audioEmittersDocument).
+    int selectedEmitter() const { return selection_.kind == SelectionKind::AudioEmitter ? int(selection_.index) : -1; }
+    void setEmitterProperty(size_t emitter, const std::string& name, const std::string& value, const std::string& type);
+    void emittersChanged();                          // after the audioemitters.xml text changed
+    void drawSoundsPanel();
+    void drawEmitterInspector(size_t index);
+    tr::Vec3 emitterPosition_;
+    SoundPlayer soundPlayer_;
     int selectedLight() const { return selection_.kind == SelectionKind::MapLight ? int(selection_.index) : -1; }
     void setLightProperty(size_t light, const std::string& name, const std::string& value, const std::string& type);
     void lightsChanged();                            // after the lights.xml text changed

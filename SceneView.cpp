@@ -369,6 +369,7 @@ SceneView::SceneView(Renderer& renderer, const tr::AssetLibrary& assets, const t
             mapLightsError_ = e.what();
         }
     }
+    reloadAudioEmitters();
 
     // The map's starting sky time is in seconds into its day (e.g. 3375 of 10800 = 07:30).
     if (map_.map.dayLengthSeconds > 0)
@@ -1897,7 +1898,27 @@ size_t SceneView::liveParticles() const {
     return n;
 }
 
+void SceneView::setStandaloneParticles(const std::string& file) {
+    standaloneFile_ = file;
+    standalone_.reset();
+    standaloneTime_ = 0;
+}
+
+bool SceneView::standaloneParticleBounds(tr::Vec3& centre, float& radius) const {
+    return standalone_ && standalone_->worldBounds(centre, radius);
+}
+
 void SceneView::advanceParticles(float dt) {
+    if (!standaloneFile_.empty() && showParticles) {
+        if (!standalone_)
+            if (const tr::ParticleSystem* system = particleSystem(standaloneFile_))
+                standalone_ = std::make_unique<ParticleInstance>(*system, identityMatrix(), 1u);
+        if (standalone_ && animate) {
+            const float step = std::clamp(dt, 0.0f, 0.1f);
+            standalone_->update(step);
+            standaloneTime_ += step;
+        }
+    }
     if (!showParticles || !showEntities) {
         liveParticles_.clear();
         return;
@@ -2784,6 +2805,18 @@ void SceneView::queueDraws(const Selection& selection) {
     }
 
     endSection(2);
+    // A standalone system (the Assets preview of a .pfx).
+    if (standalone_ && showParticles) {
+        const tr::Vec3 right = camera_.right(), up = camera_.up();
+        const tr::ParticleSystem& system = standalone_->system();
+        for (size_t g = 0; g < system.groups.size(); ++g) {
+            particleScratch_.clear();
+            standalone_->buildQuads(g, right, up, particleScratch_);
+            if (particleScratch_.empty()) continue;
+            const tr::ParticleGroup& group = system.groups[g];
+            renderer_.drawParticles(particleScratch_, showTextures && !group.texture.empty() ? texture(group.texture) : nullptr, tr::particleBlendType(group));
+        }
+    }
     // Particle systems (camera-facing sprites need the view's axes).
     if (showEntities && showParticles) {
         const tr::Vec3 right = camera_.right(), up = camera_.up();
@@ -2993,6 +3026,40 @@ void SceneView::queueDraws(const Selection& selection) {
                 frame.row2.w = p.z;
                 renderer_.draw(unitBoxLines_, multiply(frame, boxMatrix(tr::Bounds{tr::Vec3{-half.x, -half.y, -half.z}, half})), colour, false);
             }
+        }
+    }
+
+    // Sound emitters (audioemitters.xml): a 0.4 m box at each; the selected one shows its MinDistance and MaxDistance as spheres
+    // (three circles each).
+    if (showSoundMarkers || selection.kind == SelectionKind::AudioEmitter) {
+        auto sphere = [&](const tr::Vec3& p, float r, const Vec4f& colour) {
+            if (r <= 0) return;
+            Mat4 ring = identityMatrix();                   // unitCircle_ lies in XZ; also map it onto XY and YZ
+            ring.row0 = {r, 0, 0, p.x};
+            ring.row1 = {0, 1, 0, p.y};
+            ring.row2 = {0, 0, r, p.z};
+            renderer_.draw(unitCircle_, ring, colour, false);
+            ring.row1 = {0, 0, r, p.y};
+            ring.row2 = {0, 1, 0, p.z};
+            renderer_.draw(unitCircle_, ring, colour, false);
+            ring.row0 = {0, 1, 0, p.x};
+            ring.row1 = {r, 0, 0, p.y};
+            ring.row2 = {0, 0, r, p.z};
+            renderer_.draw(unitCircle_, ring, colour, false);
+        };
+        for (size_t k = 0; k < audioEmitters_.size(); ++k) {
+            const bool selected = selection.kind == SelectionKind::AudioEmitter && selection.index == k;
+            if (!showSoundMarkers && !selected) continue;
+            const tr::AudioEmitter& e = audioEmitters_[k];
+            const tr::Vec3& p = e.position;
+            const tr::Vec3 d = subtract(p, camera_.position);
+            if (!selected && (dot(d, d) > maxDistance2 || !visible(p, 0.4f))) continue;
+            const Vec4f colour = selected ? highlight : markerColour::sound;
+            renderer_.draw(unitBoxLines_, boxMatrix(tr::Bounds{tr::Vec3{p.x - 0.2f, p.y - 0.2f, p.z - 0.2f}, tr::Vec3{p.x + 0.2f, p.y + 0.2f, p.z + 0.2f}}),
+                           colour, false);
+            if (!selected) continue;
+            sphere(p, e.minDistance, colour);
+            sphere(p, e.maxDistance, Vec4f{colour.x, colour.y, colour.z, 0.5f});
         }
     }
 
@@ -3206,6 +3273,17 @@ Selection SceneView::pick(float ndcX, float ndcY, bool pickEntities, bool pickSe
         }
     }
 
+    // Sound emitter markers (0.4 m boxes), the same way.
+    for (size_t k = 0; k < audioEmitters_.size() && showSoundMarkers && pickEntities; ++k) {
+        const tr::Vec3 p = audioEmitters_[k].position;
+        float t = 0;
+        if (rayHitsBoxOutline(subtract(camera_.position, p), direction, tr::Vec3{-0.2f, -0.2f, -0.2f}, tr::Vec3{0.2f, 0.2f, 0.2f}, 1.0f, t) &&
+            t < bestT && t < drawDistance) {
+            bestT = t;
+            result = Selection{SelectionKind::AudioEmitter, k};
+        }
+    }
+
     // 3. Server objects: their model's triangles, else a sphere around the marker / area centre.
     auto raySphere = [&](const tr::Vec3& centre, float radius, float& t) {
         const tr::Vec3 oc = subtract(camera_.position, centre);
@@ -3326,6 +3404,12 @@ void SceneView::frameTarget(const tr::Vec3& target, float distance) {
 }
 
 bool SceneView::focusTarget(const Selection& selection, tr::Vec3& target, float& distance) const {
+    if (selection.kind == SelectionKind::AudioEmitter) {
+        if (selection.index >= audioEmitters_.size()) return false;
+        target = audioEmitters_[selection.index].position;
+        distance = std::clamp(audioEmitters_[selection.index].maxDistance * 1.5f, 6.0f, 150.0f);
+        return true;
+    }
     if (selection.kind == SelectionKind::MapLight) {
         if (selection.index >= mapLights_.size()) return false;
         const tr::PlacedLight light = displayedMapLight(selection.index);
@@ -3412,6 +3496,17 @@ void SceneView::setEntityAnimation(size_t entityIndex, const std::string& animat
         if (!mesh.empty()) placements_[entityIndex].model = modelFor(mesh, "@" + animation);
     }
     lightTime = 0;
+}
+
+void SceneView::reloadAudioEmitters() {
+    audioEmitters_.clear();
+    audioEmittersError_.clear();
+    if (map_.audioEmittersXml.empty()) return;
+    try {
+        audioEmitters_ = tr::readAudioEmitters(map_.audioEmittersXml);
+    } catch (const std::exception& e) {
+        audioEmittersError_ = e.what();
+    }
 }
 
 void SceneView::reloadMapLights() {

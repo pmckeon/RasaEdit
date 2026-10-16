@@ -86,6 +86,11 @@ void AssetPreview::select(EditorContext& ctx, const std::string& name) {
     releaseSound();
     links_ = nullptr;
     playing_.clear();
+    animationFile_.clear();
+    animationModels_.clear();
+    animationModelsLooking_ = false;
+    animationModel_.clear();
+    particlesOnly_ = false;
     kind_ = Kind::None;
     text_.clear();
     summary_.clear();
@@ -124,23 +129,7 @@ void AssetPreview::select(EditorContext& ctx, const std::string& name) {
                 summary_ += "  " + std::string(p.skinned ? "skinned " : "") + p.effectName + "  " + p.diffuseTexture + "\n";
             const std::string anm = name.substr(0, name.size() - 4) + ".anm";
             if (ctx.assets->exists(anm)) summary_ += "plays " + anm + "\n";
-            // The scene: one entity of class 1 at the origin; everything else empty.
-            if (!renderer_) renderer_ = std::make_unique<Renderer>(ctx.device);
-            map_ = std::make_unique<tr::MapBundle>();
-            map_->name = "preview";
-            tr::MapEntity entity;
-            entity.classId = 1;
-            map_->map.entities.push_back(entity);
-            const std::string mesh = name;
-            scene_ = std::make_unique<SceneView>(*renderer_, *ctx.assets, *map_, [mesh](int32_t) { return mesh; }, [](int32_t) { return true; });
-            scene_->showPlaceholders = false;
-            scene_->setRegionEnvironmentMaps({});        // Env1.dds, the client's default cube
-            target_ = tr::Vec3{0, 1, 0};
-            distance_ = 5.0f;
-            yaw_ = 2.6f;
-            pitch_ = -0.25f;
-            animationTime_ = 0;
-            kind_ = Kind::Model;
+            openScene(ctx, name);
         } else if (ext == ".dds") {
             tr::DdsHeader header;
             pixels_ = tr::decodeDds(data, header);
@@ -181,14 +170,17 @@ void AssetPreview::select(EditorContext& ctx, const std::string& name) {
             summary_ += line;
             for (const tr::AnimTrack& t : a.tracks) summary_ += "  " + t.name + " (" + std::to_string(t.keys.size()) + " keys)\n";
             for (const tr::MaterialTrack& t : a.materialTracks) summary_ += "  material: " + t.group + " / " + t.parameter + "\n";
-            kind_ = Kind::Info;
+            animationFile_ = name;
+            kind_ = Kind::Info;                       // until a model to play it on is chosen (setAnimationModels)
         } else if (ext == ".pfx") {
             const tr::ParticleSystem s = tr::readParticleSystem(data);
             summary_ += "\n" + std::to_string(s.groups.size()) + " particle groups\n";
             for (const tr::ParticleGroup& g : s.groups)
                 summary_ += "  " + g.name + ": " + primitiveName(g.primitive) + ", max " + std::to_string(g.maxParticles) + ", " +
                             (g.texture.empty() ? std::string("no texture") : g.texture) + (g.enabled ? "" : " (disabled)") + "\n";
-            kind_ = Kind::Info;
+            openScene(ctx, "");
+            scene_->setStandaloneParticles(name);
+            particlesOnly_ = true;
         } else if (ext == ".pkg") {
             const tr::SfxPackage p = tr::readSfxPackage(data);
             summary_ += "\n" + std::to_string(p.events.size()) + " events: " + std::to_string(p.accessories.size()) + " accessories, " +
@@ -232,6 +224,65 @@ void AssetPreview::buildTextureView() {
     texture_ = uploadRgbaTexture(device_, view.data(), textureWidth_, textureHeight_);
 }
 
+void AssetPreview::openScene(EditorContext& ctx, const std::string& mesh) {
+    releaseModel();
+    // The scene: one entity of class 1 at the origin (none for a particle system); everything else empty.
+    if (!renderer_) renderer_ = std::make_unique<Renderer>(ctx.device);
+    map_ = std::make_unique<tr::MapBundle>();
+    map_->name = "preview";
+    if (!mesh.empty()) {
+        tr::MapEntity entity;
+        entity.classId = 1;
+        map_->map.entities.push_back(entity);
+    }
+    scene_ = std::make_unique<SceneView>(*renderer_, *ctx.assets, *map_, [mesh](int32_t) { return mesh; }, [](int32_t) { return true; });
+    scene_->showPlaceholders = false;
+    scene_->setRegionEnvironmentMaps({});        // Env1.dds, the client's default cube
+    target_ = tr::Vec3{0, 1, 0};
+    distance_ = 5.0f;
+    yaw_ = 2.6f;
+    pitch_ = -0.25f;
+    animationTime_ = 0;
+    modelFitted_ = false;
+    kind_ = Kind::Model;
+}
+
+void AssetPreview::setAnimationModels(EditorContext& ctx, const std::vector<ModelUse>& models, bool stillLooking) {
+    if (animationFile_.empty()) return;
+    animationModels_ = models;
+    animationModelsLooking_ = stillLooking;
+    if (animationModel_.empty() && !animationModels_.empty()) {
+        // The first model it plays on, playing it from the start.
+        animationModel_ = animationModels_.front().model;
+        openScene(ctx, animationModel_);
+        scene_->setEntityAnimation(0, animationFile_);
+    }
+}
+
+void AssetPreview::drawAnimationModels(EditorContext& ctx) {
+    if (animationFile_.empty()) return;
+    if (animationModels_.empty()) {
+        ImGui::TextDisabled(animationModelsLooking_ ? "Looking for the models it plays on..." : "No model plays it in the game's files.");
+        return;
+    }
+    if (!ImGui::CollapsingHeader("Plays on", ImGuiTreeNodeFlags_DefaultOpen)) return;
+    ImGui::TextDisabled("%zu model(s)%s; a click shows it on that one", animationModels_.size(), animationModelsLooking_ ? " so far" : "");
+    if (ImGui::BeginChild("animationmodels", ImVec2(0, ImGui::GetTextLineHeightWithSpacing() * std::min<size_t>(animationModels_.size(), 8) + 4),
+                          ImGuiChildFlags_Borders)) {
+        for (size_t k = 0; k < animationModels_.size(); ++k) {
+            const ModelUse& u = animationModels_[k];
+            ImGui::PushID(int(k));
+            if (ImGui::Selectable((u.model + "  (" + u.why + ")").c_str(), tr::toLowerAscii(u.model) == tr::toLowerAscii(animationModel_))) {
+                animationModel_ = u.model;
+                openScene(ctx, u.model);
+                scene_->setEntityAnimation(0, animationFile_);
+            }
+            ImGui::PopID();
+        }
+    }
+    ImGui::EndChild();
+}
+
 void AssetPreview::draw(EditorContext& ctx) {
     modelVisible_ = false;
     if (name_.empty()) {
@@ -239,6 +290,7 @@ void AssetPreview::draw(EditorContext& ctx) {
         return;
     }
     ImGui::TextWrapped("%s", name_.c_str());
+    drawAnimationModels(ctx);
     switch (kind_) {
         case Kind::Model: drawModel(ctx); break;
         case Kind::Texture: drawTexture(); break;
@@ -280,6 +332,13 @@ void AssetPreview::drawModel(EditorContext&) {
     else ImGui::TextDisabled("Drag to turn, middle drag to move, wheel to zoom.");
     ImGui::SameLine();
     if (ImGui::SmallButton("Reset view")) modelFitted_ = false;
+    if (particlesOnly_ || !animationFile_.empty()) {
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Restart")) {
+            if (particlesOnly_) scene_->setStandaloneParticles(name_);
+            else scene_->setEntityAnimation(0, animationFile_);
+        }
+    }
     ImGui::SameLine();
     ImGui::Checkbox("Textures", &scene_->showTextures);
     ImGui::SameLine();
@@ -310,7 +369,16 @@ void AssetPreview::drawModel(EditorContext&) {
 void AssetPreview::render(EditorContext&, SDL_GPUCommandBuffer* commands) {
     if (kind_ != Kind::Model || !modelVisible_ || !scene_ || !renderer_ || !renderer_->colourTarget()) return;
     scene_->loadPending(0.05);
-    if (!modelFitted_ && scene_->fitEntityToModel(0)) {
+    if (particlesOnly_) {
+        // A particle system: framed on where its particles are once it has run two seconds (most systems are steady by then), then left alone.
+        tr::Vec3 centre;
+        float radius = 0;
+        if (!modelFitted_ && scene_->standaloneParticleTime() >= 2.0f && scene_->standaloneParticleBounds(centre, radius)) {
+            target_ = centre;
+            distance_ = std::max(1.0f, std::max(radius, 0.5f) / std::sin(scene_->camera().fovY * 0.5f) * 1.1f);
+            modelFitted_ = true;
+        }
+    } else if (!modelFitted_ && scene_->fitEntityToModel(0)) {
         // Frame the model's bounds: centre, and far enough that its bounding sphere fits the view.
         tr::Vec3 centre;
         float radius = 1;

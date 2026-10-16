@@ -4,6 +4,7 @@
 // pref folder (settings.ini: gameRoot, database, map = adv_foreas_concordia_wilderness, workspace = server).
 #include <fstream>                   // before the defines below: the STL's streams must keep their access levels
 #include <mutex>
+#include <chrono>
 #define _ALLOW_KEYWORD_MACROS                // MSVC STL (xkeycheck.h) otherwise rejects the two defines below
 #define private public                       // the test inspects workspace internals
 #define protected public
@@ -776,6 +777,74 @@ int main() {
                 check(lp && duplicated && lightSaved && reread.size() == lightCount + 1 && std::fabs(reread[0].position.x - (lightBefore.x + 4.0f)) < 1e-3f &&
                           lightBackup,
                       "light moved, duplicated, saved to a copy and read back");
+                // The light inspector's modifier editor draws for a light with tracks and for one with ID 0; adding a track to a light
+                // without any gives it one that readLightModifiers reads, and undo takes it away again.
+                size_t withTracks = SIZE_MAX, plain = SIZE_MAX;
+                const tr::LightsDocument doc(ctx.map->lightsXml);
+                for (size_t l = 0; l < doc.count(); ++l) {
+                    const bool hasId = ctx.scene->mapLights()[l].id != 0;
+                    if (hasId && !doc.modTracks(l).empty() && withTracks == SIZE_MAX) withTracks = l;
+                    if (hasId && doc.modTracks(l).empty() && plain == SIZE_MAX) plain = l;
+                }
+                bool drawn = true;
+                for (size_t l : {withTracks, plain}) {
+                    if (l == SIZE_MAX) continue;
+                    client.selection_ = Selection{SelectionKind::MapLight, l};
+                    frames(editor, device, 2);
+                    drawn = drawn && client.selection_.kind == SelectionKind::MapLight;
+                }
+                bool added = false;
+                if (plain != SIZE_MAX) {
+                    const uint64_t id = ctx.scene->mapLights()[plain].id;
+                    const size_t before = tr::readLightModifiers(ctx.map->lightsXml).size();
+                    tr::LightsDocument edit(ctx.map->lightsXml);
+                    tr::LightModTrack t;
+                    t.className = "IntensityModifier";
+                    t.properties = {{"Enabled", "true", "bool"}, {"Intensity1", "1.0000000", "float"}, {"Intensity2", "0.2000000", "float"}};
+                    t.keys = {{"0", "0"}, {"0.5", "1"}};
+                    client.beginEdit();
+                    if (edit.addModTrack(plain, t)) {
+                        ctx.map->lightsXml = edit.bytes();
+                        ctx.scene->reloadMapLights();          // as the inspector does (ClientWorkspace::lightsChanged)
+                    }
+                    size_t mine = 0;
+                    for (const auto& m : tr::readLightModifiers(ctx.map->lightsXml)) mine += m.lightId == id ? 1 : 0;
+                    added = mine == 1 && tr::readLightModifiers(ctx.map->lightsXml).size() == before + 1 && ctx.scene->mapLightModifierTracks(ctx.scene->mapLights()[plain]) == 1;
+                    client.undo();
+                    added = added && tr::readLightModifiers(ctx.map->lightsXml).size() == before;
+                }
+                check(drawn && (plain == SIZE_MAX || added), "light modifiers: the editor draws, a new track is read and plays, undo removes it");
+            }
+            // Sound emitters: select one (the inspector draws), move it, duplicate it, add a new one; save writes audioemitters.xml (copied
+            // into the test folder first) and keeps the original; it reads back.
+            fs::copy_file(fs::path(realFolder) / "audioemitters.xml", copyFolder / "audioemitters.xml", ec);
+            {
+                const size_t before = ctx.scene->audioEmitters().size();
+                bool ok = true;
+                tr::Vec3 moved{};
+                if (before > 0) {
+                    client.selection_ = Selection{SelectionKind::AudioEmitter, 0};
+                    frames(editor, device, 2);
+                    client.beginEdit();
+                    tr::Vec3* ep = client.selectedPosition();
+                    if (ep) ep->x += 5.0f;
+                    client.contentChanged();
+                    moved = ctx.scene->audioEmitters()[0].position;
+                    client.duplicateSelected();
+                    ok = ep && ctx.scene->audioEmitters().size() == before + 1 && client.selection_.index == before;
+                }
+                client.selection_ = Selection{};
+                client.addEmitter();
+                frames(editor, device, 2);
+                const size_t now = ctx.scene->audioEmitters().size();
+                ok = ok && now == before + (before > 0 ? 2 : 1) && client.selection_.kind == SelectionKind::AudioEmitter;
+                const bool saved = client.saveMap();
+                std::vector<tr::AudioEmitter> reread;
+                try { reread = tr::readAudioEmitters(tr::readFile((copyFolder / "audioemitters.xml").string())); } catch (const std::exception&) {}
+                const bool backup = fs::exists(copyFolder / "audioemitters.xml.rasaedit-original", ec);
+                std::printf("      sound emitters: %zu -> %zu read back, backup %d\n", before, reread.size(), backup ? 1 : 0);
+                check(ok && saved && reread.size() == now && backup && (before == 0 || std::fabs(reread[0].position.x - moved.x) < 1e-3f),
+                      "sound emitter moved, duplicated, added, saved to a copy and read back");
             }
             ctx.map->folder = realFolder;
         }
@@ -835,6 +904,36 @@ int main() {
                 const SceneView::Model* m = p.scene_ && !p.scene_->placements_.empty() ? p.scene_->placements_[0].model : nullptr;
                 check(listed && !reload.empty() && m && m->loaded && m->animation.duration > 0 && p.scene_->lightTime < 5.0f,
                       "the preview lists the linked animations and plays the one picked (the firing-range soldier's reload)");
+
+                // An animation on its own: the models it plays on, the first shown playing it. The models' own-animation index is
+                // built here at once (the workspace builds it a few milliseconds a frame).
+                const auto indexStart = std::chrono::steady_clock::now();
+                while (!assets.animationLinks_.modelIndexDone()) assets.animationLinks_.indexModels(*ctx.assets, 1000.0);
+                std::printf("      model index: %zu models read in %.1f s\n", assets.animationLinks_.modelsRead(),
+                            std::chrono::duration<double>(std::chrono::steady_clock::now() - indexStart).count());
+                auto playsOn = [&](const char* animation, const char* model) {
+                    for (const ModelUse& u : assets.animationLinks_.modelsPlaying(*ctx.assets, ctx.gameData.get(), animation))
+                        if (tr::toLowerAscii(u.model) == model) return true;
+                    return false;
+                };
+                check(playsOn("m_idle_non_combat_v01.anm", "avatar_hum_m_nude_caucasian_v01.geo"), "the male idle plays on the male body (skeleton 1)");
+                check(playsOn("water_foreas_pond.anm", "arch_forean_eloh_temple_basin_v02_water_v01.geo"),
+                      "the pond water animation plays on the basin water (that model's anim property)");
+                assets.showAsset("m_idle_non_combat_v01.anm");
+                frames(editor, device, 30);
+                const SceneView::Model* body = p.scene_ && !p.scene_->placements_.empty() ? p.scene_->placements_[0].model : nullptr;
+                check(!p.animationModel_.empty() && body && body->loaded && body->animation.duration > 0, "an animation's preview plays it on a model");
+                // A particle system on its own: it runs, and draws.
+                assets.showAsset("arch_eloh_controlpoint_human_on_v01.pfx");
+                frames(editor, device, 60);
+                tr::Vec3 centre;
+                float radius = 0;
+                const bool running = p.particlesOnly_ && p.scene_ && p.scene_->standaloneParticleBounds(centre, radius) && radius > 0;
+                const size_t colours = running && p.renderer_ ? saveTexture(device, p.renderer_->colourTarget(), p.renderer_->width(), p.renderer_->height(),
+                                                                            outputPath("smoke_preview_particles.rgba").c_str())
+                                                              : 0;
+                std::printf("      particle preview: radius %.1f m, %zu colours\n", radius, colours);
+                check(running && colours > 20, "a particle system previews on its own");
             }
             {
                 // Out and back: Extract writes the file as the game reads it; a texture goes out as PNG and comes back encoded like the

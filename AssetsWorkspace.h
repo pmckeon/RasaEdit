@@ -55,6 +55,7 @@ private:
     BlenderPanel blender_;
     AnimationLinkFinder animationLinks_;
     ModelAnimationLinks links_;                      // of the selected model (empty otherwise)
+    bool animationModelsFinal_ = false;              // the selected .anm's model list was made with the full model index
 
     // Exchange: files out to a folder, files back in (pending until previewed or written to the patch archive).
     char folder_[512] = "";

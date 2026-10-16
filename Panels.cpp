@@ -53,6 +53,7 @@ void drawMarkerLegend() {
     ImGui::SeparatorText("Map entities");
     row(markerColour::placeholder, "Box: no model, or an effect (Placeholders)");
     row(markerColour::light, "Small box: a light of the map's lights.xml (Light markers)");
+    row(markerColour::sound, "Small box: a sound emitter of the map's audioemitters.xml (Sound markers)");
     row(markerColour::entityModel, "Overview dot: entity with a model");
     row(markerColour::entityNoMesh, "Overview dot: class without a mesh");
     row(markerColour::entityUnknown, "Overview dot: unknown class");
@@ -462,6 +463,7 @@ void ViewportPanel::applyOptions(const ViewSettings& view, SceneView& scene) con
     scene.animate = view.animate;
     scene.showPlaceholders = view.showPlaceholders;
     scene.showLightMarkers = view.lightMarkers && !serverControls_;      // selectable only where map entities are
+    scene.showSoundMarkers = view.soundMarkers && !serverControls_;
     scene.showServer = options.showServer;
     scene.showMissionAreas = options.showMissionAreas;
     scene.showRegions = options.showRegions;
@@ -525,6 +527,11 @@ void ViewportPanel::draw(EditorContext& ctx, const char* title, Selection& selec
     if (!serverControls_) {
         ImGui::SameLine();
         ImGui::Checkbox("Light markers", &ctx.view.lightMarkers);
+        ImGui::SameLine();
+        ImGui::Checkbox("Sound markers", &ctx.view.soundMarkers);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("The map's sound emitters (audioemitters.xml) as small pink boxes: click one to select it; the selected one\n"
+                              "shows its MinDistance and MaxDistance as spheres.");
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("The map's lights (lights.xml) as small white boxes: click one to select it; the selected light shows\n"
                               "its reach (point: range circles, spot: its axis, plane: the box it lights). Lights on models and\n"

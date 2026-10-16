@@ -29,6 +29,7 @@ inline const Vec4f region{0.85f, 0.85f, 0.85f, 1};             // regions (surfa
 inline const Vec4f regionUnderground{0.5f, 0.55f, 0.7f, 1};    // regions (underground)
 inline const Vec4f placeholder{0.3f, 0.9f, 1.0f, 1};           // map entity boxes: no model, or an effect
 inline const Vec4f light{1.0f, 1.0f, 1.0f, 1};                 // map lights (lights.xml), Light markers toggle
+inline const Vec4f sound{1.0f, 0.6f, 0.9f, 1};                 // map sound emitters (audioemitters.xml), Sound markers toggle
 inline const Vec4f entityModel{0.92f, 0.92f, 0.92f, 0.8f};     // overview: map entity with a model
 inline const Vec4f entityNoMesh{0.47f, 0.63f, 1.0f, 0.86f};    // overview: map entity whose class has no mesh
 inline const Vec4f entityUnknown{1.0f, 0.31f, 0.27f, 1};       // overview: map entity of an unknown class

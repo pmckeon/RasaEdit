@@ -4,10 +4,12 @@
 #include "assetlibrary.h"
 #include "gamedata.h"
 #include "particles.h"
+#include "trformats.h"
 
 #include "imgui.h"
 
 #include <algorithm>
+#include <chrono>
 
 namespace {
 std::string lower(const std::string& s) { return tr::toLowerAscii(s); }
@@ -23,17 +25,7 @@ ModelAnimationLinks AnimationLinkFinder::find(tr::AssetLibrary& assets, tr::Game
         links.groups.push_back(std::move(g));
         links.kinds.push_back("Animated object: plays its own animation");
     }
-    // Special-FX packages (indexed once: every .pkg's accessory events).
-    if (!packagesIndexed_) {
-        packagesIndexed_ = true;
-        for (const std::string& name : assets.namesWithExtension(".pkg")) {
-            try {
-                for (const tr::SfxAccessory& a : tr::readSfxPackage(assets.read(name)).accessories)
-                    if (!a.mesh.empty()) packageAccessories_[lower(a.mesh)].push_back({name, a.animation});
-            } catch (const std::exception&) {
-            }
-        }
-    }
+    indexPackages(assets);
     if (const auto it = packageAccessories_.find(lower(model)); it != packageAccessories_.end()) {
         AnimationGroup g{"Attached by special-FX packages", "", {}, -1};
         std::string packages;
@@ -90,6 +82,80 @@ ModelAnimationLinks AnimationLinkFinder::find(tr::AssetLibrary& assets, tr::Game
     }
     if (links.kinds.empty()) links.kinds.push_back("Static model: the game's files tie no animation to it");
     return links;
+}
+
+void AnimationLinkFinder::indexPackages(tr::AssetLibrary& assets) {
+    // Special-FX packages, indexed once: every .pkg's accessory events.
+    if (packagesIndexed_) return;
+    packagesIndexed_ = true;
+    for (const std::string& name : assets.namesWithExtension(".pkg")) {
+        try {
+            for (const tr::SfxAccessory& a : tr::readSfxPackage(assets.read(name)).accessories)
+                if (!a.mesh.empty()) packageAccessories_[lower(a.mesh)].push_back({name, a.animation});
+        } catch (const std::exception&) {
+        }
+    }
+}
+
+void AnimationLinkFinder::reset() {
+    packageAccessories_.clear();
+    packagesIndexed_ = false;
+    animProperty_.clear();
+    modelQueue_.clear();
+    modelCursor_ = 0;
+    modelsIndexed_ = false;
+}
+
+void AnimationLinkFinder::indexModels(tr::AssetLibrary& assets, double budgetMs) {
+    if (modelsIndexed_) return;
+    if (modelQueue_.empty() && modelCursor_ == 0) modelQueue_ = assets.namesWithExtension(".geo");
+    const auto start = std::chrono::steady_clock::now();
+    while (modelCursor_ < modelQueue_.size()) {
+        const std::string& name = modelQueue_[modelCursor_++];
+        // The `anim` property only (the .anm a model plays); same-named files are not a link.
+        try {
+            for (const tr::GeoProperty& p : tr::readGeo(assets.read(name)).properties)
+                if (lower(p.key) == "anim" && !p.value.empty()) animProperty_[lower(p.value)].push_back(name);
+        } catch (const std::exception&) {
+        }
+        if (std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() > budgetMs) return;
+    }
+    modelsIndexed_ = true;
+}
+
+std::vector<ModelUse> AnimationLinkFinder::modelsPlaying(tr::AssetLibrary& assets, tr::GameData* data, const std::string& animation) {
+    std::vector<ModelUse> out;
+    auto add = [&](const std::string& model, const std::string& why) {
+        if (model.empty() || !assets.exists(model)) return;
+        for (const ModelUse& u : out)
+            if (lower(u.model) == lower(model)) return;
+        out.push_back(ModelUse{model, why});
+    };
+    const std::string wanted = lower(animation);
+    if (const auto it = animProperty_.find(wanted); it != animProperty_.end())
+        for (const std::string& m : it->second) add(m, "its own animation");
+    indexPackages(assets);
+    for (const auto& [mesh, uses] : packageAccessories_)
+        for (const auto& [package, a] : uses)
+            if (lower(a) == wanted) {
+                // the index keeps the mesh in lower case: the archive's own spelling
+                std::string name = mesh;
+                for (const std::string& n : assets.namesWithExtension(".geo"))
+                    if (lower(n) == mesh) name = n;
+                add(name, "accessory of " + package);
+            }
+    if (data) {
+        try {
+            for (int32_t id : data->meshStringIds(animation)) {
+                for (const auto& [family, mesh] : data->objectFamiliesPlaying(id)) add(data->stringById(mesh), "object family " + data->animationFamilyName(family));
+                for (const auto& [family, skeleton] : data->familiesPlaying(id))
+                    for (int32_t mesh : data->skeletonMeshes(skeleton))
+                        add(data->stringById(mesh), "skeleton " + std::to_string(skeleton) + ", " + data->animationFamilyName(family));
+            }
+        } catch (const std::exception&) {
+        }
+    }
+    return out;
 }
 
 void drawAnimationGroups(const ModelAnimationLinks& links, const std::function<void(const AnimationChoice&)>& row,

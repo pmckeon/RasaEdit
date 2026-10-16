@@ -319,6 +319,12 @@ public:
     std::vector<FamilyAnimation> familyObjectAnimations(int32_t familyId, int32_t meshId);
     size_t skeletonMeshCount(int32_t skeletonId);
     std::vector<int32_t> suitBaseMeshes(int32_t meshId);
+    // The other way round, for an animation (its string id; meshStringIds works for any file name): the (family, skeleton) keys
+    // of animationFamilyData and the (family, mesh id) keys of animationFamilyObject whose lists name it, and the meshes on a
+    // skeleton (meshSkeleton), by id.
+    std::vector<std::pair<int32_t, int32_t>> familiesPlaying(int32_t animationStringId);
+    std::vector<std::pair<int32_t, int32_t>> objectFamiliesPlaying(int32_t animationStringId);
+    std::vector<int32_t> skeletonMeshes(int32_t skeletonId);
 
 private:
     ZipArchive zip_;

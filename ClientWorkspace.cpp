@@ -24,6 +24,7 @@ void ClientWorkspace::buildDefaultLayout(ImGuiID dockspace) {
     ImGui::DockBuilderDockWindow("Overview###Client.Overview", centre);
     ImGui::DockBuilderDockWindow("Entities###Client.Entities", bottom);
     ImGui::DockBuilderDockWindow("Lights###Client.Lights", bottom);
+    ImGui::DockBuilderDockWindow("Sounds###Client.Sounds", bottom);
     ImGui::DockBuilderDockWindow("Map###Client.Map", right);
     ImGui::DockBuilderDockWindow("Entity###Client.Entity", right);
     ImGui::DockBuilderFinish(dockspace);
@@ -51,7 +52,7 @@ void ClientWorkspace::onMapLoaded() {
 // ------------------------------------------------------------------------------------------
 ClientWorkspace::MapEdit ClientWorkspace::snapshot() const {
     if (!ctx_.map) return MapEdit{};
-    return MapEdit{ctx_.map->map.entities, ctx_.map->map.generatedAbvs, ctx_.map->lightsXml};
+    return MapEdit{ctx_.map->map.entities, ctx_.map->map.generatedAbvs, ctx_.map->lightsXml, ctx_.map->audioEmittersXml};
 }
 
 void ClientWorkspace::restore(const MapEdit& edit) {
@@ -61,6 +62,9 @@ void ClientWorkspace::restore(const MapEdit& edit) {
     const bool lightsDiffer = ctx_.map->lightsXml != edit.lights;
     ctx_.map->lightsXml = edit.lights;
     if (lightsDiffer) lightsChanged();
+    const bool emittersDiffer = ctx_.map->audioEmittersXml != edit.emitters;
+    ctx_.map->audioEmittersXml = edit.emitters;
+    if (emittersDiffer) emittersChanged();
     entitiesChanged();
 }
 
@@ -144,6 +148,20 @@ void ClientWorkspace::lightsChanged() {
     if (selection_.kind == SelectionKind::MapLight && (!ctx_.scene || selection_.index >= ctx_.scene->mapLights().size())) selection_ = Selection{};
 }
 
+void ClientWorkspace::emittersChanged() {
+    if (ctx_.scene) ctx_.scene->reloadAudioEmitters();
+    if (selection_.kind == SelectionKind::AudioEmitter && (!ctx_.scene || selection_.index >= ctx_.scene->audioEmitters().size())) selection_ = Selection{};
+}
+
+void ClientWorkspace::setEmitterProperty(size_t emitter, const std::string& name, const std::string& value, const std::string& type) {
+    if (!ctx_.map) return;
+    tr::LightsDocument doc = tr::audioEmittersDocument(ctx_.map->audioEmittersXml);
+    if (doc.property(emitter, name) == value) return;
+    if (!doc.setProperty(emitter, name, value, type)) return;
+    ctx_.map->audioEmittersXml = doc.bytes();
+    emittersChanged();
+}
+
 void ClientWorkspace::setLightProperty(size_t light, const std::string& name, const std::string& value, const std::string& type) {
     if (!ctx_.map) return;
     tr::LightsDocument doc(ctx_.map->lightsXml);
@@ -154,6 +172,10 @@ void ClientWorkspace::setLightProperty(size_t light, const std::string& name, co
 }
 
 tr::Vec3* ClientWorkspace::selectedPosition() {
+    if (selectedEmitter() >= 0 && ctx_.map && ctx_.scene && size_t(selectedEmitter()) < ctx_.scene->audioEmitters().size()) {
+        emitterPosition_ = ctx_.scene->audioEmitters()[size_t(selectedEmitter())].position;
+        return &emitterPosition_;
+    }
     if (selectedLight() >= 0 && ctx_.map) {
         const std::vector<float> p = parseNumbers(tr::LightsDocument(ctx_.map->lightsXml).property(size_t(selectedLight()), "Position"));
         if (p.size() < 3) return nullptr;
@@ -165,7 +187,7 @@ tr::Vec3* ClientWorkspace::selectedPosition() {
 }
 
 float* ClientWorkspace::selectedRotation() {
-    if (!selectedPosition()) return nullptr;
+    if (selectedEmitter() >= 0 || !selectedPosition()) return nullptr;      // emitters have no orientation
     yawHandle_ = 0;                                  // the viewport adds its step; contentChanged applies it
     return &yawHandle_;
 }
@@ -184,6 +206,11 @@ tr::Quat yawRotated(const tr::Quat& q, float yaw) {
 }  // namespace
 
 void ClientWorkspace::contentChanged() {
+    if (selectedEmitter() >= 0 && ctx_.map) {
+        const float p[3] = {emitterPosition_.x, emitterPosition_.y, emitterPosition_.z};
+        setEmitterProperty(size_t(selectedEmitter()), "Position", tr::LightsDocument::formatVector(p, 3), "string");
+        return;
+    }
     if (selectedLight() >= 0 && ctx_.map) {
         // Lights: Position from the dragged proxy; yaw into WorldOrientation (spot / plane) or LocalOrientation (point), x y z w.
         const size_t light = size_t(selectedLight());
@@ -217,6 +244,15 @@ void ClientWorkspace::contentChanged() {
 }
 
 void ClientWorkspace::deleteSelected() {
+    if (selectedEmitter() >= 0 && ctx_.map) {
+        beginEdit();
+        tr::LightsDocument doc = tr::audioEmittersDocument(ctx_.map->audioEmittersXml);
+        doc.remove(size_t(selectedEmitter()));
+        ctx_.map->audioEmittersXml = doc.bytes();
+        selection_ = Selection{};
+        emittersChanged();
+        return;
+    }
     if (selectedLight() >= 0 && ctx_.map) {
         beginEdit();
         tr::LightsDocument doc(ctx_.map->lightsXml);
@@ -247,6 +283,24 @@ uint64_t ClientWorkspace::newEntityId() const {
 }
 
 void ClientWorkspace::duplicateSelected() {
+    if (selectedEmitter() >= 0 && ctx_.map && ctx_.scene) {
+        // New UID: one more than the largest in the file; the copy 2 m east.
+        uint64_t largest = 0;
+        for (const tr::AudioEmitter& e : ctx_.scene->audioEmitters()) largest = std::max<uint64_t>(largest, std::strtoull(e.uid.c_str(), nullptr, 10));
+        beginEdit();
+        tr::LightsDocument doc = tr::audioEmittersDocument(ctx_.map->audioEmittersXml);
+        const size_t source = size_t(selectedEmitter());
+        const size_t copy = doc.duplicate(source, largest + 1, doc.property(source, "Name") + "_copy");
+        std::vector<float> p = parseNumbers(doc.property(copy, "Position"));
+        if (p.size() >= 3) {
+            p[0] += 2.0f;
+            doc.setProperty(copy, "Position", tr::LightsDocument::formatVector(p.data(), 3));
+        }
+        ctx_.map->audioEmittersXml = doc.bytes();
+        emittersChanged();
+        selection_ = Selection{SelectionKind::AudioEmitter, copy};
+        return;
+    }
     if (selectedLight() >= 0 && ctx_.map && ctx_.scene) {
         // New ID: one more than the largest (light modifiers attach by ID); the copy 2 m east, with the original's modifiers.
         uint64_t largest = 0;
@@ -353,6 +407,7 @@ bool ClientWorkspace::saveMap() {
     const bool mapChanged = !(ctx_.map->map.entities.size() == saved_.entities.size() && ctx_.map->map.generatedAbvs.size() == saved_.abvs.size() &&
                               tr::writeMap(ctx_.map->map) == [&] { tr::MapFile m = ctx_.map->map; m.entities = saved_.entities; m.generatedAbvs = saved_.abvs; return tr::writeMap(m); }());
     const bool lightsChanged = ctx_.map->lightsXml != saved_.lights;
+    const bool emittersChanged = ctx_.map->audioEmittersXml != saved_.emitters;
     std::string error;
     try {
         if (mapChanged) {
@@ -365,6 +420,10 @@ bool ClientWorkspace::saveMap() {
             tr::readLights(ctx_.map->lightsXml);             // must still parse
             if (!writeFileWithBackup((path.parent_path() / "lights.xml").string(), ctx_.map->lightsXml, error)) throw std::runtime_error(error);
         }
+        if (emittersChanged) {
+            tr::readAudioEmitters(ctx_.map->audioEmittersXml);   // must still parse
+            if (!writeFileWithBackup((path.parent_path() / "audioemitters.xml").string(), ctx_.map->audioEmittersXml, error)) throw std::runtime_error(error);
+        }
     } catch (const std::exception& e) {
         ctx_.setStatus(std::string("Saving failed: ") + e.what(), true);
         return false;
@@ -374,7 +433,7 @@ bool ClientWorkspace::saveMap() {
     cleanUndoDepth_ = 0;
     cleanReachable_ = true;
     saved_ = snapshot();
-    ctx_.setStatus(std::string("Saved") + (mapChanged ? " " + path.filename().string() : "") + (lightsChanged ? " lights.xml" : "") + " in " +
+    ctx_.setStatus(std::string("Saved") + (mapChanged ? " " + path.filename().string() : "") + (lightsChanged ? " lights.xml" : "") + (emittersChanged ? " audioemitters.xml" : "") + " in " +
                        path.parent_path().string() + ". The game reads them on the next map load.",
                    false);
     return true;
@@ -408,7 +467,7 @@ void ClientWorkspace::handleShortcuts() {
         ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Z, ImGuiInputFlags_RouteGlobal))
         redo();
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_S, ImGuiInputFlags_RouteGlobal) && hasUnsavedChanges()) saveMap();
-    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_D, ImGuiInputFlags_RouteGlobal) && (selectedEntity() >= 0 || selectedLight() >= 0)) duplicateSelected();
+    if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_D, ImGuiInputFlags_RouteGlobal) && (selectedEntity() >= 0 || selectedLight() >= 0 || selectedEmitter() >= 0)) duplicateSelected();
 }
 
 void ClientWorkspace::drawPanels() {
@@ -417,6 +476,7 @@ void ClientWorkspace::drawPanels() {
     drawMapInfoPanel(ctx_, "Map###Client.Map");
     drawEntitiesPanel();
     drawLightsPanel();
+    drawSoundsPanel();
     drawEntityPanel();
     OverviewLayers layers;
     layers.selection = &selection_;
@@ -424,6 +484,10 @@ void ClientWorkspace::drawPanels() {
     layers.position = [this](const Selection& s, tr::Vec3& p) {
         if (s.kind == SelectionKind::MapLight && ctx_.scene && s.index < ctx_.scene->mapLights().size()) {
             p = ctx_.scene->mapLights()[s.index].position;
+            return true;
+        }
+        if (s.kind == SelectionKind::AudioEmitter && ctx_.scene && s.index < ctx_.scene->audioEmitters().size()) {
+            p = ctx_.scene->audioEmitters()[s.index].position;
             return true;
         }
         if (s.kind != SelectionKind::MapEntity || !ctx_.map || s.index >= ctx_.map->map.entities.size()) return false;
@@ -639,14 +703,357 @@ void ClientWorkspace::drawLightInspector(size_t index) {
         setLightProperty(index, "GlobeMapFile", globe, "string");
     }
     ImGui::SetItemTooltip("A cube map .dds the light projects around itself (e.g. globe_vfx_crystal.dds); empty = none. Enter applies.");
-    const size_t tracks = ctx_.scene->mapLightModifierTracks(light);
-    if (tracks > 0) {
-        const tr::PlacedLight now = ctx_.scene->displayedMapLight(index);
-        ImGui::TextDisabled("Modifiers  %zu track(s) (kept, edited in lights.xml only); now: colour %.2f %.2f %.2f, intensity %.2f", tracks,
-                            now.colour.x, now.colour.y, now.colour.z, now.intensity);
-    } else {
-        ImGui::TextDisabled("Modifiers  none");
+    drawLightModifiers(index, light);
+    ImGui::Spacing();
+    if (ImGui::Button("Duplicate")) duplicateSelected();
+    ImGui::SameLine();
+    if (ImGui::Button("Delete")) deleteSelected();
+    ImGui::SameLine();
+    if (ImGui::Button("Show in viewport")) viewport_.focusOn(ctx_, selection_);
+}
+
+// A light's modifiers (lights.xml <Mods>; CLAUDE.md "Light modifiers"): each track sets one property from its two endpoints by a
+// weight keyed over time (seconds, looping at the last key) - Intensity1 + w (Intensity2 - Intensity1), Color1 + w (Color2 - Color1),
+// Offset1 + w (Offset2 - Offset1), a rotation about RotationAxis by w turns, Range1 + w (Range2 - Range1).
+void ClientWorkspace::drawLightModifiers(size_t index, const tr::PlacedLight& light) {
+    ImGui::SeparatorText("Modifiers");
+    tr::LightsDocument doc(ctx_.map->lightsXml);
+    const float fieldWidth = ImGui::GetFontSize() * 12;
+    auto apply = [&]() {
+        ctx_.map->lightsXml = doc.bytes();
+        lightsChanged();
+    };
+    if (light.id == 0) {
+        ImGui::TextWrapped("ID 0: the engine attaches modifiers by the light's ID and skips 0 (FUN_007df550), so this light has none.");
+        if (ImGui::Button("Give it an ID")) {
+            uint64_t largest = 0;
+            for (const tr::PlacedLight& l : ctx_.scene->mapLights()) largest = std::max<uint64_t>(largest, l.id);
+            beginEdit();
+            doc.setProperty(index, "ID", std::to_string(largest + 1));
+            apply();
+        }
+        ImGui::SetItemTooltip("The map's largest light ID + 1.");
+        return;
     }
+    const std::vector<tr::LightModTrack> tracks = doc.modTracks(index);
+    if (!tracks.empty()) {
+        const tr::PlacedLight now = ctx_.scene->displayedMapLight(index);
+        ImGui::TextDisabled("now: colour %.2f %.2f %.2f, intensity %.2f, range %.2f", now.colour.x, now.colour.y, now.colour.z, now.intensity, now.range);
+    }
+    auto numbers = [](const std::string& text) {
+        std::vector<float> out;
+        for (const char* p = text.c_str(); *p;) {
+            char* end = nullptr;
+            const float v = std::strtof(p, &end);
+            if (end == p) { ++p; continue; }
+            out.push_back(v);
+            p = end;
+        }
+        return out;
+    };
+    auto shortNumber = [](float v) {
+        char b[32];
+        std::snprintf(b, sizeof b, "%g", double(v));
+        return std::string(b);
+    };
+    int removeTrack = -1;
+    for (size_t k = 0; k < tracks.size(); ++k) {
+        tr::LightModTrack t = tracks[k];
+        bool changed = false;
+        ImGui::PushID(int(k));
+        std::string kind = t.className;
+        if (kind.size() > 8 && kind.compare(kind.size() - 8, 8, "Modifier") == 0) kind.resize(kind.size() - 8);
+        const float length = t.keys.empty() ? 0.0f : std::strtof(t.keys.back().first.c_str(), nullptr);
+        const bool open = ImGui::TreeNodeEx("##track", ImGuiTreeNodeFlags_DefaultOpen, "%s  (%zu keys, loops every %.2f s)", kind.c_str(), t.keys.size(), length);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("x")) removeTrack = int(k);
+        ImGui::SetItemTooltip("Remove this track");
+        if (open) {
+            bool enabled = t.property("Enabled") != "false";
+            if (ImGui::Checkbox("Enabled", &enabled)) {
+                beginEdit();
+                t.setProperty("Enabled", enabled ? "true" : "false", "bool");
+                changed = true;
+            }
+            for (auto& prop : t.properties) {
+                const std::string& name = prop[0];
+                if (name == "Enabled") continue;
+                std::vector<float> v = numbers(prop[1]);
+                ImGui::SetNextItemWidth(fieldWidth * 1.3f);
+                bool edited = false;
+                if (name.rfind("Color", 0) == 0 && v.size() >= 3) {
+                    float c[4] = {v[0], v[1], v[2], v.size() >= 4 ? v[3] : 1.0f};
+                    edited = ImGui::ColorEdit4(name.c_str(), c, ImGuiColorEditFlags_Float);
+                    if (edited) prop[1] = tr::LightsDocument::formatVector(c, v.size() >= 4 ? 4 : 3);
+                } else if (v.size() == 3) {
+                    float c[3] = {v[0], v[1], v[2]};
+                    edited = ImGui::DragFloat3(name.c_str(), c, 0.01f, 0, 0, "%.3f");
+                    if (edited) prop[1] = tr::LightsDocument::formatVector(c, 3);
+                } else if (v.size() == 1) {
+                    float x = v[0];
+                    edited = ImGui::DragFloat(name.c_str(), &x, 0.01f, 0, 0, "%.3f");
+                    if (edited) prop[1] = tr::LightsDocument::formatNumber(x);
+                } else {
+                    ImGui::Text("%s  %s", name.c_str(), prop[1].c_str());
+                }
+                if (ImGui::IsItemActivated()) noteEdit();
+                changed = changed || edited;
+            }
+            if (t.className == "RotationModifier") ImGui::TextDisabled("weight 1 = one turn about the axis");
+            // Keys: time (seconds) and weight.
+            if (ImGui::BeginTable("keys", 3, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg)) {
+                ImGui::TableSetupColumn("time (s)");
+                ImGui::TableSetupColumn("weight");
+                ImGui::TableSetupColumn("");
+                ImGui::TableHeadersRow();
+                int removeKey = -1;
+                for (size_t i = 0; i < t.keys.size(); ++i) {
+                    ImGui::PushID(int(i));
+                    ImGui::TableNextRow();
+                    ImGui::TableNextColumn();
+                    float time = std::strtof(t.keys[i].first.c_str(), nullptr), weight = std::strtof(t.keys[i].second.c_str(), nullptr);
+                    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 5);
+                    if (ImGui::DragFloat("##t", &time, 0.005f, 0.0f, 1000.0f, "%.3f")) {
+                        t.keys[i].first = shortNumber(time);
+                        changed = true;
+                    }
+                    if (ImGui::IsItemActivated()) noteEdit();
+                    ImGui::TableNextColumn();
+                    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 5);
+                    if (ImGui::SliderFloat("##w", &weight, 0.0f, 1.0f, "%.3f")) {
+                        t.keys[i].second = shortNumber(weight);
+                        changed = true;
+                    }
+                    if (ImGui::IsItemActivated()) noteEdit();
+                    ImGui::TableNextColumn();
+                    if (ImGui::SmallButton("x")) removeKey = int(i);
+                    ImGui::PopID();
+                }
+                ImGui::EndTable();
+                if (removeKey >= 0) {
+                    beginEdit();
+                    t.keys.erase(t.keys.begin() + removeKey);
+                    changed = true;
+                }
+            }
+            if (ImGui::SmallButton("Add key")) {
+                beginEdit();
+                const float last = t.keys.empty() ? 0.0f : std::strtof(t.keys.back().first.c_str(), nullptr);
+                t.keys.push_back({shortNumber(t.keys.empty() ? 0.0f : last + 0.1f), t.keys.empty() ? "0" : t.keys.back().second});
+                changed = true;
+            }
+            ImGui::SetItemTooltip("A key 0.1 s after the last (the track loops at its last key's time).");
+            ImGui::TreePop();
+        }
+        ImGui::PopID();
+        if (changed) {
+            doc.setModTrack(index, k, t);
+            apply();
+            return;                                      // the document changed: the next frame reads it again
+        }
+    }
+    if (removeTrack >= 0) {
+        beginEdit();
+        doc.removeModTrack(index, size_t(removeTrack));
+        apply();
+        return;
+    }
+    // A new track from the light's own values: weight 0 -> its current value, 1 -> a second endpoint to edit.
+    static const char* kinds[] = {"Intensity", "Color", "Position", "Rotation", "Range"};
+    ImGui::SetNextItemWidth(fieldWidth);
+    if (ImGui::BeginCombo("##addtrack", "add a track...")) {
+        for (int k = 0; k < 5; ++k)
+            if (ImGui::Selectable(kinds[k])) {
+                tr::LightModTrack t;
+                t.className = std::string(kinds[k]) + "Modifier";
+                t.properties.push_back({"Enabled", "true", "bool"});
+                const float c[4] = {light.colour.x, light.colour.y, light.colour.z, 1.0f}, zero[3] = {0, 0, 0}, up[3] = {0, 1, 0}, raised[3] = {0, 0.25f, 0};
+                if (k == 0) t.properties.insert(t.properties.end(), {{"Intensity1", tr::LightsDocument::formatNumber(light.intensity), "float"},
+                                                                      {"Intensity2", tr::LightsDocument::formatNumber(light.intensity * 0.5f), "float"}});
+                if (k == 1) t.properties.insert(t.properties.end(), {{"Color1", tr::LightsDocument::formatVector(c, 4), "string"},
+                                                                      {"Color2", tr::LightsDocument::formatVector(c, 4), "string"}});
+                if (k == 2) t.properties.insert(t.properties.end(), {{"Offset1", tr::LightsDocument::formatVector(zero, 3), "string"},
+                                                                      {"Offset2", tr::LightsDocument::formatVector(raised, 3), "string"}});
+                if (k == 3) t.properties.push_back({"RotationAxis", tr::LightsDocument::formatVector(up, 3), "string"});
+                if (k == 4) t.properties.insert(t.properties.end(), {{"Range1", tr::LightsDocument::formatNumber(light.range), "float"},
+                                                                      {"Range2", tr::LightsDocument::formatNumber(light.range * 0.5f), "float"}});
+                t.keys = {{"0", "0"}, {"1", "1"}};
+                beginEdit();
+                if (doc.addModTrack(index, t)) apply();
+            }
+        ImGui::EndCombo();
+    }
+    ImGui::SetItemTooltip("A track keyed 0 -> 1 over a second (edit the endpoints and keys). Range tracks are read by the game (they exist in\n"
+                          "6 shipped tracks) but the editor's viewport does not apply them yet.");
+}
+
+void ClientWorkspace::addEmitter() {
+    if (!ctx_.map || !ctx_.scene) return;
+    tr::Vec3 origin, direction, point;
+    ctx_.scene->viewRay(0, 0, origin, direction);
+    if (!ctx_.scene->surfacePoint(origin, direction, origin.y - 10.0f, point)) point = add(origin, scaled(direction, 20.0f));
+    point.y += 1.0f;
+    uint64_t largest = 0;
+    for (const tr::AudioEmitter& e : ctx_.scene->audioEmitters()) largest = std::max<uint64_t>(largest, std::strtoull(e.uid.c_str(), nullptr, 10));
+    const float p[3] = {point.x, point.y, point.z};
+    // The shipped emitters' property order and types; distances and delays as the most common shipped values (8 / 20 m, no delay).
+    beginEdit();
+    tr::LightsDocument doc = tr::audioEmittersDocument(ctx_.map->audioEmittersXml);
+    const size_t index = doc.addElement("AudioEmitterProperties", {{"Name", "AudioEmitter_new", "string"},
+                                                                   {"UID", std::to_string(largest + 1), "string"},
+                                                                   {"AudioSetID", "0", "uint"},
+                                                                   {"Position", tr::LightsDocument::formatVector(p, 3), "string"},
+                                                                   {"MinDistance", tr::LightsDocument::formatNumber(8.0f), "float"},
+                                                                   {"MaxDistance", tr::LightsDocument::formatNumber(20.0f), "float"},
+                                                                   {"Volume", tr::LightsDocument::formatNumber(1.0f), "float"},
+                                                                   {"FadeInTime", tr::LightsDocument::formatNumber(0.0f), "float"},
+                                                                   {"FadeOutTime", tr::LightsDocument::formatNumber(0.0f), "float"},
+                                                                   {"MinDelay", tr::LightsDocument::formatNumber(0.0f), "float"},
+                                                                   {"MaxDelay", tr::LightsDocument::formatNumber(0.0f), "float"}});
+    if (index == size_t(-1)) {
+        ctx_.setStatus("audioemitters.xml has no <AudioEmitters> section to add to.", true);
+        return;
+    }
+    ctx_.map->audioEmittersXml = doc.bytes();
+    emittersChanged();
+    selection_ = Selection{SelectionKind::AudioEmitter, index};
+    ctx_.setStatus("Added a sound emitter at the centre of the view (pick its audio set; not saved yet).", false);
+}
+
+void ClientWorkspace::drawSoundsPanel() {
+    if (!ImGui::Begin("Sounds###Client.Sounds")) { ImGui::End(); return; }
+    if (!ctx_.map || !ctx_.scene) { ImGui::TextDisabled("Select a map."); ImGui::End(); return; }
+    const std::vector<tr::AudioEmitter>& emitters = ctx_.scene->audioEmitters();
+    if (!ctx_.scene->audioEmittersError().empty())
+        ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.4f, 1.0f), "audioemitters.xml: %s", ctx_.scene->audioEmittersError().c_str());
+    if (ImGui::Button("Add a sound emitter")) addEmitter();
+    ImGui::SameLine();
+    ImGui::TextDisabled("%zu in the map's audioemitters.xml (turn on Sound markers in the viewport to click them)", emitters.size());
+    const ImGuiTableFlags flags = ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersOuter | ImGuiTableFlags_BordersV | ImGuiTableFlags_Resizable;
+    if (ImGui::BeginTable("sounds", 6, flags)) {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Audio set", ImGuiTableColumnFlags_WidthStretch);
+        const float numberWidth = ImGui::CalcTextSize("-00000.0").x;
+        ImGui::TableSetupColumn("X", ImGuiTableColumnFlags_WidthFixed, numberWidth);
+        ImGui::TableSetupColumn("Y", ImGuiTableColumnFlags_WidthFixed, numberWidth);
+        ImGui::TableSetupColumn("Z", ImGuiTableColumnFlags_WidthFixed, numberWidth);
+        ImGui::TableSetupColumn("Distances", ImGuiTableColumnFlags_WidthFixed);
+        ImGui::TableHeadersRow();
+        ImGuiListClipper clipper;
+        clipper.Begin(int(emitters.size()));
+        while (clipper.Step()) {
+            for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
+                const tr::AudioEmitter& e = emitters[size_t(row)];
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                char label[160];
+                std::snprintf(label, sizeof label, "%s##sound%d", e.name.empty() ? "(unnamed)" : e.name.c_str(), row);
+                const bool selected = selection_.kind == SelectionKind::AudioEmitter && selection_.index == size_t(row);
+                if (ImGui::Selectable(label, selected, ImGuiSelectableFlags_SpanAllColumns)) selection_ = Selection{SelectionKind::AudioEmitter, size_t(row)};
+                ImGui::TableNextColumn();
+                std::string set;
+                try { if (ctx_.gameData) set = ctx_.gameData->audioSetName(int32_t(e.audioSetId)); } catch (const std::exception&) {}
+                ImGui::Text("%u %s", e.audioSetId, set.c_str());
+                ImGui::TableNextColumn(); ImGui::Text("%.1f", e.position.x);
+                ImGui::TableNextColumn(); ImGui::Text("%.1f", e.position.y);
+                ImGui::TableNextColumn(); ImGui::Text("%.1f", e.position.z);
+                ImGui::TableNextColumn(); ImGui::Text("%.0f - %.0f m", e.minDistance, e.maxDistance);
+            }
+        }
+        ImGui::EndTable();
+    }
+    ImGui::End();
+}
+
+// A sound emitter of the map's audioemitters.xml. The properties are the file's (every shipped emitter has the same eleven); how the
+// engine uses the distances, volume, fades and delays is not traced - their names are what the editor shows.
+void ClientWorkspace::drawEmitterInspector(size_t index) {
+    const tr::AudioEmitter e = ctx_.scene->audioEmitters()[index];   // a copy: edits reload the list
+    const float fieldWidth = ImGui::GetFontSize() * 12;
+    auto noteIfActivated = [&]() { if (ImGui::IsItemActivated()) noteEdit(); };
+    auto setFloat = [&](const char* name, float v) { setEmitterProperty(index, name, tr::LightsDocument::formatNumber(v), "float"); };
+    ImGui::Text("Sound emitter  UID %s", e.uid.c_str());
+    char name[128];
+    std::snprintf(name, sizeof name, "%s", e.name.c_str());
+    ImGui::SetNextItemWidth(fieldWidth);
+    if (ImGui::InputText("Name", name, sizeof name)) setEmitterProperty(index, "Name", name, "string");
+    noteIfActivated();
+    float position[3] = {e.position.x, e.position.y, e.position.z};
+    ImGui::SetNextItemWidth(fieldWidth * 1.4f);
+    if (ImGui::DragFloat3("Position", position, 0.05f, 0, 0, "%.2f")) setEmitterProperty(index, "Position", tr::LightsDocument::formatVector(position, 3), "string");
+    noteIfActivated();
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Snap to ground")) {
+        beginEdit();
+        position[1] = ctx_.scene->surfaceHeightBelow(position[0], position[2], position[1] + 2.0f, position[1]);
+        setEmitterProperty(index, "Position", tr::LightsDocument::formatVector(position, 3), "string");
+    }
+    ImGui::SeparatorText("Sound");
+    int32_t set = int32_t(e.audioSetId);
+    ImGui::SetNextItemWidth(fieldWidth * 1.6f);
+    if (lookupCombo("Audio set", set, lookup::audioSet(ctx_, "(none)"))) {
+        beginEdit();
+        setEmitterProperty(index, "AudioSetID", std::to_string(std::max(set, 0)), "uint");
+    }
+    // The set's sounds, to listen to (which one the engine plays is its choice: the set's selection type).
+    std::vector<tr::GameData::AudioSetSound> sounds;
+    int32_t selectionType = 0;
+    try {
+        if (ctx_.gameData && e.audioSetId) {
+            sounds = ctx_.gameData->audioSetSounds(int32_t(e.audioSetId));
+            selectionType = ctx_.gameData->audioSetSelectionType(int32_t(e.audioSetId));
+        }
+    } catch (const std::exception&) {}
+    static const char* selectionNames[] = {"", "random", "sequential", "simultaneous"};
+    if (e.audioSetId && sounds.empty()) ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.4f, 1.0f), "The client has no sounds in this audio set.");
+    if (!sounds.empty()) ImGui::TextDisabled("%zu sound(s)%s%s", sounds.size(), selectionType >= 1 && selectionType <= 3 ? ", picked " : "",
+                                             selectionType >= 1 && selectionType <= 3 ? selectionNames[selectionType] : "");
+    for (size_t k = 0; k < sounds.size(); ++k) {
+        const tr::GameData::AudioSetSound& snd = sounds[k];
+        ImGui::PushID(int(k));
+        const bool exists = ctx_.assets && ctx_.assets->exists(snd.file);
+        if (!exists) ImGui::BeginDisabled();
+        if (soundPlayer_.playing(snd.file)) {
+            if (ImGui::SmallButton("Stop")) soundPlayer_.stop();
+        } else if (ImGui::SmallButton("Play")) {
+            try {
+                if (!soundPlayer_.play(snd.file, ctx_.assets->read(snd.file))) ctx_.setStatus("Cannot play " + soundPlayer_.error(), true);
+            } catch (const std::exception& ex) {
+                ctx_.setStatus("Cannot play " + snd.file + ": " + ex.what(), true);
+            }
+        }
+        if (!exists) ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (exists) ImGui::TextUnformatted(snd.file.c_str());
+        else ImGui::TextDisabled("%s (not in the archives)", snd.file.c_str());
+        ImGui::PopID();
+    }
+    float minDistance = e.minDistance, maxDistance = e.maxDistance, volume = e.volume;
+    ImGui::SetNextItemWidth(fieldWidth);
+    if (ImGui::DragFloat("MinDistance (m)", &minDistance, 0.1f, 0.0f, 1000.0f, "%.1f")) setFloat("MinDistance", minDistance);
+    noteIfActivated();
+    ImGui::SetNextItemWidth(fieldWidth);
+    if (ImGui::DragFloat("MaxDistance (m)", &maxDistance, 0.1f, 0.0f, 1000.0f, "%.1f")) setFloat("MaxDistance", maxDistance);
+    noteIfActivated();
+    if (maxDistance < minDistance) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "MaxDistance is below MinDistance (no shipped emitter has that).");
+    ImGui::SetNextItemWidth(fieldWidth);
+    if (ImGui::SliderFloat("Volume", &volume, 0.0f, 1.0f, "%.2f")) setFloat("Volume", volume);
+    noteIfActivated();
+    float fadeIn = e.fadeInTime, fadeOut = e.fadeOutTime, minDelay = e.minDelay, maxDelay = e.maxDelay;
+    ImGui::SetNextItemWidth(fieldWidth);
+    if (ImGui::DragFloat("FadeInTime (s)", &fadeIn, 0.05f, 0.0f, 600.0f, "%.2f")) setFloat("FadeInTime", fadeIn);
+    noteIfActivated();
+    ImGui::SetNextItemWidth(fieldWidth);
+    if (ImGui::DragFloat("FadeOutTime (s)", &fadeOut, 0.05f, 0.0f, 600.0f, "%.2f")) setFloat("FadeOutTime", fadeOut);
+    noteIfActivated();
+    ImGui::SetNextItemWidth(fieldWidth);
+    if (ImGui::DragFloat("MinDelay (s)", &minDelay, 0.05f, 0.0f, 3600.0f, "%.2f")) setFloat("MinDelay", minDelay);
+    noteIfActivated();
+    ImGui::SetNextItemWidth(fieldWidth);
+    if (ImGui::DragFloat("MaxDelay (s)", &maxDelay, 0.05f, 0.0f, 3600.0f, "%.2f")) setFloat("MaxDelay", maxDelay);
+    noteIfActivated();
+    ImGui::TextDisabled("The values are the file's; how the engine applies them is not traced.");
     ImGui::Spacing();
     if (ImGui::Button("Duplicate")) duplicateSelected();
     ImGui::SameLine();
@@ -657,6 +1064,11 @@ void ClientWorkspace::drawLightInspector(size_t index) {
 
 void ClientWorkspace::drawEntityPanel() {
     if (!ImGui::Begin("Entity###Client.Entity")) { ImGui::End(); return; }
+    if (selection_.kind == SelectionKind::AudioEmitter && ctx_.scene && selection_.index < ctx_.scene->audioEmitters().size()) {
+        drawEmitterInspector(selection_.index);
+        ImGui::End();
+        return;
+    }
     if (selection_.kind == SelectionKind::MapLight && ctx_.scene && selection_.index < ctx_.scene->mapLights().size()) {
         drawLightInspector(selection_.index);
         ImGui::End();

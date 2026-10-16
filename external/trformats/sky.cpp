@@ -1,4 +1,6 @@
 #include "sky.h"
+
+#include <cstring>
 #include "xml.h"
 
 #include <algorithm>
@@ -241,6 +243,11 @@ std::vector<PlacedLight> readLights(const Bytes& data, const std::map<std::strin
 // ------------------------------------------------------------------------------------------
 LightsDocument::LightsDocument(const Bytes& xml) : text_(xml.begin(), xml.end()) { scan(); }
 
+LightsDocument::LightsDocument(const Bytes& xml, std::string section, std::string element, std::string idProperty)
+    : text_(xml.begin(), xml.end()), section_(std::move(section)), element_(std::move(element)), idProperty_(std::move(idProperty)) {
+    scan();
+}
+
 namespace {
 
 size_t lineStart(const std::string& s, size_t at) {
@@ -269,21 +276,43 @@ std::string escapeXml(const std::string& v) {
 
 void LightsDocument::scan() {
     lights_.clear();
-    const size_t open = text_.find("<Lights>");
+    const std::string openTag = "<" + section_ + ">", closeTag = "</" + section_ + ">";
+    const std::string elementOpen = "<" + element_ + " ", elementBare = "<" + element_ + ">", elementClose = "</" + element_ + ">";
+    const size_t open = text_.find(openTag);
     if (open == std::string::npos) return;
-    const size_t close = text_.find("</Lights>", open);
+    const size_t close = text_.find(closeTag, open);
     const size_t limit = close == std::string::npos ? text_.size() : close;
-    size_t at = open + 8;
+    size_t at = open + openTag.size();
     for (;;) {
-        size_t start = text_.find("<Light ", at);
-        const size_t startBare = text_.find("<Light>", at);
+        size_t start = text_.find(elementOpen, at);
+        const size_t startBare = text_.find(elementBare, at);
         if (startBare < start) start = startBare;
         if (start == std::string::npos || start >= limit) break;
-        const size_t end = text_.find("</Light>", start);
+        const size_t end = text_.find(elementClose, start);
         if (end == std::string::npos || end >= limit) break;
-        lights_.push_back(Span{lineStart(text_, start), lineEnd(text_, end + 8)});
-        at = end + 8;
+        lights_.push_back(Span{lineStart(text_, start), lineEnd(text_, end + elementClose.size())});
+        at = end + elementClose.size();
     }
+}
+
+size_t LightsDocument::addElement(const std::string& className, const std::vector<std::array<std::string, 3>>& properties) {
+    const std::string nl = text_.find("\r\n") != std::string::npos ? "\r\n" : "\n";
+    const std::string empty = "<" + section_ + " />";
+    if (const size_t e = text_.find(empty); e != std::string::npos) {
+        const std::string indent = text_.substr(lineStart(text_, e), e - lineStart(text_, e));
+        text_.replace(e, empty.size(), "<" + section_ + ">" + nl + indent + "</" + section_ + ">");
+    }
+    const size_t close = text_.find("</" + section_ + ">");
+    if (close == std::string::npos) return size_t(-1);
+    const size_t at = lineStart(text_, close);
+    const std::string i0 = text_.substr(at, close - at) + "    ", i1 = i0 + "    ", i2 = i1 + "    ";
+    std::string block = i0 + "<" + element_ + ">" + nl + i1 + "<PropertyObject class=\"" + escapeXml(className) + "\" version=\"0\" newObj=\"1\">" + nl;
+    for (const auto& p : properties)
+        block += i2 + "<property name=\"" + escapeXml(p[0]) + "\" value=\"" + escapeXml(p[1]) + "\" type=\"" + escapeXml(p[2]) + "\" />" + nl;
+    block += i1 + "</PropertyObject>" + nl + i0 + "</" + element_ + ">" + nl;
+    text_.insert(at, block);
+    scan();
+    return lights_.size() - 1;
 }
 
 std::string LightsDocument::property(size_t light, const std::string& name) const {
@@ -338,7 +367,7 @@ std::vector<LightsDocument::Span> LightsDocument::modsOf(uint64_t id) const {
 
 size_t LightsDocument::duplicate(size_t light, uint64_t newId, const std::string& newName) {
     if (light >= lights_.size()) return size_t(-1);
-    const uint64_t oldId = std::strtoull(property(light, "ID").c_str(), nullptr, 10);
+    const uint64_t oldId = std::strtoull(property(light, idProperty_).c_str(), nullptr, 10);
     std::vector<std::string> mods;
     for (const Span& m : modsOf(oldId)) {
         std::string block = text_.substr(m.begin, m.end - m.begin);
@@ -350,7 +379,7 @@ size_t LightsDocument::duplicate(size_t light, uint64_t newId, const std::string
     text_.insert(lights_.back().end, copy);
     scan();
     const size_t index = lights_.size() - 1;
-    setProperty(index, "ID", std::to_string(newId));
+    setProperty(index, idProperty_, std::to_string(newId));
     setProperty(index, "Name", newName);
     if (!mods.empty()) {
         const size_t closeMods = text_.find("</Mods>");
@@ -376,6 +405,167 @@ void LightsDocument::remove(size_t light) {
     scan();
 }
 
+std::string LightModTrack::property(const std::string& name) const {
+    for (const auto& p : properties)
+        if (p[0] == name) return p[1];
+    return "";
+}
+
+void LightModTrack::setProperty(const std::string& name, const std::string& value, const std::string& type) {
+    for (auto& p : properties)
+        if (p[0] == name) {
+            p[1] = value;
+            return;
+        }
+    properties.push_back({name, value, type});
+}
+
+namespace {
+
+std::string attributeIn(const std::string& s, size_t from, size_t to, const std::string& name) {
+    const std::string key = name + "=\"";
+    const size_t a = s.find(key, from);
+    if (a == std::string::npos || a >= to) return "";
+    const size_t e = s.find('"', a + key.size());
+    return e == std::string::npos || e > to ? "" : s.substr(a + key.size(), e - a - key.size());
+}
+
+std::string unescapeXml(std::string v) {
+    const std::pair<const char*, const char*> entities[] = {{"&lt;", "<"}, {"&gt;", ">"}, {"&quot;", "\""}, {"&amp;", "&"}};
+    for (const auto& [from, to] : entities)
+        for (size_t at = v.find(from); at != std::string::npos; at = v.find(from, at + 1)) v.replace(at, std::strlen(from), to);
+    return v;
+}
+
+// A track's lines at `indent` (the <Track> line's), children four spaces deeper - the shipped files' layout.
+std::string trackText(const LightModTrack& t, const std::string& indent, const std::string& nl) {
+    const std::string i1 = indent + "    ", i2 = i1 + "    ";
+    std::string out = indent + "<Track>" + nl;
+    out += i1 + "<PropertyObject class=\"" + escapeXml(t.className) + "\"" + (t.objectAttributes.empty() ? "" : " " + t.objectAttributes) + ">" + nl;
+    for (const auto& p : t.properties)
+        out += i2 + "<property name=\"" + escapeXml(p[0]) + "\" value=\"" + escapeXml(p[1]) + "\" type=\"" + escapeXml(p[2]) + "\" />" + nl;
+    out += i1 + "</PropertyObject>" + nl;
+    out += i1 + "<Keys>" + nl;
+    for (const auto& k : t.keys) out += i2 + "<Key time=\"" + escapeXml(k.first) + "\" weight=\"" + escapeXml(k.second) + "\" />" + nl;
+    out += i1 + "</Keys>" + nl;
+    out += indent + "</Track>" + nl;
+    return out;
+}
+
+}  // namespace
+
+std::vector<LightsDocument::Span> LightsDocument::trackSpans(size_t light) const {
+    std::vector<Span> out;
+    if (light >= lights_.size()) return out;
+    const uint64_t id = std::strtoull(property(light, "ID").c_str(), nullptr, 10);
+    for (const Span& m : modsOf(id))
+        for (size_t at = text_.find("<Track>", m.begin); at != std::string::npos && at < m.end; at = text_.find("<Track>", at + 7)) {
+            const size_t end = text_.find("</Track>", at);
+            if (end == std::string::npos || end >= m.end) break;
+            out.push_back(Span{lineStart(text_, at), lineEnd(text_, end + 8)});
+        }
+    return out;
+}
+
+std::vector<LightModTrack> LightsDocument::modTracks(size_t light) const {
+    std::vector<LightModTrack> out;
+    for (const Span& sp : trackSpans(light)) {
+        LightModTrack t;
+        const size_t object = text_.find("<PropertyObject", sp.begin);
+        if (object != std::string::npos && object < sp.end) {
+            const size_t close = text_.find('>', object);
+            t.className = unescapeXml(attributeIn(text_, object, close, "class"));
+            // The tag's other attributes, kept as written.
+            std::string tag = text_.substr(object + 15, close - object - 15);
+            const size_t cls = tag.find("class=\"");
+            if (cls != std::string::npos) tag.erase(cls, tag.find('"', cls + 7) + 1 - cls);
+            while (!tag.empty() && (tag.front() == ' ' || tag.back() == ' ')) tag.erase(tag.front() == ' ' ? 0 : tag.size() - 1, 1);
+            t.objectAttributes = tag;
+            const size_t objectEnd = text_.find("</PropertyObject>", close);
+            for (size_t at = text_.find("<property ", close); at != std::string::npos && at < objectEnd; at = text_.find("<property ", at + 10)) {
+                const size_t e = text_.find("/>", at);
+                t.properties.push_back({unescapeXml(attributeIn(text_, at, e, "name")), unescapeXml(attributeIn(text_, at, e, "value")),
+                                        unescapeXml(attributeIn(text_, at, e, "type"))});
+            }
+        }
+        for (size_t at = text_.find("<Key ", sp.begin); at != std::string::npos && at < sp.end; at = text_.find("<Key ", at + 5)) {
+            const size_t e = text_.find("/>", at);
+            t.keys.push_back({unescapeXml(attributeIn(text_, at, e, "time")), unescapeXml(attributeIn(text_, at, e, "weight"))});
+        }
+        out.push_back(std::move(t));
+    }
+    return out;
+}
+
+bool LightsDocument::setModTrack(size_t light, size_t index, const LightModTrack& track) {
+    const std::vector<Span> spans = trackSpans(light);
+    if (index >= spans.size()) return false;
+    const Span& sp = spans[index];
+    const size_t open = text_.find("<Track>", sp.begin);
+    const std::string indent = text_.substr(sp.begin, open - sp.begin);
+    const std::string nl = text_.find("\r\n") != std::string::npos ? "\r\n" : "\n";
+    text_.replace(sp.begin, sp.end - sp.begin, trackText(track, indent, nl));
+    scan();
+    return true;
+}
+
+bool LightsDocument::addModTrack(size_t light, const LightModTrack& track) {
+    if (light >= lights_.size()) return false;
+    const uint64_t id = std::strtoull(property(light, "ID").c_str(), nullptr, 10);
+    if (id == 0) return false;
+    const std::string nl = text_.find("\r\n") != std::string::npos ? "\r\n" : "\n";
+    const std::vector<Span> mods = modsOf(id);
+    if (!mods.empty()) {
+        const size_t close = text_.rfind("</Mod>", mods.back().end);
+        const size_t at = lineStart(text_, close);
+        const std::string indent = text_.substr(at, close - at) + "    ";
+        text_.insert(at, trackText(track, indent, nl));
+    } else {
+        // An empty section is written <Mods /> in the shipped files (4 of 77): opened up first.
+        if (const size_t empty = text_.find("<Mods />"); empty != std::string::npos) {
+            const std::string indent = text_.substr(lineStart(text_, empty), empty - lineStart(text_, empty));
+            text_.replace(empty, 8, "<Mods>" + nl + indent + "</Mods>");
+        }
+        size_t closeMods = text_.find("</Mods>");
+        if (closeMods == std::string::npos) {
+            // No <Mods> yet: one before </LightRoot>, indented like </Lights>.
+            const size_t root = text_.rfind("</LightRoot>");
+            if (root == std::string::npos) return false;
+            const size_t lights = text_.find("</Lights>");
+            const std::string indent = lights == std::string::npos ? "    " : text_.substr(lineStart(text_, lights), lights - lineStart(text_, lights));
+            text_.insert(lineStart(text_, root), indent + "<Mods>" + nl + indent + "</Mods>" + nl);
+            closeMods = text_.find("</Mods>");
+        }
+        const size_t at = lineStart(text_, closeMods);
+        const std::string indent = text_.substr(at, closeMods - at) + "    ";
+        const std::string block = indent + "<Mod LightID=\"" + std::to_string(id) + "\">" + nl + trackText(track, indent + "    ", nl) + indent + "</Mod>" + nl;
+        text_.insert(at, block);
+    }
+    scan();
+    return true;
+}
+
+bool LightsDocument::removeModTrack(size_t light, size_t index) {
+    const std::vector<Span> spans = trackSpans(light);
+    if (index >= spans.size()) return false;
+    const uint64_t id = std::strtoull(property(light, "ID").c_str(), nullptr, 10);
+    text_.erase(spans[index].begin, spans[index].end - spans[index].begin);
+    // A <Mod> left without tracks goes too.
+    for (const Span& m : modsOf(id)) {
+        const size_t track = text_.find("<Track>", m.begin);
+        if (track == std::string::npos || track >= m.end) {
+            text_.erase(m.begin, m.end - m.begin);
+            break;
+        }
+    }
+    // A <Mods> left without any <Mod> back to the shipped files' empty form, <Mods />.
+    const size_t open = text_.find("<Mods>");
+    const size_t close = open == std::string::npos ? std::string::npos : text_.find("</Mods>", open);
+    if (close != std::string::npos && text_.find("<Mod ", open) > close) text_.replace(open, close + 7 - open, "<Mods />");
+    scan();
+    return true;
+}
+
 std::string LightsDocument::formatNumber(float v) {
     char buffer[32];
     std::snprintf(buffer, sizeof buffer, "%.7f", double(v));
@@ -385,6 +575,32 @@ std::string LightsDocument::formatNumber(float v) {
 std::string LightsDocument::formatVector(const float* v, size_t n) {
     std::string out;
     for (size_t k = 0; k < n; ++k) out += (k ? ", " : "") + formatNumber(v[k]);
+    return out;
+}
+
+std::vector<AudioEmitter> readAudioEmitters(const Bytes& data) {
+    const XmlNode root = parseXml(data);
+    if (root.tag != "AudioEmitterRoot") throw FormatError("audio emitters: root element " + root.tag + " (expected <AudioEmitterRoot>)");
+    std::vector<AudioEmitter> out;
+    const XmlNode* list = root.child("AudioEmitters");
+    if (!list) return out;
+    for (const XmlNode& e : list->children) {
+        if (e.tag != "AudioEmitter") continue;
+        const Properties p = properties(&e);
+        AudioEmitter a;
+        a.name = p.count("Name") ? p.at("Name") : "";
+        a.uid = p.count("UID") ? p.at("UID") : "";
+        a.audioSetId = uint32_t(std::strtoul(p.count("AudioSetID") ? p.at("AudioSetID").c_str() : "0", nullptr, 10));
+        a.position = vec3(p, "Position", Vec3{});
+        a.minDistance = number(p, "MinDistance");
+        a.maxDistance = number(p, "MaxDistance");
+        a.volume = number(p, "Volume", 1);
+        a.fadeInTime = number(p, "FadeInTime");
+        a.fadeOutTime = number(p, "FadeOutTime");
+        a.minDelay = number(p, "MinDelay");
+        a.maxDelay = number(p, "MaxDelay");
+        out.push_back(std::move(a));
+    }
     return out;
 }
 

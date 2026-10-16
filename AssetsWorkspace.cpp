@@ -162,6 +162,11 @@ void AssetsWorkspace::select(const std::string& name) {
     if (extensionOf(name) == ".geo" && ctx_.assets) links_ = animationLinks_.find(*ctx_.assets, ctx_.gameData.get(), name);
     preview_.select(ctx_, name);
     preview_.setAnimationLinks(extensionOf(name) == ".geo" ? &links_ : nullptr);
+    animationModelsFinal_ = false;
+    if (extensionOf(name) == ".anm" && ctx_.assets) {
+        preview_.setAnimationModels(ctx_, animationLinks_.modelsPlaying(*ctx_.assets, ctx_.gameData.get(), name), !animationLinks_.modelIndexDone());
+        animationModelsFinal_ = animationLinks_.modelIndexDone();
+    }
 }
 
 void AssetsWorkspace::showAsset(const std::string& name) {
@@ -234,6 +239,15 @@ void AssetsWorkspace::drawPanels() {
     if (!hooked && ctx_.assets) {
         hooked = true;
         if (const char* name = std::getenv("RASAEDIT_ASSET"); name && *name) showAsset(name);
+    }
+    // Every model's `anim` property, a few milliseconds a frame (which models an animation plays on); a selected animation's list
+    // is made again once it is complete.
+    if (ctx_.assets && !animationLinks_.modelIndexDone()) {
+        animationLinks_.indexModels(*ctx_.assets, 4.0);
+        if (animationLinks_.modelIndexDone() && extensionOf(selected_) == ".anm" && !animationModelsFinal_) {
+            preview_.setAnimationModels(ctx_, animationLinks_.modelsPlaying(*ctx_.assets, ctx_.gameData.get(), selected_), false);
+            animationModelsFinal_ = true;
+        }
     }
     drawBrowser();
     drawDetails();
