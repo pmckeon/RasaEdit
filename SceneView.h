@@ -202,6 +202,23 @@ public:
     // from the server's map_region rows; without server content the chosen skyIndex is used.
     bool skyByRegion = true;
     size_t activeSkyIndex() const;          // the sky lighting uses (by region at the camera, else skyIndex)
+    // Sky changes cross-fade (tabula_rasa.exe, decompiled 2026-10-16): when the region's sky changes, FUN_0052c5d0 fades the old
+    // sky's layers and lights out (FUN_00822ac0 / FUN_008238d0 -> FUN_008857c0 / FUN_008410b0, state 2) and the new one's in
+    // (FUN_00822cb0 / FUN_008239c0, state 1) over a window of sky time [now, now + 4000 / day length in ms] (constant 4000.0 at
+    // 0x00c2bd78; gamemap.py SetLengthOfDay(seconds x 1000)) - 4 seconds, linear (FUN_008859a0 / FUN_00841270 return the fraction
+    // through the window, or 1 - it). A sky already fading out is dropped at the next change; one fading in fades out from where
+    // it is. Matches the 4 s near-linear brightness ramp measured from video at Ranja Cavern. Lights are scaled by their weight
+    // (CombinedHemiLight sums them), dome layers' alpha too (UNVERIFIED: read from FUN_00885af0, where the decompiled variables
+    // are tangled). Fog switches at once (the transition code does not touch it - NOT traced further). The fade runs on real time
+    // whether or not `animate` is on. skyTransitions off: switch at once.
+    bool skyTransitions = true;
+    static constexpr float skyFadeSeconds = 4.0f;
+    struct SkyWeight {
+        size_t index;
+        float weight;
+    };
+    std::vector<SkyWeight> skyWeights() const;   // the skies drawn this frame (fading out first) with their weights
+    void advanceSky(float dt);
     bool skyFromRegion() const;             // activeSkyIndex() came from a server region volume
     // Environment cube by region (RegionManagerClient, decompiled 2026-10-11): of the same priority-sorted regions, the first
     // whose enabledFlags has bit 1 names gGlobalEnvTexture (MapRegion.environmentMap); none, an empty name or a failed load
@@ -243,6 +260,7 @@ public:
     bool animate = true;
     bool animateLights = true;
     void advanceLights(float dt) {
+        advanceSky(dt);
         if (animate) lightTime += std::clamp(dt, 0.0f, 0.1f);
     }
     const std::string& mapLightsError() const { return mapLightsError_; }
@@ -485,6 +503,7 @@ private:
     const std::vector<int>& idleTracks(const Model& model, const tr::Animation& animation);
     bool poseIdle(const ServerPlacement& s);
     void queueSky();                        // the active sky's layers (TRasa::SkyLayer bodies), see the comment at queueSky
+    void queueSkyLayers(const tr::Sky& sky, float fade);
     void queueBillboards(const Model& model, const Mat4& placementWorld, const std::vector<Mat4>& animatedMatrices, const SceneLighting& light);
     SceneLighting frameLighting_;           // this frame's lighting (queueDraws)
     // The rigid bodies of a server placement that carry their own model lights and particle systems, as map entities' models do:
@@ -557,6 +576,10 @@ private:
     std::string mapLightsError_;
     std::vector<ServerPlacement> serverPlacements_;
     const WorldContent* serverContent_ = nullptr;
+    size_t skyCurrent_ = size_t(-1);                 // the sky fading in / shown (npos: not started, use activeSkyIndex at full)
+    size_t skyPrevious_ = size_t(-1);                // the sky fading out (npos: none)
+    float skyPreviousStart_ = 0;                     // its weight when the change came
+    float skyElapsed_ = 0;                           // seconds since the change
     std::vector<ClientMapMarker> clientMapMarkers_;
     const WorldDatabase* serverDatabase_ = nullptr;
     std::function<std::string(int32_t)> serverMeshForClass_;

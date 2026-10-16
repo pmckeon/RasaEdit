@@ -387,6 +387,7 @@ void SceneView::setClassHues(const std::function<bool(int32_t, tr::HueColour&, t
 
 void SceneView::setRegionSkies(const std::vector<std::pair<int32_t, std::string>>& regionSkies) {
     skies_.clear();
+    skyCurrent_ = skyPrevious_ = size_t(-1);
     skyIndex = 0;
     bool haveRegion0 = false;
     for (const auto& rs : regionSkies) {
@@ -540,6 +541,41 @@ std::string SceneView::activeEnvironmentMap() const {
     const auto loaded = [&](const std::string& n) { const auto it = environmentCubes_.find(n); return it != environmentCubes_.end() && it->second; };
     if (!name.empty() && loaded(name)) return name;
     return loaded("env1.dds") ? "env1.dds" : "";
+}
+
+void SceneView::advanceSky(float dt) {
+    const size_t active = activeSkyIndex();
+    const bool usable = active < skies_.size() && skies_[active].loaded;
+    if (skyCurrent_ == size_t(-1) || !skyTransitions || !usable) {
+        skyCurrent_ = usable ? active : size_t(-1);
+        skyPrevious_ = size_t(-1);
+        skyElapsed_ = skyFadeSeconds;                // the first sky (map load) is shown at once
+        return;
+    }
+    if (active != skyCurrent_) {
+        skyPreviousStart_ = std::min(1.0f, skyElapsed_ / skyFadeSeconds);   // fades out from where it is
+        skyPrevious_ = skyCurrent_;
+        skyCurrent_ = active;
+        skyElapsed_ = 0;
+    } else {
+        skyElapsed_ += std::clamp(dt, 0.0f, 1.0f);       // real time (a long frame still counts, unlike the animation clock)
+    }
+    if (skyPrevious_ != size_t(-1) && skyPreviousStart_ - skyElapsed_ / skyFadeSeconds <= 0) skyPrevious_ = size_t(-1);
+}
+
+std::vector<SceneView::SkyWeight> SceneView::skyWeights() const {
+    std::vector<SkyWeight> out;
+    const auto loaded = [&](size_t i) { return i < skies_.size() && skies_[i].loaded; };
+    if (skyCurrent_ == size_t(-1) || !skyTransitions) {
+        if (loaded(activeSkyIndex())) out.push_back(SkyWeight{activeSkyIndex(), 1.0f});
+        return out;
+    }
+    if (loaded(skyPrevious_)) {
+        const float w = skyPreviousStart_ - skyElapsed_ / skyFadeSeconds;
+        if (w > 0) out.push_back(SkyWeight{skyPrevious_, w});
+    }
+    if (loaded(skyCurrent_)) out.push_back(SkyWeight{skyCurrent_, std::min(1.0f, skyElapsed_ / skyFadeSeconds)});
+    return out;
 }
 
 bool SceneView::skyFromRegion() const { return skyByRegion && serverContent_ && !serverContent_->regions.empty(); }
@@ -782,9 +818,9 @@ tr::PlacedLight SceneView::modifiedLight(const tr::PlacedLight& light) const {
 
 SceneLighting SceneView::skyLightingAt() const {
     SceneLighting l;                                   // plain editor lighting
-    const size_t active = activeSkyIndex();
-    if (!skyLighting || active >= skies_.size() || !skies_[active].loaded) return l;
-    const tr::Sky& sky = skies_[active].sky;
+    const std::vector<SkyWeight> weights = skyWeights();
+    if (!skyLighting || weights.empty()) return l;
+    const tr::Sky& sky = skies_[weights.back().index].sky;   // fog and colours: the sky being shown (fog switches at once)
     const float t = timeOfDay;
     auto vec4 = [](const tr::Vec3& c) { return Vec4f{c.x, c.y, c.z, 1}; };
     auto luminance = [](const tr::Vec3& c) { return 0.3f * c.x + 0.59f * c.y + 0.11f * c.z; };
@@ -795,11 +831,12 @@ SceneLighting SceneView::skyLightingAt() const {
     // here). Skies carry one hemi light per renderer (Concordia: Light_01 mode 1, Light_02 mode 0). Checked at
     // Alia Das 12:00: vertical faces away from the sun 0.55 measured vs (top + bottom) / 2 = 0.55 of Light_01 alone.
     tr::Vec3 top{0, 0, 0}, bottom{0, 0, 0};
-    for (const tr::SkyLight& g : sky.globalLights) {
-        if (!g.hemi || g.renderMode == 0) continue;
-        top = add(top, tr::skyLightColour(g, 1, t));
-        bottom = add(bottom, tr::skyLightColour(g, 2, t));
-    }
+    for (const SkyWeight& w : weights)                 // a sky change: both skies' lights, each x its fade weight
+        for (const tr::SkyLight& g : skies_[w.index].sky.globalLights) {
+            if (!g.hemi || g.renderMode == 0) continue;
+            top = add(top, scaled(tr::skyLightColour(g, 1, t), w.weight));
+            bottom = add(bottom, scaled(tr::skyLightColour(g, 2, t), w.weight));
+        }
     l.hemiTop = vec4(scaled(top, ambientScale));
     l.hemiBottom = vec4(scaled(bottom, ambientScale));
 
@@ -810,12 +847,13 @@ SceneLighting SceneView::skyLightingAt() const {
     l.sunBack = Vec4f{0, 0, 0, 1};
     struct Directional { tr::Vec3 towards; tr::Vec3 front; tr::Vec3 back; float shadowOpacity; };
     std::vector<Directional> directional;
-    for (const tr::SkyLayer& layer : sky.layers) {
+    for (const SkyWeight& w : weights)
+    for (const tr::SkyLayer& layer : skies_[w.index].sky.layers) {
         if (!layer.enabled || !showSun) continue;
         for (const tr::SkyLight& light : layer.lights) {
             if (light.hemi || !light.active) continue;
-            const tr::Vec3 front = tr::skyLightColour(light, 3, t);
-            const tr::Vec3 back = tr::skyLightColour(light, 4, t);
+            const tr::Vec3 front = scaled(tr::skyLightColour(light, 3, t), w.weight);
+            const tr::Vec3 back = scaled(tr::skyLightColour(light, 4, t), w.weight);
             if (luminance(front) <= 0.0f && luminance(back) <= 0.0f) continue;
             const tr::Vec3 travel = tr::skyLayerDirection(layer, light.orientation, t);
             directional.push_back(Directional{normalized(tr::Vec3{-travel.x, -travel.y, -travel.z}), front, back, tr::skyLightShadowOpacity(light, t)});
@@ -2235,9 +2273,12 @@ void SceneView::queueBillboards(const Model& model, const Mat4& placementWorld, 
 // TRDiffMapVertColor fog ring of sky_concordia_fog_ring.geo), cloud textures (CloudTexture1 / 2 are empty in every shipped
 // sky), the detail / decal layers of TREmissiveDiffMapDetMapDecMapVertColor, and the transition fade between skies.
 void SceneView::queueSky() {
-    const size_t active = activeSkyIndex();
-    if (!showSkyDome || !skyLighting || active >= skies_.size() || !skies_[active].loaded) return;
-    const tr::Sky& sky = skies_[active].sky;
+    if (!showSkyDome || !skyLighting) return;
+    for (const SkyWeight& w : skyWeights()) queueSkyLayers(skies_[w.index].sky, w.weight);
+}
+
+// One sky's layer models; `fade` scales the layers' alpha (a sky change cross-fades, see skyTransitions).
+void SceneView::queueSkyLayers(const tr::Sky& sky, float fade) {
     const float t = timeOfDay;
     const tr::Vec3 fog{frameLighting_.fogColour.x, frameLighting_.fogColour.y, frameLighting_.fogColour.z};
     for (const tr::SkyLayer& layer : sky.layers) {
@@ -2257,7 +2298,7 @@ void SceneView::queueSky() {
         // MatDiffuse as the shader sees it (x gModulateScale 0.5): (base + key) [x 2 fog]; blue takes the green base (engine).
         tr::Vec3 diffuse{layer.baseColour.x + key.colour.x, layer.baseColour.y + key.colour.y, layer.baseColour.y + key.colour.z};
         if (layer.useFogColour) diffuse = tr::Vec3{diffuse.x * 2 * fog.x, diffuse.y * 2 * fog.y, diffuse.z * 2 * fog.z};
-        const Vec4f emissiveTint{diffuse.x * 4, diffuse.y * 4, diffuse.z * 4, key.alpha};
+        const Vec4f emissiveTint{diffuse.x * 4, diffuse.y * 4, diffuse.z * 4, key.alpha * fade};
         const std::vector<Mat4> animatedMatrices = animatedPieceMatrices(*model, lightTime);
         for (const ModelPiece& piece : model->pieces) {
             if (!hiddenGroup.empty() && (hiddenGroup[0] == '!' ? piece.group != hiddenGroup.substr(1) : piece.group == hiddenGroup)) continue;
@@ -2272,7 +2313,7 @@ void SceneView::queueSky() {
                 renderer_.drawSkyEmissive(piece.mesh, pieceWorld, emissiveTint, showTextures ? piece.texture : nullptr, !piece.twoSided);
             } else if (piece.aniso && showTextures && showEffects) {
                 AnisoMaterial m = piece.anisoMaterial;
-                m.diffuseAlpha.w = key.alpha;            // MatDiffuse.a = the key alpha (gModulateScale leaves alpha alone)
+                m.diffuseAlpha.w = key.alpha * fade;     // MatDiffuse.a = the key alpha (gModulateScale leaves alpha alone)
                 m.normalMatrix = anisoNormalMatrix(model, piece, world, pieceWorld);
                 UvTransforms uv{m.transform0u, m.transform0v, m.transform1u, m.transform1v, m.transform2u, m.transform2v};
                 if (animatedUvTransforms(*model, piece, lightTime, uv)) {

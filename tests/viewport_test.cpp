@@ -1332,6 +1332,41 @@ int main(int argc, char** argv) {
                 }
             }
         }
+        // RASA_SKYFADETEST=1 (Concordia with RASA_DB): walk into Ranja Cavern at the mouth (the in-game positions where the region
+        // switched) and print the sky weights and hemisphere light every 0.5 s - the 4 s cross-fade (SceneView::skyTransitions).
+        if (envValue("RASA_SKYFADETEST")) {
+            const ViewCamera saved = scene.camera();
+            auto hemi = [&] {
+                const SceneLighting l = scene.lighting();
+                return 0.3f * l.hemiTop.x + 0.59f * l.hemiTop.y + 0.11f * l.hemiTop.z;
+            };
+            auto weights = [&] {
+                std::string out;
+                for (const SceneView::SkyWeight& w : scene.skyWeights())
+                    out += std::string(out.empty() ? "" : " + ") + scene.skies()[w.index].name + " x" + std::to_string(w.weight).substr(0, 4);
+                return out;
+            };
+            scene.camera().position = tr::Vec3{-489.92090f, 213.91177f, -405.16742f};
+            for (int k = 0; k < 3; ++k) scene.advanceLights(0.1f);
+            std::printf("sky fade test: outside, hemi top %.3f, %s\n", hemi(), weights().c_str());
+            scene.camera().position = tr::Vec3{-475.07239f, 214.95740f, -403.85135f};
+            for (int k = 0; k <= 10; ++k) {
+                scene.advanceLights(k == 0 ? 0.0f : 0.5f);
+                std::printf("  inside %.1f s: hemi top %.3f, %s\n", 0.5f * k, hemi(), weights().c_str());
+            }
+            // Walk out, and back in half way through that fade: the outdoor sky (fading in, at 0.5) fades out from where it is, the
+            // cave sky (fading out) is dropped and fades in again from 0 - as FUN_00822ac0 / FUN_008238d0 do.
+            scene.camera().position = tr::Vec3{-489.92090f, 213.91177f, -405.16742f};
+            scene.advanceLights(0.0f);
+            for (int k = 0; k < 4; ++k) scene.advanceLights(0.5f);
+            std::printf("  out again, 2 s: %s\n", weights().c_str());
+            scene.camera().position = tr::Vec3{-475.07239f, 214.95740f, -403.85135f};
+            scene.advanceLights(0.0f);
+            std::printf("  back in: %s\n", weights().c_str());
+            scene.advanceLights(1.0f);
+            std::printf("  1 s later: %s\n", weights().c_str());
+            scene.camera() = saved;
+        }
         // RASA_PROFILE=<frames>: the editor's per-frame work at this camera (Editor: loadPending(0.010); ViewportPanel::render:
         // advanceParticles, advanceLights, queueDraws, record + submit) for that many 60 Hz frames, the camera turning 0.5 degrees
         // per frame as when looking around; per section the mean and worst time and the frames that took over twice the median.
