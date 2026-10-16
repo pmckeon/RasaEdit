@@ -56,7 +56,7 @@ const EnumList kAction = {{1, "reveal objective"},  {2, "activate objective"},  
 const EnumList kRewardItem = {{1, "fixed"}, {2, "selectable"}};
 const EnumList kSpawnPolicy = {{0, "ordinary respawn"}, {1, "scenario controlled"}};
 const EnumList kStartPolicy = {{1, "automatic"}, {2, "player triggered"}};
-const EnumList kAreaShape = {{1, "sphere"}, {2, "cylinder"}, {3, "box"}};
+const EnumList kAreaShape = {{1, "sphere"}, {2, "cylinder"}, {3, "box"}, {4, "map"}};
 const EnumList kStep = {{1, "spawn group"},        {2, "despawn group"},       {3, "enable interaction"},   {4, "disable interaction"},
                         {5, "reveal objective"},   {6, "activate objective"},  {7, "complete objective"},   {8, "fail objective"},
                         {9, "start deadline"},     {10, "cancel deadline"},    {11, "grant reward package"}, {12, "grant skill / ability"},
@@ -195,6 +195,24 @@ void MissionEditor::load(const WorldDatabase& database) {
         tables.push_back(std::move(t));
     }
     tables_ = std::move(tables);
+    references_ = MissionReferences::load(database);
+    savedValidation_ = validateTables(false);
+    validation_ = savedValidation_;
+    validationDirty_ = false;
+}
+
+MissionValidationResult MissionEditor::validateTables(bool edited) const {
+    std::map<std::string, const DbTable*> byName;
+    for (const Table& t : tables_) byName[t.spec->table] = edited ? &t.edited : &t.saved;
+    return validateMissionContent(byName, references_);
+}
+
+const MissionValidationResult& MissionEditor::validation() {
+    if (validationDirty_) {
+        validation_ = validateTables(true);
+        validationDirty_ = false;
+    }
+    return validation_;
 }
 
 void MissionEditor::clear() {
@@ -210,9 +228,32 @@ bool MissionEditor::changed() const {
 
 void MissionEditor::revert() {
     for (Table& t : tables_) t.edited = t.saved;
+    validationDirty_ = true;
 }
 
 bool MissionEditor::save(WorldDatabase& database, std::string& message) {
+    // The server's start-up checks (MissionValidation.h): a change that would keep the server from starting, or from reporting
+    // ready (a required mission with a problem), is refused; problems the saved content already had are not held against it.
+    const MissionValidationResult& v = validation();
+    for (const MissionDiagnostic& d : v.diagnostics)
+        if (d.startup && !savedValidation_.startupFails) {
+            message = "Not saved: the Game server would not start - " + d.message;
+            return false;
+        }
+    if (v.blocksReadiness && !savedValidation_.blocksReadiness) {
+        const DbTable& missions = tables_.front().edited;
+        for (const MissionDiagnostic& d : v.diagnostics) {
+            if (d.startup || d.missionId < 0) continue;
+            bool required = false;
+            for (const auto& r : missions.rows)
+                if (r[size_t(missions.column("mission_id"))].asInt() == d.missionId && r[size_t(missions.column("enabled"))].asInt() != 0 &&
+                    r[size_t(missions.column("requirement"))].asInt() == 1)
+                    required = true;
+            if (!required) continue;
+            message = "Not saved: required mission " + std::to_string(d.missionId) + " would keep the server from reporting ready - " + d.code + ": " + d.message;
+            return false;
+        }
+    }
     std::vector<std::pair<const DbTable*, const DbTable*>> pairs;
     for (const Table& t : tables_)
         if (!t.spec->readOnly) pairs.emplace_back(&t.saved, &t.edited);
@@ -224,8 +265,11 @@ bool MissionEditor::save(WorldDatabase& database, std::string& message) {
     }
     for (Table& t : tables_)
         if (!t.spec->readOnly) t.saved = t.edited;
+    savedValidation_ = validation_;
     message = "Missions saved: " + std::to_string(summary.inserted) + " rows added, " + std::to_string(summary.updated) + " changed, " +
               std::to_string(summary.deleted) + " deleted. Restart the server to apply.";
+    if (!validation_.inactiveMissions.empty())
+        message += " The server will leave out " + std::to_string(validation_.inactiveMissions.size()) + " mission(s) (see the problems list).";
     return true;
 }
 
@@ -432,7 +476,44 @@ bool MissionEditor::drawRowFields(EditorContext& ctx, const WorldDatabase& datab
         ImGui::PopID();
     }
     if (!editable) ImGui::EndDisabled();
+    if (changed) validationDirty_ = true;
     return changed;
+}
+
+// The diagnostics of the selected mission that belong to this row (objective / transition / trigger / action / scenario / step).
+std::vector<const MissionDiagnostic*> MissionEditor::rowDiagnostics(const TableSpec& spec, const DbTable& table, const std::vector<DbValue>& row) const {
+    std::vector<const MissionDiagnostic*> out;
+    const auto value = [&](const char* column) {
+        const int c = table.column(column);
+        return c < 0 ? int64_t(-1) : row[size_t(c)].asInt();
+    };
+    const std::string name = spec.table;
+    for (const MissionDiagnostic& d : validation_.diagnostics) {
+        if (d.missionId != selectedMission_ || d.revision != selectedRevision_) continue;
+        bool match = false;
+        if (name == "mission_objective_definition")
+            match = d.objectiveId == value("objective_id") && d.transitionId < 0 && d.triggerId < 0 && d.actionId < 0;
+        else if (name == "mission_objective_transition")
+            match = d.objectiveId == value("objective_id") && d.transitionId == value("transition_id") && d.triggerId < 0 && d.actionId < 0;
+        else if (name == "mission_trigger")
+            match = d.objectiveId == value("objective_id") && d.transitionId == value("transition_id") && d.triggerId == value("trigger_id");
+        else if (name == "mission_action")
+            match = d.objectiveId == value("objective_id") && d.transitionId == value("transition_id") && d.actionId == value("action_id");
+        else if (name == "mission_scenario")
+            match = d.scenarioId == value("scenario_id") && d.stepId < 0;
+        else if (name == "mission_scenario_step")
+            match = d.scenarioId == value("scenario_id") && d.stepId == value("step_id");
+        if (match) out.push_back(&d);
+    }
+    return out;
+}
+
+void MissionEditor::drawDiagnostics(const std::vector<const MissionDiagnostic*>& list) {
+    for (const MissionDiagnostic* d : list) {
+        ImGui::PushStyleColor(ImGuiCol_Text, d->startup ? ImVec4(1.0f, 0.4f, 0.35f, 1.0f) : ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
+        ImGui::TextWrapped("%s: %s", d->code.c_str(), d->message.c_str());
+        ImGui::PopStyleColor();
+    }
 }
 
 void MissionEditor::drawChildren(EditorContext& ctx, const WorldDatabase& database, const TableSpec& parentSpec, const std::vector<DbValue>& parentRow,
@@ -469,14 +550,28 @@ void MissionEditor::drawChildren(EditorContext& ctx, const WorldDatabase& databa
                     label += "  " + std::string(enumName(kf ? kf->values : nullptr, row[size_t(kind)].asInt()));
                 }
                 if (comment >= 0 && !row[size_t(comment)].t.empty()) label += "  - " + row[size_t(comment)].t;
+                const std::vector<const MissionDiagnostic*> problems = rowDiagnostics(spec, t->edited, row);
+                if (!problems.empty()) label = "(!) " + label;
                 ImGui::PushID(int(k));
+                if (!problems.empty()) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
                 const bool rowOpen = ImGui::TreeNode((label + "###row").c_str());
+                if (!problems.empty()) {
+                    ImGui::PopStyleColor();
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::BeginTooltip();
+                        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 40);
+                        for (const MissionDiagnostic* d : problems) ImGui::Text("%s: %s", d->code.c_str(), d->message.c_str());
+                        ImGui::PopTextWrapPos();
+                        ImGui::EndTooltip();
+                    }
+                }
                 if (writable && !spec.readOnly) {
                     ImGui::SameLine();
                     if (ImGui::SmallButton("x")) removes_.push_back(PendingRemove{spec.table, row});
                     ImGui::SetItemTooltip("Remove (with its children)");
                 }
                 if (rowOpen) {
+                    drawDiagnostics(problems);
                     drawRowFields(ctx, database, *t, row, writable);
                     drawChildren(ctx, database, spec, row, depth + 1, writable);
                     ImGui::TreePop();
@@ -508,6 +603,7 @@ void MissionEditor::draw(EditorContext& ctx, WorldDatabase& database, int32_t ma
             missions.rows.push_back(row);
             selectedMission_ = next;
             selectedRevision_ = "custom";
+            validationDirty_ = true;
         }
         ImGui::SameLine();
         const bool changedNow = changed();
@@ -521,6 +617,54 @@ void MissionEditor::draw(EditorContext& ctx, WorldDatabase& database, int32_t ma
         if (ImGui::Button("Revert")) revert();
         if (!changedNow) ImGui::EndDisabled();
         ImGui::SameLine();
+    }
+    // The server's start-up checks on the edited content.
+    {
+        const MissionValidationResult& v = validation();
+        size_t startupCount = 0;
+        for (const MissionDiagnostic& d : v.diagnostics) startupCount += d.startup ? 1 : 0;
+        const ImVec4 colour = v.startupFails ? ImVec4(1.0f, 0.4f, 0.35f, 1.0f) : v.diagnostics.empty() ? ImVec4(0.5f, 0.85f, 0.5f, 1.0f)
+                                                                                                         : ImVec4(1.0f, 0.75f, 0.3f, 1.0f);
+        char summary[320];
+        if (v.diagnostics.empty())
+            std::snprintf(summary, sizeof summary, "Server checks: all %zu enabled missions pass", v.enabledMissions);
+        else
+            std::snprintf(summary, sizeof summary, "Server checks: %s%zu of %zu enabled missions left out, %zu problem(s)%s###servercheck",
+                          v.startupFails ? "THE SERVER WOULD NOT START - " : "", v.inactiveMissions.size(), v.enabledMissions, v.diagnostics.size() - startupCount,
+                          v.blocksReadiness ? "; a required mission keeps the server from reporting ready" : "");
+        ImGui::PushStyleColor(ImGuiCol_Text, colour);
+        const bool open = !v.diagnostics.empty() && ImGui::TreeNode(summary);
+        if (v.diagnostics.empty()) ImGui::TextUnformatted(summary);
+        ImGui::PopStyleColor();
+        ImGui::SetItemTooltip("Rasa.NET's mission content checks at start-up (MissionContentValidator), run on the edited tables: a mission with a problem\n"
+                              "is left out by the server; a problem on a required mission keeps it from reporting ready; a start-up error stops it.\n"
+                              "Click a problem to open its mission. Saving refuses new start-up and readiness problems.");
+        if (open) {
+            if (ImGui::BeginChild("problems", ImVec2(0, ImGui::GetFontSize() * 9), ImGuiChildFlags_Borders | ImGuiChildFlags_ResizeY)) {
+                for (size_t k = 0; k < v.diagnostics.size(); ++k) {
+                    const MissionDiagnostic& d = v.diagnostics[k];
+                    std::string where;
+                    if (d.missionId >= 0) where = std::to_string(d.missionId) + " [" + d.revision + "]";
+                    if (d.objectiveId >= 0) where += " objective " + std::to_string(d.objectiveId);
+                    if (d.transitionId >= 0) where += " transition " + std::to_string(d.transitionId);
+                    if (d.triggerId >= 0) where += " trigger " + std::to_string(d.triggerId);
+                    if (d.actionId >= 0) where += " action " + std::to_string(d.actionId);
+                    if (d.scenarioId >= 0) where += " scenario " + std::to_string(d.scenarioId);
+                    if (d.stepId >= 0) where += " step " + std::to_string(d.stepId);
+                    const std::string line = (where.empty() ? std::string() : where + ": ") + d.code + " - " + d.message;
+                    ImGui::PushID(int(k));
+                    ImGui::PushStyleColor(ImGuiCol_Text, d.startup ? ImVec4(1.0f, 0.4f, 0.35f, 1.0f) : ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
+                    if (ImGui::Selectable(line.c_str(), d.missionId == selectedMission_ && d.revision == selectedRevision_) && d.missionId >= 0) {
+                        selectedMission_ = d.missionId;
+                        selectedRevision_ = d.revision;
+                    }
+                    ImGui::PopStyleColor();
+                    ImGui::PopID();
+                }
+            }
+            ImGui::EndChild();
+            ImGui::TreePop();
+        }
     }
     ImGui::Checkbox("On this map", &mapOnly_);
     ImGui::SetItemTooltip("Missions whose giver or receiver spawns here, or with a spawn group or area on this map.");
@@ -550,10 +694,16 @@ void MissionEditor::draw(EditorContext& ctx, WorldDatabase& database, int32_t ma
             if (mapOnly_ && !onMap.count({id, revision})) continue;
             const std::string label = missionLabel(ctx, r);
             if (!needle.empty() && tr::toLowerAscii(label).find(needle) == std::string::npos) continue;
+            const bool leftOut = r[size_t(missions.column("enabled"))].asInt() != 0 && validation_.inactiveMissions.count(id);
             ImGui::PushID(int(k));
-            if (ImGui::Selectable(label.c_str(), id == selectedMission_ && revision == selectedRevision_)) {
+            if (leftOut) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.3f, 1.0f));
+            if (ImGui::Selectable(((leftOut ? "(!) " : "") + label).c_str(), id == selectedMission_ && revision == selectedRevision_)) {
                 selectedMission_ = id;
                 selectedRevision_ = revision;
+            }
+            if (leftOut) {
+                ImGui::PopStyleColor();
+                ImGui::SetItemTooltip("The server would leave this mission out (see its problems).");
             }
             ImGui::PopID();
         }
@@ -592,6 +742,7 @@ void MissionEditor::draw(EditorContext& ctx, WorldDatabase& database, int32_t ma
                     (*selected)[size_t(revisionColumn)] = DbValue::text(revision);
                     selectedMission_ = id;
                     selectedRevision_ = revision;
+                    validationDirty_ = true;
                 } else if (hasChildren) {
                     ImGui::TextDisabled("(id / revision can only change before rows are added under the mission)");
                 }
@@ -638,6 +789,25 @@ void MissionEditor::draw(EditorContext& ctx, WorldDatabase& database, int32_t ma
                 ImGui::EndPopup();
             }
         }
+        // This mission's problems that belong to no row below (mission-wide ones), and how many in all.
+        {
+            std::vector<const MissionDiagnostic*> own;
+            size_t all = 0;
+            for (const MissionDiagnostic& d : validation_.diagnostics) {
+                if (d.missionId != selectedMission_ || d.revision != selectedRevision_) continue;
+                ++all;
+                if (d.objectiveId < 0 && d.scenarioId < 0) own.push_back(&d);
+            }
+            if (all) {
+                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "The server would leave this mission out: %zu problem(s)%s.", all,
+                                   all > own.size() ? " (rows marked (!) below)" : "");
+                drawDiagnostics(own);
+            } else if ((*selected)[size_t(missions.column("enabled"))].asInt() != 0) {
+                ImGui::TextColored(ImVec4(0.5f, 0.85f, 0.5f, 1.0f), "Passes the server's checks.");
+            } else {
+                ImGui::TextDisabled("Not enabled: the server does not load this revision.");
+            }
+        }
         ImGui::Separator();
         drawRowFields(ctx, database, root, *selected, writable);
         ImGui::Separator();
@@ -648,6 +818,7 @@ void MissionEditor::draw(EditorContext& ctx, WorldDatabase& database, int32_t ma
     for (const PendingRemove& r : removes_) removeWithChildren(r.table.c_str(), r.row);
     for (PendingAdd& a : adds_)
         if (Table* t = table(a.table.c_str())) t->edited.rows.push_back(std::move(a.row));
+    if (!removes_.empty() || !adds_.empty()) validationDirty_ = true;
     removes_.clear();
     adds_.clear();
 }

@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Reference harness for MissionValidation.cpp: Rasa.NET's own mission content validator on a World database (SQLite).
+       Named Rasa.Test because Rasa.Game exposes its internals to that assembly name (InternalsVisibleTo); it builds against the
+       server's BUILT dlls and changes nothing in Rasa.NET. Usage (see CLAUDE.md "Mission checks"):
+         copy Rasa.Game\bin\Debug\net10.0\* (recursively) to a folder F, and runtimes\win-x64\native\e_sqlite3.dll into F
+         dotnet build tools/missioncheck -p:RasaBin=F\
+         dotnet F\Rasa.Test.dll <World database path without ".db"> -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>Rasa.Test</AssemblyName>
+    <RootNamespace>Harness</RootNamespace>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <GenerateDependencyFile>false</GenerateDependencyFile>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <OutputPath>$(RasaBin)</OutputPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="Rasa.Game"><HintPath>$(RasaBin)Rasa.Game.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Rasa.DBL"><HintPath>$(RasaBin)Rasa.DBL.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Rasa.Missions"><HintPath>$(RasaBin)Rasa.Missions.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Rasa.Utils"><HintPath>$(RasaBin)Rasa.Utils.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Rasa.Shared"><HintPath>$(RasaBin)Rasa.Shared.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Microsoft.EntityFrameworkCore"><HintPath>$(RasaBin)Microsoft.EntityFrameworkCore.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Microsoft.EntityFrameworkCore.Relational"><HintPath>$(RasaBin)Microsoft.EntityFrameworkCore.Relational.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Microsoft.Extensions.Options"><HintPath>$(RasaBin)Microsoft.Extensions.Options.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+</Project>

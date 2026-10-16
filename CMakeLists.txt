@@ -35,6 +35,8 @@ add_executable (RasaEdit
     "Workspace.h"
     "ClientWorkspace.cpp" "ClientWorkspace.h"
     "MissionEditor.cpp" "MissionEditor.h"
+    "MissionValidation.cpp" "MissionValidation.h"
+    "Json.cpp" "Json.h"
     "LootEditor.cpp" "LootEditor.h"
     "ModuleEditor.cpp" "ModuleEditor.h"
     "RecipeEditor.cpp" "RecipeEditor.h"
@@ -84,12 +86,12 @@ rasaedit_copy_mariadb_plugins(RasaEdit)
 # Headless rendering test (renders a map offscreen and writes raw RGBA; works on any Vulkan driver).
 option(RASAEDIT_BUILD_TESTS "Build the headless viewport test" OFF)
 if (RASAEDIT_BUILD_TESTS)
-    add_executable(viewport_test tests/viewport_test.cpp Renderer.cpp SceneView.cpp ParticleSim.cpp GpuTexture.cpp WorldDatabase.cpp DbConnection.cpp Avatar.cpp UiCanvas.cpp UiSchema.cpp)
+    add_executable(viewport_test tests/viewport_test.cpp Renderer.cpp SceneView.cpp ParticleSim.cpp GpuTexture.cpp WorldDatabase.cpp DbConnection.cpp Avatar.cpp UiCanvas.cpp UiSchema.cpp MissionValidation.cpp Json.cpp)
     target_include_directories(viewport_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(viewport_test PRIVATE SDL3::SDL3 Freetype::Freetype trformats ${RASAEDIT_SQLITE})
 
     # Whole-editor smoke test: real ImGui frames and both workspaces, headless.
-    add_executable(ui_smoke_test tests/ui_smoke_test.cpp Editor.cpp EditorContext.cpp ClientWorkspace.cpp ServerWorkspace.cpp MissionEditor.cpp LootEditor.cpp ModuleEditor.cpp RecipeEditor.cpp Panels.cpp AssetPreview.cpp SoundPlayer.cpp
+    add_executable(ui_smoke_test tests/ui_smoke_test.cpp Editor.cpp EditorContext.cpp ClientWorkspace.cpp ServerWorkspace.cpp MissionEditor.cpp MissionValidation.cpp Json.cpp LootEditor.cpp ModuleEditor.cpp RecipeEditor.cpp Panels.cpp AssetPreview.cpp SoundPlayer.cpp
                    Renderer.cpp SceneView.cpp ParticleSim.cpp GpuTexture.cpp WorldDatabase.cpp DbConnection.cpp Avatar.cpp TerrainOverview.cpp RadarMap.cpp UiCanvas.cpp UiSchema.cpp UiWorkspace.cpp UiDefinitions.cpp)
     target_include_directories(ui_smoke_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(ui_smoke_test PRIVATE SDL3::SDL3 SDL3_mixer::SDL3_mixer imgui::imgui Freetype::Freetype trformats ${RASAEDIT_SQLITE})

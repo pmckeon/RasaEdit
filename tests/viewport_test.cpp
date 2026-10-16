@@ -6,6 +6,7 @@
 #include "UiCanvas.h"
 #include "UiSchema.h"
 #include "gamedata.h"
+#include "MissionValidation.h"
 #include "WorldDatabase.h"
 
 #include <algorithm>
@@ -1331,6 +1332,29 @@ int main(int argc, char** argv) {
                                             m.row2.w);
                 }
             }
+        }
+        // RASA_MISSIONCHECK=1 (with RASA_DB): the server's mission content checks (MissionValidation.h) on the database - counts and
+        // every diagnostic, one per line ("mission revision code: message"), for comparison with the Game server's own validator.
+        if (envValue("RASA_MISSIONCHECK") && database) {
+            std::vector<DbTable> loaded;
+            for (const char* name : {"mission_content_definition", "mission_channel_policy", "mission_repeat_policy", "mission_prerequisite",
+                                     "mission_objective_definition", "mission_objective_transition", "mission_trigger", "mission_action", "mission_indicator",
+                                     "mission_reward_definition", "mission_reward_item", "mission_spawn_group", "mission_spawn", "mission_scenario",
+                                     "mission_scenario_step", "mission_area", "mission_scene_binding"})
+                if (database->hasTable(name)) loaded.push_back(database->loadTable(name));
+            std::map<std::string, const DbTable*> byName;
+            for (const DbTable& t : loaded) byName[t.name] = &t;
+            const MissionReferences references = MissionReferences::load(*database);
+            const auto start = std::chrono::steady_clock::now();
+            const MissionValidationResult v = validateMissionContent(byName, references);
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+            std::printf("mission check: %zu enabled, %zu left out, %zu diagnostics, start-up %s, readiness %s (%.1f ms)\n", v.enabledMissions,
+                        v.inactiveMissions.size(), v.diagnostics.size(), v.startupFails ? "FAILS" : "ok", v.blocksReadiness ? "BLOCKED" : "ok", ms);
+            for (const MissionDiagnostic& d : v.diagnostics)
+                std::printf("  mission %lld %s o%lld t%lld g%lld a%lld s%lld p%lld %s: %s\n", static_cast<long long>(d.missionId), d.revision.c_str(),
+                            static_cast<long long>(d.objectiveId), static_cast<long long>(d.transitionId), static_cast<long long>(d.triggerId),
+                            static_cast<long long>(d.actionId), static_cast<long long>(d.scenarioId), static_cast<long long>(d.stepId), d.code.c_str(),
+                            d.message.c_str());
         }
         // RASA_SKYFADETEST=1 (Concordia with RASA_DB): walk into Ranja Cavern at the mouth (the in-game positions where the region
         // switched) and print the sky weights and hemisphere light every 0.5 s - the 4 s cross-fade (SceneView::skyTransitions).

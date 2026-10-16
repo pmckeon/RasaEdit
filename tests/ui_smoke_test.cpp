@@ -535,6 +535,58 @@ int main() {
                 for (const auto& row : reloaded.rows) found = found || row[size_t(reloaded.column("comment"))].t == written;
                 check(found, "saved mission row reads back");
             }
+            // The server's mission checks (MissionValidation): the shipped content passes; a required mission's objective without its
+            // name text is reported and its save refused (the server would not report ready); an unreadable item intent too (the
+            // server would not start); both put back.
+            check(!server.missions_.validation().startupFails && server.missions_.validation().inactiveMissions.empty(), "mission checks pass on the database");
+            DbTable* definitions = nullptr;
+            DbTable* missionActions = nullptr;
+            for (auto& t : server.missions_.tables_) {
+                if (t.edited.name == "mission_content_definition") definitions = &t.edited;
+                if (t.edited.name == "mission_action") missionActions = &t.edited;
+            }
+            if (objectives && definitions && missionActions) {
+                // An objective of an enabled, required mission.
+                std::vector<DbValue>* target = nullptr;
+                for (auto& o : objectives->rows) {
+                    for (const auto& d : definitions->rows)
+                        if (d[size_t(definitions->column("mission_id"))] == o[size_t(objectives->column("mission_id"))] &&
+                            d[size_t(definitions->column("content_revision"))] == o[size_t(objectives->column("content_revision"))] &&
+                            d[size_t(definitions->column("enabled"))].asInt() == 1 && d[size_t(definitions->column("requirement"))].asInt() == 1)
+                            target = &o;
+                    if (target) break;
+                }
+                if (target) {
+                    const DbValue before = (*target)[size_t(objectives->column("client_name_text_id"))];
+                    (*target)[size_t(objectives->column("client_name_text_id"))] = DbValue::integer(0);
+                    server.missions_.validationDirty_ = true;
+                    frames(editor, device, 2);
+                    bool reported = false;
+                    for (const MissionDiagnostic& d : server.missions_.validation().diagnostics)
+                        reported = reported || (d.code == "missing-client-text" && d.missionId == (*target)[size_t(objectives->column("mission_id"))].asInt());
+                    std::string message;
+                    const bool refused = !server.missions_.save(*server.database_, message);
+                    check(reported && refused && message.find("reporting ready") != std::string::npos, "missing objective text reported, save refused");
+                    (*target)[size_t(objectives->column("client_name_text_id"))] = before;
+                    server.missions_.validationDirty_ = true;
+                }
+                const int intent = missionActions->column("item_intent");
+                std::vector<DbValue>* action = nullptr;
+                for (auto& a : missionActions->rows)
+                    if (!a[size_t(intent)].isNull() && !action) action = &a;
+                if (action) {
+                    const DbValue before = (*action)[size_t(intent)];
+                    (*action)[size_t(intent)] = DbValue::text("{\"$kind\":\"teleport\"}");
+                    server.missions_.validationDirty_ = true;
+                    std::string message;
+                    const bool refused = !server.missions_.save(*server.database_, message);
+                    check(server.missions_.validation().startupFails && refused && message.find("would not start") != std::string::npos,
+                          "unreadable item intent: save refused (the server would not start)");
+                    (*action)[size_t(intent)] = before;
+                    server.missions_.validationDirty_ = true;
+                }
+                check(!server.missions_.changed() && server.missions_.validation().diagnostics.empty(), "mission content back as saved");
+            }
         }
 
         // Switch to the client workspace.

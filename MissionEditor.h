@@ -1,5 +1,6 @@
 #pragma once
 
+#include "MissionValidation.h"
 #include "WorldDatabase.h"
 
 #include <cstdint>
@@ -26,6 +27,9 @@ public:
     void revert();
     // The panel body: mission list and the selected mission's tree. mapContextId / mapCreatures pick "on this map".
     void draw(EditorContext& ctx, WorldDatabase& database, int32_t mapContextId, const std::vector<int32_t>& mapCreatures, bool writable);
+    // The server's start-up checks on the edited content (MissionValidation.h), recomputed after each change.
+    const MissionValidationResult& validation();
+    const MissionValidationResult& savedValidation() const { return savedValidation_; }
 
 private:
     struct Table {
@@ -42,7 +46,14 @@ private:
     void removeWithChildren(const char* tableName, const std::vector<DbValue>& row);
     bool rowUnder(const Table& child, const std::vector<DbValue>& row, const DbTable& parentTable, const std::vector<DbValue>& parentRow) const;
 
+    MissionValidationResult validateTables(bool edited) const;
+    std::vector<const MissionDiagnostic*> rowDiagnostics(const TableSpec& spec, const DbTable& table, const std::vector<DbValue>& row) const;
+    void drawDiagnostics(const std::vector<const MissionDiagnostic*>& list);
+
     std::vector<Table> tables_;                       // parents before children
+    MissionReferences references_;
+    MissionValidationResult validation_, savedValidation_;
+    bool validationDirty_ = true;
     int64_t selectedMission_ = -1;
     std::string selectedRevision_;
     char filter_[64] = "";
