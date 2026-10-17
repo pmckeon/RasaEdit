@@ -47,6 +47,9 @@ struct Selection {
 inline bool isSelected(const Selection& s) { return s.kind != SelectionKind::None; }
 inline bool sameSelection(const Selection& a, const Selection& b) { return a.kind == b.kind && (a.kind == SelectionKind::None || a.index == b.index); }
 
+// A number from the game's client.cfg (lines "Client.Graphics.Name = value"); fallback when the file or the key is missing.
+float clientConfigValue(const std::string& gameRoot, const std::string& key, float fallback);
+
 // Everything the viewport draws for one map.
 class SceneView {
 public:
@@ -275,7 +278,25 @@ public:
     float startTimeOfDay() const { return startTimeOfDay_; }
     bool skyLighting = true;                // false: plain editor lighting
     bool showFog = true;                    // distance fog in the sky colour (the .sky's own "Used" flag is false everywhere)
-    bool showMapLights = true;              // the map's lights.xml (up to 16 nearest the camera)
+    bool showMapLights = true;              // the map's lights.xml (up to 32 in view, nearest first)
+    const std::string& globeErrors() const { return globeErrors_; }   // globe maps that could not be loaded, one per line
+    bool localShadows = true;               // shadows of spot lights with CastsShadows (the game's selection, see lighting())
+    bool localShadowTerrain = true;         // terrain chunks among the placed lights' shadow casters
+    bool spotCookies = true;                // spot lights' 2D globe maps (diagnostic switch)
+    // The game's limits on placed-light shadows (client.cfg, each / 100 clamped to 0..1, tabula_rasa.exe FUN_007bfcb0 / FUN_007bfc50):
+    // Client.Graphics.ShadowMaxSimultaneous (render settings + 0x34) and Client.Graphics.ShadowDistance (+ 0x30).
+    float shadowMaxSimultaneous = 1.0f;
+    float shadowDistance = 1.0f;
+    // The last lighting()'s shadow candidates (diagnostic, viewport_test RASA_LISTLIGHTS): value, position, range, kept.
+    struct ShadowCandidateInfo {
+        float value;
+        tr::Vec3 position;
+        float range;
+        bool kept;
+    };
+    mutable std::vector<ShadowCandidateInfo> lastShadowCandidates;
+    int lastActorShadowCasters = 0;          // characters drawn into non-static lights' shadow maps this frame (queueDraws)
+    int onlyLight = -1;                     // diagnostic: >= 0 lights the frame with that placed light only
     bool showLightBuffer = false;
     int debugView = 0;                      // 2: normals, 3: specular intensity, 4: albedo (the game's /dl_shownormals,
                                             // /dl_showspecintensity, /dl_showdiffuse)
@@ -286,6 +307,7 @@ public:
     int onlyEntity = -1;                    // debug: draw only this map entity (-1 = all)            // environment cube reflections (Pal*Env*); off for comparison
     int entityFirst = -1, entityLast = -1;  // debug: draw only map entities in [first, last) (-1 = all)
     std::unordered_map<std::string, int> globeIndex_;    // lower-case GlobeMapFile -> cube index (1-based; 0 = none)
+    std::unordered_map<std::string, int> cookieIndex_;   // lower-case GlobeMapFile that is a 2D texture -> layer (1-based)
     std::string globeErrors_;
     void loadGlobeMaps();
     float lightColourGamma = 1;             // experiment: placed light colours raised to this power (2.2 = sRGB -> linear)

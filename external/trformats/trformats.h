@@ -510,6 +510,10 @@ void setPvsRow(VisFile& vis, uint32_t leaf, const std::vector<uint32_t>& words, 
 void clearPvsRow(VisFile& vis, uint32_t leaf);
 // Index of the leaf node containing a point (descends by split planes); -1 if outside the root.
 int32_t findLeafNode(const VisFile& vis, const Vec3& point);
+// Whether the PVS lets a box be seen from a point, as the game's cull tests a body (FUN_007cfc10): the point's leaf row (a row
+// without data, a point outside the tree or a file without a PVS: everything visible; a leaf always sees itself) against the
+// leaves the box overlaps.
+bool pvsBoxVisible(const VisFile& vis, const Vec3& eye, const Bounds& box);
 
 // ------------------------------------------------------------------------------------------
 // .geo model (chunk file). File starts "CHNK" 'B' 'L' "XX" (binary, little-endian). Every chunk:

@@ -169,6 +169,20 @@ struct SceneLighting {
     Vec4f localSpot[maxLocalLights] = {};
     Vec4f localSpotInner[maxLocalLights] = {};    // x: cos(inner half angle), y: globe cube index (0 = none)
     Vec4f localRotation[maxLocalLights] = {};     // light orientation quaternion x y z w (for the globe lookup)
+    // Placed-light shadows (lights with CastsShadows the game's selection keeps; see SceneView::lighting): each shadow VIEW is a
+    // square of the shadow atlas (Renderer::shadowAtlasSize) holding one depth map - a spot light has one (perspective), a plane
+    // light one (orthographic), a point light six (the cube faces +x, -x, +y, -y, +z, -z). localShadowBase[light]: x = its first view
+    // + 1 (0 = no shadow), y = its view count, z = its shadow-light index (the casters' mask bit), w = 1 when its map holds
+    // characters (a non-static light: tr::PlacedLight::isStatic).
+    static constexpr int maxLocalShadows = 72;      // views: at most 12 shadow lights (the game's cap) x 6 faces
+    int localShadowCount = 0;
+    Vec4f localShadowBase[maxLocalLights] = {};
+    Mat4 localShadowMatrix[maxLocalShadows];      // world -> the view's clip space
+    Vec4f localShadowView[maxLocalShadows] = {};  // xyz: the view's axis, w: -dot(axis, eye) - linear depth = dot(axis, p) + w
+    Vec4f localShadowRect[maxLocalShadows] = {};  // x, y: the square's first texel in the atlas, z: its size in texels, w: shadow-light index
+    Vec4f localShadowParams[maxLocalShadows] = {};   // x near, y far, z ShadowOpacity, w ShadowSoftness
+    Vec4f localShadowBias[maxLocalShadows] = {};     // x scale, y min, z max of the depth bias; w: 1 = orthographic (camera-depth bias)
+    Vec4f localShadowCamera[maxLocalShadows] = {};   // orthographic views: the camera's forward, w -dot(forward, eye)
 };
 
 // Creates the GPU device, preferring Vulkan (the same SPIR-V path on Windows, Linux and macOS via MoltenVK); falls back
@@ -264,6 +278,16 @@ public:
     // Placed lights' globe maps (GlobeMapFile cube maps), cube k at index k + 1 (index 0 = white = no globe); 6 faces
     // per cube. Call between frames (releases the previous texture).
     void setGlobeMaps(const std::vector<std::vector<tr::Rgba8>>& faces, uint32_t size);
+    // Spot lights' 2D globe maps (a GlobeMapFile that is a plain 2D texture, e.g. globemap_human_flashlight.dds: the TRSpotLight globe
+    // variants project it - uv = (x / z, -y / z) x LightProjDistance + 0.5 in the light's frame), layer k at index k + 1 (0 = white).
+    void setCookieMaps(const std::vector<std::vector<tr::Rgba8>>& layers, uint32_t size);
+    // A shadow caster for placed lights this frame (the map's bodies within a shadowed light's range; SceneView chooses them):
+    // lightMask bit s = drawn into slot s. The GPU skin set by setSkin applies. alphaTexture non-null: texels below alphaReference cut.
+    // Back faces are culled (the game's shadow pass has CULLMODE CCW, as its main pass: the replayed device state at a flashlight's map,
+    // tabula_rasa.trace 2026-10-17) except for two-sided pieces and terrain (Terrain_ShadowMap sets NONE).
+    void drawLocalShadowCaster(const GpuMesh& mesh, const Mat4& model, SDL_GPUTexture* alphaTexture, float alphaReference, bool terrain, bool twoSided,
+                               uint32_t lightMask);
+    static constexpr uint32_t shadowAtlasSize = 4096;     // shadow views packed in 128-texel units (SceneView::lighting)
     // The global environment cube (the game's gGlobalEnvTexture) that Pal*Env* pieces reflect; null = a black cube.
     // Not owned (SceneView keeps its region cubes); set each frame before record().
     void setEnvironmentMap(SDL_GPUTexture* cube) { environment_ = cube; }
@@ -373,6 +397,9 @@ private:
         bool skinNormals = true;
     };
     void uploadBones(SDL_GPUCommandBuffer* commands);
+    void uploadLocalShadows(SDL_GPUCommandBuffer* commands);
+    SDL_GPUBuffer* localShadowBuffer_ = nullptr;           // placed-light shadow slots (fragment storage buffer)
+    SDL_GPUTransferBuffer* localShadowTransfer_ = nullptr;
     void bindSkin(SDL_GPURenderPass* pass, SDL_GPUBuffer* skinVertices);
     std::vector<Vec4f> bones_;                 // this frame's bone palettes, 3 rows per bone
     SDL_GPUBuffer* boneBuffer_ = nullptr;
@@ -420,6 +447,23 @@ private:
     SDL_GPUGraphicsPipeline* shadowPipeline_ = nullptr;
     SDL_GPUTexture* shadowMap_ = nullptr;
     SDL_GPUTexture* globes_ = nullptr;            // cube map array; cube 0 white
+    SDL_GPUTexture* cookies_ = nullptr;           // 2D array; layer 0 white
+    SDL_GPUTexture* shadowAtlas_ = nullptr;       // placed-light shadow maps (depth)
+    SDL_GPUGraphicsPipeline* localShadowPipeline_ = nullptr;           // back faces culled
+    SDL_GPUGraphicsPipeline* localShadowTwoSidedPipeline_ = nullptr;
+    struct LocalCaster {
+        const GpuMesh* mesh;
+        Mat4 model;
+        SDL_GPUTexture* alphaTexture;
+        float alphaReference;
+        bool terrain;
+        bool twoSided;
+        uint32_t lightMask;
+        SDL_GPUBuffer* skinVertices;
+        uint32_t boneBase;
+    };
+    std::vector<LocalCaster> localCasters_;
+    void recordLocalShadows(SDL_GPUCommandBuffer*& commands);
     SDL_GPUTexture* environment_ = nullptr;       // not owned
     SDL_GPUTexture* blackCube_ = nullptr;         // stand-in when there is no environment cube
     SDL_GPUSampler* shadowSampler_ = nullptr;     // comparison sampler

@@ -205,6 +205,10 @@ std::vector<PlacedLight> readLights(const Bytes& data, const std::map<std::strin
         light.name = p.count("Name") ? p.at("Name") : "";
         light.enabled = flag(p, "Enabled", true);
         light.castsShadows = flag(p, "CastsShadows");
+        light.isStatic = flag(p, "IsStatic", true);
+        light.shadowQuality = uint32_t(number(p, "ShadowQuality", 0));
+        light.shadowOpacity = number(p, "ShadowOpacity", 1);
+        light.shadowSoftness = number(p, "ShadowSoftness", 1);
         light.position = vec3(p, "Position", Vec3{});
         light.offset = vec3(p, "Offset", Vec3{});
         const auto colour = p.find("Color");

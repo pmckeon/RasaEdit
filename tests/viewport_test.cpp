@@ -284,6 +284,15 @@ int main(int argc, char** argv) {
             if (envValue("RASA_NOSHADOWS")) scene.showShadows = false;
             if (const char* g = envValue("RASA_LIGHTGAMMA")) scene.lightColourGamma = float(std::atof(g));
             if (envValue("RASA_NOLIGHTS")) scene.showMapLights = false;
+            if (envValue("RASA_NOLOCALSHADOWS")) scene.localShadows = false;
+            if (envValue("RASA_NOTERRAINCASTERS")) scene.localShadowTerrain = false;
+            if (envValue("RASA_NOCOOKIES")) scene.spotCookies = false;
+            if (const char* only = envValue("RASA_ONLYLIGHT")) scene.onlyLight = std::atoi(only);
+            // The game's placed-light shadow limits: client.cfg, or RASA_SHADOWMAX / RASA_SHADOWDISTANCE (the settings' 0..100 values).
+            scene.shadowMaxSimultaneous = clientConfigValue(argv[1], "Client.Graphics.ShadowMaxSimultaneous", 100.0f) / 100.0f;
+            scene.shadowDistance = clientConfigValue(argv[1], "Client.Graphics.ShadowDistance", 100.0f) / 100.0f;
+            if (const char* v = envValue("RASA_SHADOWMAX")) scene.shadowMaxSimultaneous = float(std::atof(v)) / 100.0f;
+            if (const char* v = envValue("RASA_SHADOWDISTANCE")) scene.shadowDistance = float(std::atof(v)) / 100.0f;
             if (envValue("RASA_SHOWLIGHT")) scene.showLightBuffer = true;
             if (envValue("RASA_NOENV")) scene.environmentMaps = false;
             if (const char* lt = envValue("RASA_LIGHTTIME")) scene.lightTime = float(std::atof(lt));   // light modifier time, s
@@ -1626,6 +1635,20 @@ int main(int argc, char** argv) {
                             active.localPosition[i].y, active.localPosition[i].z, active.localPosition[i].w, active.localColour[i].x, active.localColour[i].y,
                             active.localColour[i].z, active.localColour[i].w, active.localSpot[i].w == -2.0f ? "point" : active.localSpot[i].w == -3.0f ? "plane" : "spot",
                             active.localSpotInner[i].y, active.localSpot[i].x, active.localSpot[i].y, active.localSpot[i].z, active.localSpot[i].w, active.localSpotInner[i].x);
+            for (int i = 0; i < active.localCount; ++i) {
+                const Vec4f& b = active.localShadowBase[i];
+                if (b.x > 0.5f)
+                    std::printf("light %d shadow: %.0f view(s) from %.0f (shadow light %.0f)%s%s\n", i, b.y, b.x - 1.0f, b.z,
+                                active.localSpot[i].w == -2.0f ? ", point (cube)" : active.localSpot[i].w == -3.0f ? ", plane (orthographic)" : "",
+                                b.w > 0.5f ? ", not static: characters cast" : "");
+                if (active.localSpot[i].w > -1.5f && active.localSpotInner[i].w > 0.5f) std::printf("light %d cookie %.0f\n", i, active.localSpotInner[i].w);
+            }
+            std::printf("characters in placed-light shadow maps: %d\n", scene.lastActorShadowCasters);
+            std::printf("shadow limits: ShadowMaxSimultaneous %.2f, ShadowDistance %.2f\n", scene.shadowMaxSimultaneous, scene.shadowDistance);
+            for (const SceneView::ShadowCandidateInfo& c : scene.lastShadowCandidates)
+                std::printf("shadow candidate %.2f at %.1f %.1f %.1f range %.1f%s\n", c.value, c.position.x, c.position.y, c.position.z, c.range,
+                            c.kept ? "" : "  (dropped)");
+            std::printf("globe errors: %s\n", scene.globeErrors().c_str());
         }
         std::printf("environment cube at the camera: %s\n", scene.activeEnvironmentMap().c_str());
         for (const auto& e : scene.environmentMapErrors()) std::printf("environment cube %s failed: %s\n", e.first.c_str(), e.second.c_str());

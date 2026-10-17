@@ -11,6 +11,23 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
+
+float clientConfigValue(const std::string& gameRoot, const std::string& key, float fallback) {
+    std::ifstream in(std::filesystem::u8path(gameRoot) / "client.cfg");
+    std::string line;
+    while (std::getline(in, line)) {
+        const size_t eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        std::string name = line.substr(0, eq);
+        name.erase(name.find_last_not_of(" \t") + 1);
+        name.erase(0, name.find_first_not_of(" \t"));
+        if (tr::toLowerAscii(name) != tr::toLowerAscii(key)) continue;
+        try { return std::stof(line.substr(eq + 1)); } catch (const std::exception&) { return fallback; }
+    }
+    return fallback;
+}
 
 // ------------------------------------------------------------------------------------------
 // Camera
@@ -610,14 +627,52 @@ SceneLighting SceneView::lighting() const {
         }
         return true;
     };
+    struct ShadowCandidate {
+        float value;
+        tr::Vec3 position;
+        float range;
+    };
+    std::vector<ShadowCandidate> shadowPool;
     auto consider = [&](const tr::PlacedLight& light) {
         if (!light.enabled || light.range <= 0 || light.intensity <= 0) return;
-        // Plane lights reach a box of half-extents (Width/2, Length/2, Range) around their position.
-        const float reach = light.kind == tr::PlacedLight::Kind::Plane
-                                ? std::sqrt(light.width * light.width * 0.25f + light.length * light.length * 0.25f + light.range * light.range)
-                                : light.range;
-        if (!inView(light.position, reach)) return;
-        const float gap = std::max(0.0f, length(subtract(light.position, camera_.position)) - reach);
+        // The light node's bounds (tabula_rasa.exe, decoded 2026-10-18) - the sphere TRasa::SubmitVisibleLights (FUN_00811410) tests
+        // against the view frustum's planes (FUN_005e6960: plane distance >= -radius) and whose radius (+ 0xc) the shadow selection's
+        // value subtracts:
+        // - point: centre the light, radius Range (the point's Range getter reads + 0xc; its light volume is a sphere of Range);
+        // - spot (FUN_00878e40): the cone's circumscribed sphere - radius = (2 R tan(a / 2) x 0.5) / sin(a) = R / (2 cos^2(a / 2)),
+        //   a = the penumbra angle, centre = the light + its axis x radius (FUN_005ecb60); radius >= 1e6 (0x00c2b848) -> infinite;
+        // - plane: a box (FUN_005ecac0: centre = the box's middle, radius = half its diagonal) whose x / y / max z the Width / Length /
+        //   Range setters write (FUN_008799d0 / FUN_00879aa0 / FUN_00879b70: +-Width / 2, +-Length / 2, Range). Its min z was not
+        //   found in the code; fitted to the column capture (tabula_rasa.3.trace, Light_29, 6,719 frames as the camera turned): the box
+        //   z 0..Range - from the light forward along its +z - decides in every frame whether the light is drawn (with the previous
+        //   frame's camera: the game culls with a one-frame lag), z +-Range in 6,708, a Range sphere in 6,710.
+        // Checked on three apitrace captures: the firing range (the 14 lights of the final frame, the same 12 kept), the command tent
+        // and the column at Light_29.
+        float reach = light.range;
+        tr::Vec3 centre = light.position;
+        bool infinite = false;
+        if (light.kind == tr::PlacedLight::Kind::Plane) {
+            reach = std::sqrt(light.width * light.width * 0.25f + light.length * light.length * 0.25f + light.range * light.range * 0.25f);
+            const Mat4 r = rotationMatrix(light.worldOrientation);
+            centre = add(light.position, scaled(tr::Vec3{r.row0.z, r.row1.z, r.row2.z}, light.range * 0.5f));
+        }
+        if (light.kind == tr::PlacedLight::Kind::Spot && light.penumbraAngle > 0.0f) {
+            const float c = std::cos(light.penumbraAngle * 0.5f * 0.0174533f);
+            reach = c > 1e-6f ? light.range / (2.0f * c * c) : 1e30f;
+            if (reach >= 1e6f) infinite = true;
+            else centre = add(light.position, scaled(normalized(light.direction()), reach));
+        }
+        const bool visible = infinite || inView(centre, reach);
+        // Shadow candidates (see the selection below): in view by that sphere and shown by the PVS (FUN_007cfc10).
+        const bool spotShadow = light.kind == tr::PlacedLight::Kind::Spot && light.penumbraAngle > 0.5f && light.penumbraAngle < 179.0f;
+        if (light.castsShadows && light.range > 0.6f && (spotShadow || light.kind != tr::PlacedLight::Kind::Spot) && visible) {
+            const tr::Vec3 e{reach, reach, reach};
+            if (infinite || map_.vis.nodes.empty() || tr::pvsBoxVisible(map_.vis, camera_.position, tr::Bounds{subtract(centre, e), add(centre, e)}))
+                shadowPool.push_back(ShadowCandidate{infinite ? 0.0f : std::max(0.0f, length(subtract(light.position, camera_.position)) - reach),
+                                                     light.position, light.range});
+        }
+        if (!visible) return;
+        const float gap = infinite ? 0.0f : std::max(0.0f, length(subtract(centre, camera_.position)) - reach);
         if (gap <= drawDistance) nearest.emplace_back(gap, light);
     };
     for (const tr::PlacedLight& light : mapLights_) consider(animateLights ? modifiedLight(light) : light);
@@ -675,7 +730,40 @@ SceneLighting SceneView::lighting() const {
         }
     }
     std::sort(nearest.begin(), nearest.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
-    for (const auto& n : nearest) {
+    // Which shadow-casting spot lights get their shadow this frame - the game's selection (tabula_rasa.exe, traced 2026-10-17):
+    // FUN_00806f00 gives each light the value max(0, |light - camera| - r), r = the radius of the light node's bounds (+ 0xc of
+    // the struct TRasa::Light's slot 19 returns); FUN_00808390 sorts ascending (FUN_008082c0; directional lights first), takes the
+    // first N = rint(12 x ShadowMaxSimultaneous + 0.5) clamped to 1..12 (constant 12.0 at 0x00c2be80) and drops those whose value
+    // exceeds 25 + 50 x ShadowDistance (FUN_008475b0: 25.0 / 50.0 at 0x00c2b6c8 / 0x00c2b6d0; it reads the distance only while two
+    // RQS flags are set, + 0x84 / + 0xbf - their meaning is NOT traced); the rest get no shadow (the light pass's
+    // ShadowMapTextureEnable stays 0, FUN_00807d20). Verified on the firing-range trace: 12 maps rendered, and when the 11th and
+    // 12th appear (frame 43) the two largest values - Light 8 and the west-lane lamp - lose their shadows for good. r = the
+    // light's bounds radius (decoded, see consider()). Candidates are shadowPool (gathered in consider()): the lights
+    // TRasa::SubmitVisibleLights (FUN_00811410) keeps - bounds sphere inside the frustum planes (FUN_005e6960) and shown by the
+    // PVS (FUN_007cfc10).
+    std::vector<bool> shadowAllowed(nearest.size(), false);
+    {
+        const float maxValue = 25.0f + 50.0f * std::clamp(shadowDistance, 0.0f, 1.0f);
+        std::vector<ShadowCandidate> chosen;
+        for (const ShadowCandidate& c : shadowPool)
+            if (c.value <= maxValue) chosen.push_back(c);
+        std::stable_sort(chosen.begin(), chosen.end(), [](const ShadowCandidate& a, const ShadowCandidate& b) { return a.value < b.value; });
+        const int limit = std::clamp(int(std::nearbyint(12.0f * std::clamp(shadowMaxSimultaneous, 0.0f, 1.0f) + 0.5f)), 1, 12);
+        lastShadowCandidates.clear();
+        for (size_t c = 0; c < chosen.size(); ++c)
+            lastShadowCandidates.push_back(ShadowCandidateInfo{chosen[c].value, chosen[c].position, chosen[c].range, c < size_t(limit)});
+        if (chosen.size() > size_t(limit)) chosen.resize(size_t(limit));
+        for (size_t k = 0; k < nearest.size(); ++k)
+            for (const ShadowCandidate& c : chosen)
+                if (c.position.x == nearest[k].second.position.x && c.position.y == nearest[k].second.position.y &&
+                    c.position.z == nearest[k].second.position.z && c.range == nearest[k].second.range)
+                    shadowAllowed[k] = nearest[k].second.castsShadows;
+    }
+    int shadowLightCount = 0;                                       // lights given shadow views (the casters' mask bits)
+    constexpr int atlasCellsPerSide = int(Renderer::shadowAtlasSize / 128u);
+    std::vector<uint8_t> atlasCells(size_t(atlasCellsPerSide * atlasCellsPerSide), 0);   // 128 x 128 texel units in use
+    for (size_t nIndex = 0; nIndex < nearest.size(); ++nIndex) {
+        const auto& n = nearest[nIndex];
         if (l.localCount >= SceneLighting::maxLocalLights) break;
         const tr::PlacedLight& light = n.second;
         const int i = l.localCount++;
@@ -707,6 +795,96 @@ SceneLighting SceneView::lighting() const {
         l.localSpotInner[i].y = globe == globeIndex_.end() ? 0.0f : float(globe->second);
         const tr::Quat& q = light.worldOrientation;
         l.localRotation[i] = Vec4f{q.x, q.y, q.z, q.w};
+        if (light.kind == tr::PlacedLight::Kind::Spot && spotCookies) {
+            const auto cookie = light.globeMap.empty() ? cookieIndex_.end() : cookieIndex_.find(tr::toLowerAscii(light.globeMap));
+            l.localSpotInner[i].w = cookie == cookieIndex_.end() ? 0.0f : float(cookie->second);
+        }
+        // The light's shadow views (traced 2026-10-17; tabula_rasa.exe FUN_00809bf0 2D, FUN_00809690 cube):
+        // - spot: perspective over PenumbraAngle, near 0.5 (0x00bc7768), far = Range, the light's frame (its rotation's x / y / z axes,
+        //   z = the axis it shines along) - VERIFIED against the firing-range trace's maps;
+        // - plane: orthographic, half extents Width / 2 x Length / 2 (the light's bounds), near 0.05 (0x00bc565c), far = Range, the
+        //   light's frame (it shines along its +z);
+        // - point: six 90-degree faces (0x00bc7b18), near 0.05, far = Range (rendered only while far > 0.05, 0x00c2b6f8), here along
+        //   the world axes (the engine's face frame - g_ShadowView, face 4 - only orients the lookup).
+        // Far = Range is the field the spot's trace confirms (+ 0x354); for plane and point lights it is the same field (UNVERIFIED).
+        // Map size 128 << ShadowQuality (128 / 256 seen in the trace; 512 for quality 2 UNVERIFIED), packed into the atlas in
+        // 128-texel units. Not compared with the game: plane and point shadows (no capture has one).
+        if (localShadows && shadowAllowed[nIndex]) {
+            // Map size (tabula_rasa.exe FUN_00808b70, read 2026-10-17): by ShadowQuality 0 / 1 -> 128, 2 -> 256, 3 -> 512 (cube and plane
+            // maps); a perspective (spot) map instead covers its width at the range, 2 R tan(penumbra / 2), at a texel size of 0.254 /
+            // 0.1524 / 0.1016 / 0.1016 m (quality 0..3, 0x00c2b6d8..), rounded to the nearest multiple of 128 (at least 128) and capped
+            // at 256 / 384 / 512 / 768. Checked: every map of the firing-range trace (flashlights / lamps 128, tent lamps 256, the tent's
+            // point cubes 128, Light 8 256).
+            const uint32_t quality = light.shadowQuality;
+            uint32_t size = quality <= 1 ? 128u : quality == 3 ? 512u : 256u;
+            if (light.kind == tr::PlacedLight::Kind::Spot && light.penumbraAngle > 0.0f) {
+                const float texel = quality == 0 ? 0.254f : quality == 1 ? 0.1524f : 0.1016f;
+                const uint32_t cap = quality == 0 ? 256u : quality == 1 ? 384u : quality == 3 ? 768u : 512u;
+                const int wanted = int(std::nearbyint(std::tan(light.penumbraAngle * 0.5f * 0.0174533f) * light.range * 2.0f / texel));
+                const uint32_t rounded = uint32_t(std::max(1, (wanted + 64) / 128)) * 128u;
+                size = rounded < cap ? rounded : cap;
+            }
+            const int views = light.kind == tr::PlacedLight::Kind::Point ? 6 : 1;
+            int first = -1;
+            if (l.localShadowCount + views <= SceneLighting::maxLocalShadows && shadowLightCount < 32) {
+                first = l.localShadowCount;
+                for (int v = 0; v < views && first >= 0; ++v) {
+                    const int cells = int(size / 128u);
+                    bool placed = false;
+                    for (int y = 0; y + cells <= atlasCellsPerSide && !placed; y += cells)
+                        for (int x = 0; x + cells <= atlasCellsPerSide && !placed; x += cells) {
+                            bool free = true;
+                            for (int yy = y; yy < y + cells && free; ++yy)
+                                for (int xx = x; xx < x + cells && free; ++xx) free = atlasCells[size_t(yy * atlasCellsPerSide + xx)] == 0;
+                            if (!free) continue;
+                            for (int yy = y; yy < y + cells; ++yy)
+                                for (int xx = x; xx < x + cells; ++xx) atlasCells[size_t(yy * atlasCellsPerSide + xx)] = 1;
+                            l.localShadowRect[first + v] = Vec4f{float(x * 128), float(y * 128), float(size), float(shadowLightCount)};
+                            placed = true;
+                        }
+                    if (!placed) first = -1;        // the atlas is full: no shadow for this light
+                }
+            }
+            if (first >= 0) {
+                auto axis = [&](const tr::Vec3& v) {
+                    const Mat4 r = rotationMatrix(q);
+                    return tr::Vec3{rowDot(r.row0, v.x, v.y, v.z, 0), rowDot(r.row1, v.x, v.y, v.z, 0), rowDot(r.row2, v.x, v.y, v.z, 0)};
+                };
+                const Vec4f params{0, light.range, std::clamp(light.shadowOpacity, 0.0f, 1.0f), light.shadowSoftness};
+                auto setView = [&](int view, const Mat4& projection, const tr::Vec3& right, const tr::Vec3& up, const tr::Vec3& forward, float nearZ,
+                                   const Vec4f& bias) {
+                    l.localShadowMatrix[view] = multiply(projection, viewLH(light.position, right, up, forward));
+                    l.localShadowView[view] = Vec4f{forward.x, forward.y, forward.z, -dot(forward, light.position)};
+                    l.localShadowParams[view] = Vec4f{nearZ, params.y, params.z, params.w};
+                    l.localShadowBias[view] = bias;
+                    const tr::Vec3 f = camera_.forward();
+                    l.localShadowCamera[view] = Vec4f{f.x, f.y, f.z, -dot(f, camera_.position)};
+                };
+                if (light.kind == tr::PlacedLight::Kind::Point) {
+                    const tr::Vec3 faces[6] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+                    const tr::Vec3 ups[6] = {{0, 1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}, {0, 1, 0}, {0, 1, 0}};
+                    for (int v = 0; v < 6; ++v) {
+                        const tr::Vec3 right = normalized(cross(ups[v], faces[v])), up = cross(faces[v], right);
+                        setView(first + v, perspectiveLH(1.5707964f, 1.0f, 0.05f, light.range), right, up, faces[v], 0.05f, Vec4f{0.05f, 0.8f, 5.0f, 0});
+                    }
+                } else {
+                    const tr::Vec3 right = normalized(axis(tr::Vec3{1, 0, 0})), up = normalized(axis(tr::Vec3{0, 1, 0})), forward = normalized(axis(tr::Vec3{0, 0, 1}));
+                    if (light.kind == tr::PlacedLight::Kind::Plane)
+                        setView(first, orthoLH(std::max(light.width * 0.5f, 0.01f), std::max(light.length * 0.5f, 0.01f), 0.05f, light.range), right, up,
+                                forward, 0.05f, Vec4f{0, 0, 0, 1});
+                    else
+                        setView(first, perspectiveLH(light.penumbraAngle * 0.0174533f, 1.0f, 0.5f, light.range), right, up, forward, 0.5f,
+                                Vec4f{0.05f, 0.035f, 3.0f, 0});
+                }
+                l.localShadowCount += views;
+                l.localShadowBase[i] = Vec4f{float(first + 1), float(views), float(shadowLightCount), light.isStatic ? 0.0f : 1.0f};
+                ++shadowLightCount;
+            }
+        }
+    }
+    if (onlyLight >= 0) {                     // diagnostic: keep one placed light (its colour), darken the rest
+        for (int i = 0; i < l.localCount; ++i)
+            if (i != onlyLight) l.localColour[i] = Vec4f{0, 0, 0, l.localColour[i].w};
     }
     return l;
 }
@@ -732,11 +910,13 @@ void SceneView::loadGlobeMaps() {
                 stateGlobes.push_back(light);
             }
     for (const tr::PlacedLight& light : stateGlobes) all.push_back(&light);
+    cookieIndex_.clear();
+    std::vector<std::vector<tr::Rgba8>> cookies;
     for (const tr::PlacedLight* lightPointer : all) {
         const tr::PlacedLight& light = *lightPointer;
         if (light.globeMap.empty()) continue;
         const std::string name = tr::toLowerAscii(light.globeMap);
-        if (globeIndex_.count(name)) continue;
+        if (globeIndex_.count(name) || cookieIndex_.count(name)) continue;
         try {
             const tr::Bytes file = assets_.read(name);
             const tr::DdsHeader header = tr::readDdsHeader(file);
@@ -744,7 +924,15 @@ void SceneView::loadGlobeMaps() {
             if (levels.empty()) throw std::runtime_error("not a block-compressed DDS");
             size_t faceBytes = 0;
             for (const tr::DdsLevel& level : levels) faceBytes += level.size;
-            if (file.size() < 128 + 6 * faceBytes) throw std::runtime_error("not a cube map");
+            if (file.size() < 128 + 6 * faceBytes) {
+                // A plain 2D texture (e.g. globemap_human_flashlight.dds, 32 x 32 DXT1): a spot light's projected globe.
+                tr::DdsHeader h;
+                std::vector<tr::Rgba8> rgba = tr::decodeDds(file, h);
+                if (h.width != size || h.height != size) rgba = resizeRgba(rgba, h.width, h.height, size, size);
+                cookies.push_back(std::move(rgba));
+                cookieIndex_[name] = int(cookies.size());
+                continue;
+            }
             for (uint32_t face = 0; face < 6; ++face) {
                 tr::Bytes one(file.begin(), file.begin() + 128);
                 one.insert(one.end(), file.begin() + 128 + face * faceBytes, file.begin() + 128 + (face + 1) * faceBytes);
@@ -760,6 +948,7 @@ void SceneView::loadGlobeMaps() {
         }
     }
     renderer_->setGlobeMaps(faces, size);
+    renderer_->setCookieMaps(cookies, size);
 }
 
 // A map light with its lights.xml modifiers applied at lightTime (see tr::LightModifier).
@@ -1260,6 +1449,11 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 }
                 if (avatarPose && !skin.empty()) {
                     objectAnimation = true;                 // GPU skin buffers; no rigid-piece path (restInverse stays empty)
+                    // The block above filled restInverse for a model without a skeleton geo (ambient figures): then a piece skinned
+                    // wholly to one bone took the rigid path, played by animatedPieceMatrices with the FIRST idle on the light clock,
+                    // while the blended pieces follow the idle sequence (poseIdle) - the firing-range target's sheet (rigid on one
+                    // bone) stood ~25 cm from its own red ring (part of the blended stand piece), which then cast a ring shadow on it.
+                    model.restInverse.clear();
                     model.avatarPose = true;
                     model.skeleton.bones = geo.bones;
                     if (bar2 != std::string::npos) model.poseSkeleton.bones = skeletonGeo.bones;
@@ -2779,6 +2973,123 @@ void SceneView::queueDraws(const Selection& selection) {
             }
             if (selected) renderer_->draw(unitBoxLines_, p.boxWorld, Vec4f{1.0f, 0.85f, 0.1f, 1}, false);
         }
+    }
+
+    // Placed-light shadow casters (the lights given shadow views in lighting()): the map's bodies (not on culling layer 6) and terrain
+    // chunks within each light's range and not wholly behind it, whatever the camera sees - the game renders a light's map from the
+    // light (once, for a static light). Characters only for non-static lights: a static light's caster filter drops actors
+    // (TRasa::GraphicsUtil::DropActorsObjs, switched by + 0x339 = IsStatic - see tr::PlacedLight::isStatic). Their opaque pieces
+    // only, as the main pass draws them (alpha cut-outs kept).
+    lastActorShadowCasters = 0;
+    if (frameLighting_.localShadowCount > 0) {
+        // One entry per shadow light (localShadowBase z = its mask bit): where its casters can be - its reach sphere (a spot's range,
+        // a plane's box radius in localPosition.w, a point's range) and, for spots and planes, in front of it (a spot's axis; a plane
+        // shines along its +z, the light's axis is not kept here, so planes test the sphere only).
+        struct ShadowSlot {
+            tr::Vec3 position;
+            float range = 0;
+            tr::Vec3 axis;
+            bool directed = false;
+            bool used = false;
+            bool actors = false;     // a non-static light: characters cast into it
+        };
+        std::vector<ShadowSlot> slots(32);
+        for (int i = 0; i < frameLighting_.localCount; ++i) {
+            const Vec4f& base = frameLighting_.localShadowBase[i];
+            if (base.x < 0.5f) continue;
+            const size_t s = size_t(base.z + 0.5f);
+            if (s >= slots.size()) continue;
+            const Vec4f& p = frameLighting_.localPosition[i];
+            const Vec4f& a = frameLighting_.localSpot[i];
+            slots[s] = ShadowSlot{tr::Vec3{p.x, p.y, p.z}, p.w, tr::Vec3{a.x, a.y, a.z}, a.w > -1.5f, true, base.w > 0.5f};
+        }
+        uint32_t actorLights = 0;
+        for (size_t s = 0; s < slots.size(); ++s)
+            if (slots[s].used && slots[s].actors) actorLights |= 1u << s;
+        auto maskFor = [&](const tr::Vec3& centre, float radius) {
+            uint32_t mask = 0;
+            for (size_t s = 0; s < slots.size(); ++s) {
+                if (!slots[s].used) continue;
+                const tr::Vec3 d = subtract(centre, slots[s].position);
+                if (length(d) - radius > slots[s].range || (slots[s].directed && dot(d, slots[s].axis) < -radius)) continue;
+                mask |= 1u << s;
+            }
+            return mask;
+        };
+        if (showEntities)
+            for (size_t k = 0; k < placements_.size(); ++k) {
+                const Placement& p = placements_[k];
+                if (p.neverDrawn || !p.model || !p.model->loaded || !p.model->hasSolid) continue;
+                const uint32_t mask = maskFor(p.centre, p.radius);
+                if (mask == 0) continue;
+                const std::vector<Mat4> animated = animatedPieceMatrices(*p.model, lightTime);
+                SkinScope skinScope{*renderer_};
+                for (const ModelPiece& piece : p.model->pieces) {
+                    if (piece.additive || piece.refract || piece.water || piece.translucent || groupHidden(piece)) continue;
+                    setPieceSkin(piece);
+                    const Mat4 world = piece.animBone >= 0 && size_t(piece.animBone) < animated.size() ? multiply(p.world, animated[size_t(piece.animBone)]) : p.world;
+                    renderer_->drawLocalShadowCaster(piece.mesh, world, piece.alphaTest && piece.texture ? piece.texture : nullptr, piece.alphaReference, false,
+                                                     piece.twoSided, mask);
+                }
+            }
+        // Server objects cast too: the firing-range flashlight's map in the trace holds the two ambient soldiers (skinned draws at their
+        // positions - their model carries the targets). Spawn-pool creatures and avatars are actors here - only non-static lights take
+        // them; ambient figures, usables, destructibles, teleporters and other objects are not actors. Posed with their current idle,
+        // as drawn; an avatar as assembled (base suit minus the swap sets its loaded parts replace, the parts, its body accessories).
+        if (showServer)
+            for (const ServerPlacement& s : serverPlacements_) {
+                if (s.area || !serverPlacementShown(s) || garrisonSuspended(s)) continue;
+                const bool actor = s.selection.kind == SelectionKind::SpawnPool || !s.avatarParts.empty() || s.skinHue.w > 0.5f;
+                if ((actor && actorLights == 0) || !s.model || !s.model->loaded || !s.model->hasSolid || serverModelCulled(s)) continue;
+                const tr::Vec3 centre = transformPoint(s.world, scaled(add(s.model->bounds.min, s.model->bounds.max), 0.5f));
+                const uint32_t mask = maskFor(centre, length(subtract(s.model->bounds.max, s.model->bounds.min)) * 0.5f) & (actor ? actorLights : ~0u);
+                if (mask == 0) continue;
+                struct IdleScope {
+                    SceneView& view;
+                    ~IdleScope() { view.skinOverride_.clear(); }
+                } idleScope{*this};
+                if (actor) ++lastActorShadowCasters;
+                const bool idling = poseIdle(s);
+                auto casterPieces = [&](const Model& model, const Mat4& placement, auto&& keep) {
+                    const std::vector<Mat4> animated = animatedPieceMatrices(model, lightTime);
+                    SkinScope skinScope{*renderer_};
+                    for (const ModelPiece& piece : model.pieces) {
+                        if (piece.additive || piece.refract || piece.water || piece.translucent || groupHidden(piece) || !keep(piece)) continue;
+                        setPieceSkin(piece);
+                        const Mat4 world = piece.animBone >= 0 && size_t(piece.animBone) < animated.size() ? multiply(placement, animated[size_t(piece.animBone)]) : placement;
+                        renderer_->drawLocalShadowCaster(piece.mesh, world, piece.alphaTest && piece.texture ? piece.texture : nullptr, piece.alphaReference, false,
+                                                         piece.twoSided, mask);
+                    }
+                };
+                const auto all = [](const ModelPiece&) { return true; };
+                if (!s.avatarParts.empty()) {
+                    uint32_t replaced = 0;
+                    for (const AvatarDraw& part : s.avatarParts)
+                        if (part.model && part.model->loaded && !part.model->pieces.empty() && part.swapsetId < 32) replaced |= 1u << part.swapsetId;
+                    casterPieces(*s.model, s.world, [&](const ModelPiece& piece) { return piece.swapId >= 32 || ((replaced >> piece.swapId) & 0x1) == 0; });
+                    for (const AvatarDraw& part : s.avatarParts)
+                        if (part.model && part.model->loaded)
+                            casterPieces(*part.model, s.world, [&](const ModelPiece& piece) { return piece.swapId == part.swapsetId; });
+                } else {
+                    casterPieces(*s.model, s.world, all);
+                }
+                for (const Model* accessory : s.accessories)
+                    if (accessory && accessory->loaded && accessory->hasSolid) casterPieces(*accessory, s.world, all);
+                for (const ServerPlacement::BodyAccessory& a : s.bodyAccessories) {
+                    Mat4 world;
+                    if (a.model && a.model->loaded && a.model->hasSolid && bodyAccessoryWorld(s, a, idling ? &idlePosed_ : nullptr, world))
+                        casterPieces(*a.model, world, all);
+                }
+            }
+        if (showTerrain && localShadowTerrain)
+            for (TerrainChunk& chunk : terrainChunks_) {
+                const uint32_t mask = maskFor(chunk.centre, chunk.radius);
+                if (mask == 0) continue;
+                const GpuMesh* mesh = nullptr;
+                for (uint32_t level = 0; level < 4 && !mesh; ++level)
+                    if (chunkLevel(chunk, level).vertices) mesh = &chunkLevel(chunk, level);
+                if (mesh) renderer_->drawLocalShadowCaster(*mesh, identityMatrix(), nullptr, 0.0f, true, true, mask);
+            }
     }
 
     endSection(1);

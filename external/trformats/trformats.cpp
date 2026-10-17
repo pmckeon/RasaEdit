@@ -1326,6 +1326,33 @@ int32_t findLeafNode(const VisFile& vis, const Vec3& point) {
     }
     return -1;
 }
+
+bool pvsBoxVisible(const VisFile& vis, const Vec3& eye, const Bounds& box) {
+    if (vis.nodes.empty() || !vis.hasPvs) return true;
+    const int32_t node = findLeafNode(vis, eye);
+    if (node < 0) return true;
+    const uint32_t eyeLeaf = vis.nodes[size_t(node)].leafIndex;
+    if (eyeLeaf >= vis.rows.size() || !pvsHasData(vis.rows[eyeLeaf])) return true;
+    const VisPvsRow& row = vis.rows[eyeLeaf];
+    std::vector<int32_t> stack{0};
+    while (!stack.empty()) {
+        const int32_t index = stack.back();
+        stack.pop_back();
+        if (index < 0 || size_t(index) >= vis.nodes.size()) continue;
+        const VisNode& n = vis.nodes[size_t(index)];
+        if (n.bounds.max.x < box.min.x || n.bounds.min.x > box.max.x || n.bounds.max.y < box.min.y || n.bounds.min.y > box.max.y ||
+            n.bounds.max.z < box.min.z || n.bounds.min.z > box.max.z)
+            continue;
+        if (n.isLeaf()) {
+            if (n.leafIndex == eyeLeaf) return true;
+            if ((size_t(n.leafIndex) >> 5) < row.words.size() && pvsLeafVisible(row, n.leafIndex)) return true;
+            continue;
+        }
+        stack.push_back(n.child0);
+        stack.push_back(n.child1);
+    }
+    return false;
+}
 // ------------------------------------------------------------------------------------------
 // .geo chunk files
 // ------------------------------------------------------------------------------------------

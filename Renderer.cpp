@@ -46,6 +46,19 @@ struct LightingUniforms {
     Vec4f extraTowards[SceneLighting::maxExtraDirectional];   // xyz towards the light; w: 1 = in use
     Vec4f extraFront[SceneLighting::maxExtraDirectional];
     Vec4f extraBack[SceneLighting::maxExtraDirectional];
+    Vec4f localShadowBase[SceneLighting::maxLocalLights];   // x first shadow view + 1, y view count, z shadow-light index
+};
+
+// A placed-light shadow slot as lighting.hlsli's LocalShadowSlot reads it from the fragment storage buffer (localShadowBuffer_). Not
+// in the uniforms: SDL GPU's Vulkan backend takes at most 4 KiB per uniform push (MAX_UBO_SECTION_SIZE) and silently drops the rest -
+// with 16 slots the fragment uniforms were ~4.8 KiB and every placed-light shadow vanished.
+struct LocalShadowSlotGpu {
+    Mat4 matrix;
+    Vec4f view;
+    Vec4f rect;
+    Vec4f params;
+    Vec4f bias;
+    Vec4f camera;
 };
 
 struct SceneFragmentUniforms {
@@ -72,6 +85,10 @@ struct TerrainFragmentUniforms {
     Vec4f tilings[32];             // 128 layers
 };
 
+// SDL GPU's Vulkan backend accepts at most 4 KiB per uniform push (MAX_UBO_SECTION_SIZE); anything beyond is lost without an error.
+static_assert(sizeof(SceneFragmentUniforms) <= 4096, "scene fragment uniforms exceed one uniform push");
+static_assert(sizeof(TerrainFragmentUniforms) <= 4096, "terrain fragment uniforms exceed one uniform push");
+
 LightingUniforms lightingUniforms(const SceneLighting& l, const Vec4f& cameraPosition, const Mat4& shadowMatrix, bool shadows, float mapSize) {
     LightingUniforms u;
     u.shadowMatrix = shadowMatrix;
@@ -86,6 +103,7 @@ LightingUniforms lightingUniforms(const SceneLighting& l, const Vec4f& cameraPos
         u.extraFront[k] = used ? l.extraFront[k] : Vec4f{0, 0, 0, 0};
         u.extraBack[k] = used ? l.extraBack[k] : Vec4f{0, 0, 0, 0};
     }
+    for (int k = 0; k < SceneLighting::maxLocalLights; ++k) u.localShadowBase[k] = l.localShadowBase[k];
     u.hemiTop = l.hemiTop;
     u.hemiBottom = l.hemiBottom;
     u.fogColour = Vec4f{l.fogColour.x, l.fogColour.y, l.fogColour.z, l.fog ? 1.0f : 0.0f};
@@ -135,11 +153,11 @@ Renderer::Renderer(SDL_GPUDevice* device) : device_(device) {
     sceneVertex_ = createShader(sceneVertexDxil, sizeof sceneVertexDxil, sceneVertexSpirv, sizeof sceneVertexSpirv, "vsMain",
                                 SDL_GPU_SHADERSTAGE_VERTEX, 0, 2);       // storage buffers: skin vertices, bone rows
     sceneFragment_ = createShader(sceneFragmentDxil, sizeof sceneFragmentDxil, sceneFragmentSpirv, sizeof sceneFragmentSpirv, "psMain",
-                                  SDL_GPU_SHADERSTAGE_FRAGMENT, 10);
+                                  SDL_GPU_SHADERSTAGE_FRAGMENT, 12, 1);   // storage buffer: placed-light shadow slots
     terrainVertex_ = createShader(terrainVertexDxil, sizeof terrainVertexDxil, terrainVertexSpirv, sizeof terrainVertexSpirv, "vsMain",
                                   SDL_GPU_SHADERSTAGE_VERTEX, 0);
     terrainFragment_ = createShader(terrainFragmentDxil, sizeof terrainFragmentDxil, terrainFragmentSpirv, sizeof terrainFragmentSpirv,
-                                    "psMain", SDL_GPU_SHADERSTAGE_FRAGMENT, 5);
+                                    "psMain", SDL_GPU_SHADERSTAGE_FRAGMENT, 7, 1);
     shadowFragment_ = createShader(shadowFragmentDxil, sizeof shadowFragmentDxil, shadowFragmentSpirv, sizeof shadowFragmentSpirv, "psShadow",
                                    SDL_GPU_SHADERSTAGE_FRAGMENT, 1);
     refractFragment_ = createShader(refractFragmentDxil, sizeof refractFragmentDxil, refractFragmentSpirv, sizeof refractFragmentSpirv, "psRefract",
@@ -223,6 +241,23 @@ Renderer::Renderer(SDL_GPUDevice* device) : device_(device) {
         info.target_info.has_depth_stencil_target = true;
         shadowPipeline_ = SDL_CreateGPUGraphicsPipeline(device_, &info);
         if (!shadowPipeline_) fail("SDL_CreateGPUGraphicsPipeline (shadow)");
+        // Placed-light shadow maps: the same layout without the depth bias (the game's TRSpotLight shadow test biases in the shader),
+        // and with depth CLIPPING as Direct3D 9 always does - SDL GPU's default (enable_depth_clip false) clamps instead, which put
+        // geometry behind a light's near plane at depth 0: Bootcamp's Light_29 (orthographic) was shadowed wholesale by the glowstick
+        // pole 0.4 m behind it.
+        info.rasterizer_state.enable_depth_bias = false;
+        info.rasterizer_state.depth_bias_constant_factor = 0.0f;
+        info.rasterizer_state.depth_bias_slope_factor = 0.0f;
+        info.rasterizer_state.enable_depth_clip = true;
+        localShadowTwoSidedPipeline_ = SDL_CreateGPUGraphicsPipeline(device_, &info);
+        if (!localShadowTwoSidedPipeline_) fail("SDL_CreateGPUGraphicsPipeline (local shadow)");
+        info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_BACK;
+        localShadowPipeline_ = SDL_CreateGPUGraphicsPipeline(device_, &info);
+        if (!localShadowPipeline_) fail("SDL_CreateGPUGraphicsPipeline (local shadow, culled)");
+        t.width = t.height = shadowAtlasSize;
+        shadowAtlas_ = SDL_CreateGPUTexture(device_, &t);
+        if (!shadowAtlas_) fail("SDL_CreateGPUTexture (shadow atlas)");
+        setCookieMaps({}, 4);
     }
     {
         // Water (shaders/water.hlsl): its own vertex shader with UV set 3; opaque, no culling (TRWaterReflectRefract sets
@@ -332,6 +367,8 @@ Renderer::~Renderer() {
     if (globes_) SDL_ReleaseGPUTexture(device_, globes_);
     if (shadowPipeline_) SDL_ReleaseGPUGraphicsPipeline(device_, shadowPipeline_);
     if (shadowFragment_) SDL_ReleaseGPUShader(device_, shadowFragment_);
+    if (localShadowBuffer_) SDL_ReleaseGPUBuffer(device_, localShadowBuffer_);
+    if (localShadowTransfer_) SDL_ReleaseGPUTransferBuffer(device_, localShadowTransfer_);
     if (boneBuffer_) SDL_ReleaseGPUBuffer(device_, boneBuffer_);
     if (boneTransfer_) SDL_ReleaseGPUTransferBuffer(device_, boneTransfer_);
     if (skinDummy_) SDL_ReleaseGPUBuffer(device_, skinDummy_);
@@ -342,6 +379,10 @@ Renderer::~Renderer() {
     if (frameCopy_) SDL_ReleaseGPUTexture(device_, frameCopy_);
     for (SDL_GPUShader* s : {sceneVertex_, sceneFragment_, terrainVertex_, terrainFragment_, refractFragment_})
         if (s) SDL_ReleaseGPUShader(device_, s);
+    if (shadowAtlas_) SDL_ReleaseGPUTexture(device_, shadowAtlas_);
+    if (cookies_) SDL_ReleaseGPUTexture(device_, cookies_);
+    if (localShadowPipeline_) SDL_ReleaseGPUGraphicsPipeline(device_, localShadowPipeline_);
+    if (localShadowTwoSidedPipeline_) SDL_ReleaseGPUGraphicsPipeline(device_, localShadowTwoSidedPipeline_);
     for (SDL_GPUGraphicsPipeline* p : {pvsDepthPipeline_, pvsDepthTwoSidedPipeline_})
         if (p) SDL_ReleaseGPUGraphicsPipeline(device_, p);
     for (SDL_GPUComputePipeline* p : {pvsCountPipeline_, pvsMarkPipeline_})
@@ -534,6 +575,7 @@ void Renderer::destroyMesh(GpuMesh& mesh) {
 
 void Renderer::beginFrame(const Mat4& viewProjection, const tr::Vec3& cameraPosition, const SceneLighting& lighting) {
     viewProjection_ = viewProjection;
+    localCasters_.clear();
     towardsLight_ = Vec4f{lighting.towardsLight.x, lighting.towardsLight.y, lighting.towardsLight.z, 1.0f};
     clearColour_ = lighting.clearColour;
     lighting_ = lighting;
@@ -806,6 +848,36 @@ void Renderer::uploadBones(SDL_GPUCommandBuffer* commands) {
     SDL_EndGPUCopyPass(copy);
 }
 
+// The frame's placed-light shadow slots into localShadowBuffer_ (lighting.hlsli LocalShadowSlot), read by the scene and terrain
+// fragment shaders.
+void Renderer::uploadLocalShadows(SDL_GPUCommandBuffer* commands) {
+    const uint32_t bytes = uint32_t(SceneLighting::maxLocalShadows * sizeof(LocalShadowSlotGpu));
+    if (!localShadowBuffer_) {
+        SDL_GPUBufferCreateInfo info = {};
+        info.usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ;
+        info.size = bytes;
+        localShadowBuffer_ = SDL_CreateGPUBuffer(device_, &info);
+        SDL_GPUTransferBufferCreateInfo transferInfo = {};
+        transferInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+        transferInfo.size = bytes;
+        localShadowTransfer_ = SDL_CreateGPUTransferBuffer(device_, &transferInfo);
+        if (!localShadowBuffer_ || !localShadowTransfer_) fail("local shadow buffers");
+    }
+    LocalShadowSlotGpu* slots = static_cast<LocalShadowSlotGpu*>(SDL_MapGPUTransferBuffer(device_, localShadowTransfer_, true));
+    for (int k = 0; k < SceneLighting::maxLocalShadows; ++k)
+        slots[k] = LocalShadowSlotGpu{lighting_.localShadowMatrix[k], lighting_.localShadowView[k], lighting_.localShadowRect[k],
+                                      lighting_.localShadowParams[k], lighting_.localShadowBias[k], lighting_.localShadowCamera[k]};
+    SDL_UnmapGPUTransferBuffer(device_, localShadowTransfer_);
+    SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(commands);
+    SDL_GPUTransferBufferLocation source = {};
+    source.transfer_buffer = localShadowTransfer_;
+    SDL_GPUBufferRegion destination = {};
+    destination.buffer = localShadowBuffer_;
+    destination.size = bytes;
+    SDL_UploadToGPUBuffer(copy, &source, &destination, true);
+    SDL_EndGPUCopyPass(copy);
+}
+
 // Every draw through the scene vertex shader binds its two storage buffers (the dummy skin when not skinned).
 void Renderer::bindSkin(SDL_GPURenderPass* pass, SDL_GPUBuffer* skinVertices) {
     SDL_GPUBuffer* buffers[2] = {skinVertices ? skinVertices : skinDummy_, boneBuffer_};
@@ -849,7 +921,7 @@ void Renderer::recordParticles(SDL_GPUCommandBuffer*& commands, SDL_GPURenderPas
     SDL_GPUBufferBinding vertexBinding = {particleBuffer_, 0};
     const VertexUniforms vertexUniforms{viewProjection_, identityMatrix()};
     for (const ParticleBatch& b : particleBatches_) {
-        if (reserveDescriptors(commands, pass, 10, 2)) bound = nullptr;
+        if (reserveDescriptors(commands, pass, 12, 3)) bound = nullptr;
         SDL_GPUGraphicsPipeline* pipeline = b.blendType == 0 ? additivePipeline_ : b.blendType == 3 ? subtractivePipeline_ : translucentPipeline_;
         if (pipeline != bound) {
             SDL_BindGPUGraphicsPipeline(pass, pipeline);
@@ -858,11 +930,12 @@ void Renderer::recordParticles(SDL_GPUCommandBuffer*& commands, SDL_GPURenderPas
             bound = pipeline;
         }
         SDL_PushGPUVertexUniformData(commands, 0, &vertexUniforms, sizeof vertexUniforms);
-        const SDL_GPUTextureSamplerBinding samplers[10] = {{b.texture, linearSampler_}, {black_, linearSampler_}, {black_, linearSampler_},
+        const SDL_GPUTextureSamplerBinding samplers[12] = {{b.texture, linearSampler_}, {black_, linearSampler_}, {black_, linearSampler_},
                                                            {black_, linearSampler_}, {white_, clampSampler_}, {shadowMap_, shadowSampler_},
                                                            {globes_, clampSampler_}, {black_, linearSampler_}, {black_, linearSampler_},
-                                                           {blackCube_, clampSampler_}};
-        SDL_BindGPUFragmentSamplers(pass, 0, samplers, 10);
+                                                           {blackCube_, clampSampler_}, {shadowAtlas_, pointSampler_}, {cookies_, clampSampler_}};
+        SDL_BindGPUFragmentSamplers(pass, 0, samplers, 12);
+        SDL_BindGPUFragmentStorageBuffers(pass, 0, &localShadowBuffer_, 1);
         // Additive and subtractive use the additive path (rgb x alpha, faded by fog); alpha-blended ones options.y.
         const bool added = b.blendType == 0 || b.blendType == 3;
         SceneFragmentUniforms u{Vec4f{1, 1, 1, 1}, towardsLight_, Vec4f{0, added ? 0.0f : 1.0f, added ? 1.0f : 0.0f, 0}, Vec4f{0, 0, 0, 0},
@@ -881,6 +954,70 @@ void Renderer::setGlobeMaps(const std::vector<std::vector<tr::Rgba8>>& faces, ui
     globes_ = uploadRgbaCubeArray(device_, all, size);
 }
 
+void Renderer::setCookieMaps(const std::vector<std::vector<tr::Rgba8>>& layers, uint32_t size) {
+    std::vector<std::vector<tr::Rgba8>> all(1, std::vector<tr::Rgba8>(size_t(size) * size, tr::Rgba8{255, 255, 255, 255}));
+    all.insert(all.end(), layers.begin(), layers.end());
+    if (cookies_) SDL_ReleaseGPUTexture(device_, cookies_);
+    cookies_ = uploadRgbaArray(device_, all, size);
+}
+
+void Renderer::drawLocalShadowCaster(const GpuMesh& mesh, const Mat4& model, SDL_GPUTexture* alphaTexture, float alphaReference, bool terrain,
+                                     bool twoSided, uint32_t lightMask) {
+    if (!mesh.vertices || mesh.indexCount == 0 || mesh.lines || lightMask == 0) return;
+    localCasters_.push_back(LocalCaster{&mesh, model, alphaTexture, alphaReference, terrain, terrain || twoSided || !cullBackFaces, lightMask,
+                                        terrain ? nullptr : currentSkin_, currentBoneBase_});
+}
+
+// The placed lights' shadow maps: each slot's square of the atlas, its casters drawn depth-only with the light's perspective view
+// (psShadow: alpha cut-outs and terrain holes discard). The game renders a static light's map once at its creation (IsStatic); the
+// editor redraws them every frame.
+void Renderer::recordLocalShadows(SDL_GPUCommandBuffer*& commands) {
+    SDL_GPUDepthStencilTargetInfo depth = {};
+    depth.texture = shadowAtlas_;
+    depth.clear_depth = 1.0f;
+    depth.load_op = SDL_GPU_LOADOP_CLEAR;
+    depth.store_op = SDL_GPU_STOREOP_STORE;
+    depth.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
+    depth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
+    SDL_GPURenderPass* pass = beginPass(commands, nullptr, &depth);
+    SDL_GPUGraphicsPipeline* bound = nullptr;
+    for (int slot = 0; slot < lighting_.localShadowCount && slot < SceneLighting::maxLocalShadows; ++slot) {
+        const Vec4f& rect = lighting_.localShadowRect[slot];
+        SDL_GPUViewport viewport = {rect.x, rect.y, rect.z, rect.z, 0.0f, 1.0f};
+        SDL_SetGPUViewport(pass, &viewport);
+        const SDL_Rect scissor = {int(rect.x), int(rect.y), int(rect.z), int(rect.z)};
+        SDL_SetGPUScissor(pass, &scissor);
+        for (const LocalCaster& c : localCasters_) {
+            if (((c.lightMask >> uint32_t(rect.w)) & 0x1) == 0) continue;    // rect.w: the view's shadow light
+            if (reserveDescriptors(commands, pass, 1, 2)) {
+                bound = nullptr;
+                SDL_SetGPUViewport(pass, &viewport);
+                SDL_SetGPUScissor(pass, &scissor);
+            }
+            SDL_GPUGraphicsPipeline* pipeline = c.twoSided ? localShadowTwoSidedPipeline_ : localShadowPipeline_;
+            if (pipeline != bound) {
+                SDL_BindGPUGraphicsPipeline(pass, pipeline);
+                bound = pipeline;
+            }
+            SDL_GPUBufferBinding vertexBinding = {c.mesh->vertices, 0};
+            SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
+            SDL_GPUBufferBinding indexBinding = {c.mesh->indices, 0};
+            SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_32BIT);
+            const VertexUniforms vertexUniforms{lighting_.localShadowMatrix[slot], c.model, c.skinVertices ? 1u : 0u, c.boneBase, 1u, 0};
+            SDL_PushGPUVertexUniformData(commands, 0, &vertexUniforms, sizeof vertexUniforms);
+            bindSkin(pass, c.skinVertices);
+            const SDL_GPUTextureSamplerBinding sampler = {c.alphaTexture ? c.alphaTexture : white_, linearSampler_};
+            SDL_BindGPUFragmentSamplers(pass, 0, &sampler, 1);
+            const Vec4f options{c.alphaTexture ? c.alphaReference : 0.0f, c.terrain ? 1.0f : 0.0f, 0, 0};
+            SceneFragmentUniforms u{Vec4f{1, 1, 1, 1}, towardsLight_, options, Vec4f{0, 0, 0, 0},
+                                    lightingUniforms(lighting_, cameraPosition_, shadowMatrix_, false, float(shadowSize))};
+            SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof u);
+            SDL_DrawGPUIndexedPrimitives(pass, c.mesh->indexCount, 1, 0, 0, 0);
+        }
+    }
+    SDL_EndGPURenderPass(pass);
+}
+
 void Renderer::drawTerrain(const GpuMesh& mesh, const TerrainMaterial& material) {
     if (!mesh.vertices || mesh.indexCount == 0 || !material.layers || !material.layerIndices || !material.layerWeights) return;
     draws_.push_back(DrawItem{&mesh, identityMatrix(), Vec4f{1, 1, 1, 1}, true, nullptr, false, &material, false, Vec4f{0, 0, 0, 0}, nullptr});
@@ -894,7 +1031,9 @@ void Renderer::record(SDL_GPUCommandBuffer* /*caller's command buffer: the scene
     if (!commands) fail("SDL_AcquireGPUCommandBuffer");
     samplerDescriptors_ = viewDescriptors_ = 0;
     uploadBones(commands);
+    uploadLocalShadows(commands);
     if (shadowsActive_) recordShadows(commands);
+    if (lighting_.localShadowCount > 0 && !localCasters_.empty()) recordLocalShadows(commands);
     uploadParticles(commands);
     SDL_GPUColorTargetInfo colour = {};
     colour.texture = colour_;
@@ -1124,7 +1263,7 @@ void Renderer::recordShadows(SDL_GPUCommandBuffer*& commands) {
 }
 
 void Renderer::recordItem(SDL_GPUCommandBuffer*& commands, SDL_GPURenderPass*& pass, const DrawItem& item, SDL_GPUGraphicsPipeline*& bound) {
-    if (reserveDescriptors(commands, pass, item.terrain ? 5 : 10, 2)) bound = nullptr;
+    if (reserveDescriptors(commands, pass, item.terrain ? 7 : 12, 3)) bound = nullptr;
     // Terrain: TRTerrainClient's deferred passes set no CULLMODE, so PalGlobalEffect's CCW baseline culls its back faces
     // (seen from below, e.g. from Manhattan's subway, the game shows no terrain).
     SDL_GPUGraphicsPipeline* pipeline = item.terrain ? (cullBackFaces ? culledTerrainPipeline_ : terrainPipeline_) : item.additive ? (cullBackFaces && item.cullBlended ? culledAdditivePipeline_ : additivePipeline_) : item.translucent ? (cullBackFaces && item.cullBlended ? culledTranslucentPipeline_ : translucentPipeline_)
@@ -1149,9 +1288,11 @@ void Renderer::recordItem(SDL_GPUCommandBuffer*& commands, SDL_GPURenderPass*& p
     if (!item.terrain) bindSkin(pass, item.skinVertices);
     if (item.terrain) {
         const TerrainMaterial& m = *item.terrain;
-        const SDL_GPUTextureSamplerBinding samplers[5] = {{m.layers, linearSampler_}, {m.layerIndices, pointSampler_}, {m.layerWeights, pointSampler_},
-                                                          {shadowMap_, shadowSampler_}, {globes_, clampSampler_}};
-        SDL_BindGPUFragmentSamplers(pass, 0, samplers, 5);
+        const SDL_GPUTextureSamplerBinding samplers[7] = {{m.layers, linearSampler_}, {m.layerIndices, pointSampler_}, {m.layerWeights, pointSampler_},
+                                                          {shadowMap_, shadowSampler_}, {globes_, clampSampler_}, {shadowAtlas_, pointSampler_},
+                                                          {cookies_, clampSampler_}};
+        SDL_BindGPUFragmentSamplers(pass, 0, samplers, 7);
+        SDL_BindGPUFragmentStorageBuffers(pass, 0, &localShadowBuffer_, 1);
         TerrainFragmentUniforms u = {};
         u.grid = Vec4f{m.originX, m.originZ, m.inverseSpacing, 0};
         u.gridSize = Vec4f{float(m.columns), float(m.rows), 1.0f / float(m.columns), 1.0f / float(m.rows)};
@@ -1169,15 +1310,17 @@ void Renderer::recordItem(SDL_GPUCommandBuffer*& commands, SDL_GPURenderPass*& p
         SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof u);
     } else {
         // Unused detail/decal slots are switched off by layers.z/w; the light ramp defaults to opaque white.
-        const SDL_GPUTextureSamplerBinding samplers[10] = {{item.texture, linearSampler_}, {item.glow ? item.glow : black_, linearSampler_},
+        const SDL_GPUTextureSamplerBinding samplers[12] = {{item.texture, linearSampler_}, {item.glow ? item.glow : black_, linearSampler_},
                                                           {item.detail ? item.detail : black_, linearSampler_},
                                                           {item.decal ? item.decal : black_, linearSampler_},
                                                           {item.light ? item.light : white_, clampSampler_},
                                                           {shadowMap_, shadowSampler_}, {globes_, clampSampler_},
                                                           {item.normalMap ? item.normalMap : black_, linearSampler_},
                                                           {item.glossMap ? item.glossMap : black_, linearSampler_},
-                                                          {environment_ ? environment_ : blackCube_, clampSampler_}};
-        SDL_BindGPUFragmentSamplers(pass, 0, samplers, 10);
+                                                          {environment_ ? environment_ : blackCube_, clampSampler_},
+                                                          {shadowAtlas_, pointSampler_}, {cookies_, clampSampler_}};
+        SDL_BindGPUFragmentSamplers(pass, 0, samplers, 12);
+        SDL_BindGPUFragmentStorageBuffers(pass, 0, &localShadowBuffer_, 1);
         SceneFragmentUniforms u{item.tint, towardsLight_, Vec4f{item.alphaTest ? item.alphaReference : 0.0f, item.sky && !item.aniso ? 3.0f : item.translucent ? 2.0f : 0.0f, item.additive ? (item.forwardLit ? 2.0f : 1.0f) : 0.0f, item.aniso ? (item.anisoPlain ? 2.0f : 1.0f) : 0.0f},
                                 item.hue, lightingUniforms(lighting_, cameraPosition_, shadowMatrix_, shadowsActive_, float(shadowSize)), item.specular, item.layers,
                                 Vec4f{item.normalMap ? 1.0f : 0.0f, item.glossMap ? 1.0f : 0.0f, item.environment && environment_ ? 1.0f : 0.0f,
@@ -1339,6 +1482,7 @@ void Renderer::recordPvsView(const Mat4& inverseViewProjection, const tr::Vec3& 
     if (!commands) fail("SDL_AcquireGPUCommandBuffer");
     samplerDescriptors_ = viewDescriptors_ = 0;
     uploadBones(commands);
+    uploadLocalShadows(commands);
     SDL_GPUDepthStencilTargetInfo depth = {};
     depth.texture = depth_;
     depth.clear_depth = 1.0f;

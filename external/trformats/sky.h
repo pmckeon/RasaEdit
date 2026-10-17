@@ -106,6 +106,15 @@ struct PlacedLight {
     std::string name;
     bool enabled = true;
     bool castsShadows = false;
+    // IsStatic (default true: the TRasa::Light constructor sets + 0x339 = 1). Its setter (Property_LightImplProps_IsStaticRef,
+    // FUN_0086a4d0 -> FUN_0084c190) writes + 0x339, the flag that adds TRasa::GraphicsUtil::DropActorsObjs to the shadow pass's
+    // caster filter - so only a non-static light's shadow map holds characters.
+    bool isStatic = true;
+    // Shadows (tabula_rasa.exe FUN_00809bf0 / FUN_00809690 and the lights' shadow variants, traced 2026-10-17): visibility =
+    // 1 - ShadowOpacity x occlusion; g_ShadowSoftness = ShadowSoftness; map sizes by ShadowQuality (FUN_00808b70, see CLAUDE.md).
+    uint32_t shadowQuality = 0;
+    float shadowOpacity = 1;
+    float shadowSoftness = 1;
     Vec3 position;
     Vec3 offset;                      // Offset: in a light template (.ltmp), its place relative to the contact point
     Vec3 colour{1, 1, 1};

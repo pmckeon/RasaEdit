@@ -90,6 +90,16 @@ inline Mat4 perspectiveLH(float fovYRadians, float aspect, float nearZ, float fa
     return m;
 }
 
+// Left-handed orthographic projection of a centred halfWidth x halfHeight window, Direct3D-style depth 0..1 over nearZ..farZ.
+inline Mat4 orthoLH(float halfWidth, float halfHeight, float nearZ, float farZ) {
+    Mat4 m;
+    m.row0 = {1.0f / halfWidth, 0, 0, 0};
+    m.row1 = {0, 1.0f / halfHeight, 0, 0};
+    m.row2 = {0, 0, 1.0f / (farZ - nearZ), -nearZ / (farZ - nearZ)};
+    m.row3 = {0, 0, 0, 1};
+    return m;
+}
+
 // Left-handed view matrix from an eye position and orthonormal right / up / forward axes.
 inline Mat4 viewLH(const tr::Vec3& eye, const tr::Vec3& right, const tr::Vec3& up, const tr::Vec3& forward) {
     Mat4 m;

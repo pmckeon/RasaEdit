@@ -193,6 +193,10 @@ bool EditorContext::openMap(const std::string& name) {
             scene = std::make_unique<SceneView>(*renderer, *assets, *map, [this](int32_t id) { return classInfo(id).mesh; },
                                                 [this](int32_t id) { return !gameData || classInfo(id).known; },
                                                 [this](int32_t id) { return classInfo(id).cullingLayer; });
+            // The game's placed-light shadow limits come from the user's client.cfg (100 = full when absent - the game's own
+            // default is NOT traced).
+            scene->shadowMaxSimultaneous = clientConfigValue(gameRoot, "Client.Graphics.ShadowMaxSimultaneous", 100.0f) / 100.0f;
+            scene->shadowDistance = clientConfigValue(gameRoot, "Client.Graphics.ShadowDistance", 100.0f) / 100.0f;
             // Region skies: MapRegion.sky is a string-table id of a .sky file (-1 / 0 = none).
             std::vector<std::pair<int32_t, std::string>> regionSkies;
             if (gameData)

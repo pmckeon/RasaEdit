@@ -41,6 +41,7 @@ cbuffer FragmentUniforms : register(b0, space3)
     float4 extraTowards[MAX_EXTRA_DIRECTIONAL];   // further directional sky lights: towards the light, w = 1 in use
     float4 extraFront[MAX_EXTRA_DIRECTIONAL];
     float4 extraBack[MAX_EXTRA_DIRECTIONAL];
+    float4 localShadowBase[MAX_LOCAL_LIGHTS];   // x first shadow view + 1, y view count, z shadow-light index
     float4 tilings[32];       // metres per repeat for layers 0..127 (four per entry)
 };
 
@@ -54,6 +55,11 @@ cbuffer FragmentUniforms : register(b0, space3)
 [[vk::combinedImageSampler]] TextureCubeArray globeMaps : register(t4, space2);
 [[vk::combinedImageSampler]] SamplerState globeSampler : register(s4, space2);
 [[vk::combinedImageSampler]] SamplerComparisonState shadowSampler : register(s3, space2);
+[[vk::combinedImageSampler]] Texture2D<float> shadowAtlas : register(t5, space2);      // placed-light shadow maps (point, clamp)
+[[vk::combinedImageSampler]] SamplerState shadowAtlasSampler : register(s5, space2);
+[[vk::combinedImageSampler]] Texture2DArray cookieMaps : register(t6, space2);         // spot lights' 2D globe maps
+[[vk::combinedImageSampler]] SamplerState cookieSampler : register(s6, space2);
+StructuredBuffer<LocalShadowSlot> localShadowSlots : register(t7, space2);    // placed-light shadow slots (after the 7 samplers)
 
 struct VertexInput
 {
@@ -133,8 +139,7 @@ float4 psMain(VertexOutput input) : SV_Target0
     s.hemiTop = hemiTop.rgb;
     s.hemiBottom = hemiBottom.rgb;
     s.sunVisibility = sunShadow(shadowMap, shadowSampler, shadowMatrix, shadowParams, shadowExtra, cameraPosition.xyz, input.world, n);
-    const float3 light = skyLight(n, s) + extraSkyLight(n, extraTowards, extraFront, extraBack, false) + localLights(input.world, n, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner, localRotation,
-                                                         globeMaps, globeSampler);
+    const float3 light = skyLight(n, s) + extraSkyLight(n, extraTowards, extraFront, extraBack, false) + localLights(input.world, n, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner, localRotation, globeMaps, globeSampler, cookieMaps, cookieSampler, shadowAtlas, localShadowSlots, localShadowBase);
     if (fogRange.w > 1.5)
         return float4(fogRange.w < 2.5 ? n * 0.5 + 0.5 : fogRange.w > 3.5 ? saturate(colour) : float3(0, 0, 0), 1.0);   // normals / spec / albedo views
     if (fogRange.z > 0.5)
