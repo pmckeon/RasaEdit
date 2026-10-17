@@ -16,10 +16,11 @@
 // Camera
 // ------------------------------------------------------------------------------------------
 tr::Vec3 ViewCamera::forward() const {
+    if (explicitAxes) return axisForward;
     return tr::Vec3{std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
 }
-tr::Vec3 ViewCamera::right() const { return normalized(cross(tr::Vec3{0, 1, 0}, forward())); }
-tr::Vec3 ViewCamera::up() const { return cross(forward(), right()); }
+tr::Vec3 ViewCamera::right() const { if (explicitAxes) return axisRight; return normalized(cross(tr::Vec3{0, 1, 0}, forward())); }
+tr::Vec3 ViewCamera::up() const { if (explicitAxes) return axisUp; return cross(forward(), right()); }
 Mat4 ViewCamera::viewMatrix() const { return viewLH(position, right(), up(), forward()); }
 Mat4 ViewCamera::projectionMatrix(float aspect) const { return perspectiveLH(fovY, aspect, nearZ, farZ); }
 
@@ -302,13 +303,13 @@ void unitCube(std::vector<MeshVertex>& vertices, std::vector<uint32_t>& triangle
 SceneView::SceneView(Renderer& renderer, const tr::AssetLibrary& assets, const tr::MapBundle& map,
                      std::function<std::string(int32_t)> meshForClass, std::function<bool(int32_t)> classKnown,
                      std::function<int32_t(int32_t)> cullingLayerForClass, uint32_t terrainStep)
-    : renderer_(renderer), assets_(assets), map_(map), cullingLayerForClass_(cullingLayerForClass), meshForClass_(meshForClass),
+    : renderer_(&renderer), ownRenderer_(&renderer), assets_(assets), map_(map), cullingLayerForClass_(cullingLayerForClass), meshForClass_(meshForClass),
       classKnown_(classKnown) {
     std::vector<MeshVertex> vertices;
     std::vector<uint32_t> triangles, lines;
     unitCube(vertices, triangles, lines);
-    unitBox_ = renderer_.createMesh(vertices, triangles, false);
-    unitBoxLines_ = renderer_.createMesh(vertices, lines, true);
+    unitBox_ = renderer_->createMesh(vertices, triangles, false);
+    unitBoxLines_ = renderer_->createMesh(vertices, lines, true);
     auto lineMesh = [&](const std::vector<tr::Vec3>& points, const std::vector<uint32_t>& segments) {
         std::vector<MeshVertex> v;
         for (const tr::Vec3& p : points) {
@@ -317,7 +318,7 @@ SceneView::SceneView(Renderer& renderer, const tr::AssetLibrary& assets, const t
             m.normalY = 1;
             v.push_back(m);
         }
-        return renderer_.createMesh(v, segments, true);
+        return renderer_->createMesh(v, segments, true);
     };
     {
         std::vector<tr::Vec3> points;
@@ -520,7 +521,7 @@ void SceneView::setRegionEnvironmentMaps(const std::vector<std::pair<int32_t, st
         SDL_GPUTexture* cube = nullptr;
         try {
             tr::Bytes data;
-            if (assets_.tryRead(name, data)) cube = uploadDdsCubeTexture(renderer_.device(), data);
+            if (assets_.tryRead(name, data)) cube = uploadDdsCubeTexture(renderer_->device(), data);
             else environmentMapErrors_[name] = "not found in the archives";
         } catch (const std::exception& e) {
             environmentMapErrors_[name] = e.what();
@@ -594,7 +595,7 @@ SceneLighting SceneView::lighting() const {
     // Only lights whose volume is in view: the game draws a light pass only for lights whose volume is visible (apitrace of
     // Luna Cavern, 2026-10-14: the 27 light passes of a frame at the fountain are exactly the lights in front of the camera;
     // ranking by distance alone spent the slots on lights behind the camera).
-    const float aspect = float(renderer_.width()) / float(std::max<uint32_t>(1, renderer_.height()));
+    const float aspect = float(renderer_->width()) / float(std::max<uint32_t>(1, renderer_->height()));
     const Mat4 viewProjection = multiply(camera_.projectionMatrix(aspect), camera_.viewMatrix());
     const Vec4f& r0 = viewProjection.row0; const Vec4f& r1 = viewProjection.row1;
     const Vec4f& r2 = viewProjection.row2; const Vec4f& r3 = viewProjection.row3;
@@ -758,7 +759,7 @@ void SceneView::loadGlobeMaps() {
             globeIndex_[name] = 0;
         }
     }
-    renderer_.setGlobeMaps(faces, size);
+    renderer_->setGlobeMaps(faces, size);
 }
 
 // A map light with its lights.xml modifiers applied at lightTime (see tr::LightModifier).
@@ -894,25 +895,25 @@ SceneLighting SceneView::skyLightingAt() const {
 }
 
 SceneView::~SceneView() {
-    SDL_GPUDevice* device = renderer_.device();
+    SDL_GPUDevice* device = renderer_->device();
     for (TerrainChunk& chunk : terrainChunks_)
-        for (uint32_t level = 0; level < 4; ++level) renderer_.destroyMesh(chunkLevel(chunk, level));
-    renderer_.destroyMesh(unitBox_);
-    renderer_.destroyMesh(unitBoxLines_);
-    renderer_.destroyMesh(unitCircle_);
-    renderer_.destroyMesh(unitSquare_);
-    renderer_.destroyMesh(arrow_);
-    renderer_.destroyMesh(pole_);
+        for (uint32_t level = 0; level < 4; ++level) renderer_->destroyMesh(chunkLevel(chunk, level));
+    renderer_->destroyMesh(unitBox_);
+    renderer_->destroyMesh(unitBoxLines_);
+    renderer_->destroyMesh(unitCircle_);
+    renderer_->destroyMesh(unitSquare_);
+    renderer_->destroyMesh(arrow_);
+    renderer_->destroyMesh(pole_);
     for (auto& m : models_)
         for (ModelPiece& piece : m.second.pieces) {
-            renderer_.destroyMesh(piece.mesh);
-            renderer_.destroyBuffer(piece.skinBuffer);
+            renderer_->destroyMesh(piece.mesh);
+            renderer_->destroyBuffer(piece.skinBuffer);
         }
     for (auto& t : textures_)
         if (t.second) SDL_ReleaseGPUTexture(device, t.second);
     for (auto& t : environmentCubes_)
         if (t.second) SDL_ReleaseGPUTexture(device, t.second);
-    renderer_.setEnvironmentMap(nullptr);
+    renderer_->setEnvironmentMap(nullptr);
     for (SDL_GPUTexture* t : {terrainMaterial_.layers, terrainMaterial_.layerIndices, terrainMaterial_.layerWeights})
         if (t) SDL_ReleaseGPUTexture(device, t);
 }
@@ -933,7 +934,7 @@ SDL_GPUTexture* SceneView::volumeTexture(const std::string& name) {
     SDL_GPUTexture* result = nullptr;
     tr::Bytes data;
     try {
-        if (assets_.tryRead(tr::toLowerAscii(name), data)) result = uploadDdsVolumeTexture(renderer_.device(), data);
+        if (assets_.tryRead(tr::toLowerAscii(name), data)) result = uploadDdsVolumeTexture(renderer_->device(), data);
         else textureErrors_[key] = "not found in the archives";
     } catch (const std::exception& e) {
         result = nullptr;
@@ -951,7 +952,7 @@ SDL_GPUTexture* SceneView::texture(const std::string& name) {
     SDL_GPUTexture* result = nullptr;
     tr::Bytes data;
     try {
-        if (assets_.tryRead(key, data)) result = uploadDdsTexture(renderer_.device(), data);
+        if (assets_.tryRead(key, data)) result = uploadDdsTexture(renderer_->device(), data);
         else textureErrors_[key] = "not found in the archives";
     } catch (const std::exception& e) {
         result = nullptr;                       // unreadable or unsupported: draw untextured
@@ -981,7 +982,7 @@ void SceneView::buildTerrainMaterial() {
         files.push_back(std::move(data));
         terrainMaterial_.tilings.push_back(layer.tiling);
     }
-    terrainMaterial_.layers = uploadDxt1Array(renderer_.device(), files, size);
+    terrainMaterial_.layers = uploadDxt1Array(renderer_->device(), files, size);
     if (!terrainMaterial_.layers) {
         std::vector<std::vector<tr::Rgba8>> layers;
         for (const tr::Bytes& data : files) {
@@ -996,7 +997,7 @@ void SceneView::buildTerrainMaterial() {
             }
             layers.push_back(std::move(pixels));
         }
-        terrainMaterial_.layers = uploadRgbaArray(renderer_.device(), layers, size);
+        terrainMaterial_.layers = uploadRgbaArray(renderer_->device(), layers, size);
     }
 
     // Per-sample layer indices and coverages, one texel per sample (row = z index, column = x index). Coverage as the
@@ -1018,8 +1019,8 @@ void SceneView::buildTerrainMaterial() {
         indices[k] = tr::Rgba8{slice(0), slice(1), slice(2), slice(3)};
         weights[k] = tr::Rgba8{coverage(0), coverage(1), coverage(2), coverage(3)};
     }
-    terrainMaterial_.layerIndices = uploadRgbaTexture(renderer_.device(), indices.data(), t.columns, t.rows);
-    terrainMaterial_.layerWeights = uploadRgbaTexture(renderer_.device(), weights.data(), t.columns, t.rows);
+    terrainMaterial_.layerIndices = uploadRgbaTexture(renderer_->device(), indices.data(), t.columns, t.rows);
+    terrainMaterial_.layerWeights = uploadRgbaTexture(renderer_->device(), weights.data(), t.columns, t.rows);
     terrainMaterial_.originX = t.worldX(0);
     terrainMaterial_.originZ = t.worldZ(0);
     terrainMaterial_.inverseSpacing = 1.0f / t.header.spacing;
@@ -1168,7 +1169,7 @@ GpuMesh SceneView::buildTerrainChunkMesh(const TerrainChunk& chunk, uint32_t lev
         skirt(left);
         skirt(right);
     }
-    return renderer_.createMesh(vertices, indices, false);
+    return renderer_->createMesh(vertices, indices, false);
 }
 
 void SceneView::queueTerrain(const std::function<bool(const tr::Vec3&, float)>& visible) {
@@ -1186,7 +1187,7 @@ void SceneView::queueTerrain(const std::function<bool(const tr::Vec3&, float)>& 
         const float d = std::max(0.0f, length(subtract(chunk.centre, camera_.position)) - chunk.radius);
         if (terrainFixedLevel_ < 0)
             for (uint32_t level = 0; level < 3; ++level)
-                if (chunkLevel(chunk, level).vertices && d > releaseDistance(level)) renderer_.destroyMesh(chunkLevel(chunk, level));
+                if (chunkLevel(chunk, level).vertices && d > releaseDistance(level)) renderer_->destroyMesh(chunkLevel(chunk, level));
         const uint32_t want = wantedLevel(chunk);
         if (!chunkLevel(chunk, want).vertices) wanted.push_back({d, k});
     }
@@ -1205,8 +1206,8 @@ void SceneView::queueTerrain(const std::function<bool(const tr::Vec3&, float)>& 
             if (chunkLevel(chunk, level).vertices) mesh = &chunkLevel(chunk, level);
         if (!mesh) continue;
         if (mesh == &chunk.level0) ++terrainFullDetail_;
-        if (showTextures && terrainMaterial_.layers) renderer_.drawTerrain(*mesh, terrainMaterial_);
-        else renderer_.draw(*mesh, identityMatrix(), Vec4f{1, 1, 1, 1}, true);     // height-tinted vertex colours
+        if (showTextures && terrainMaterial_.layers) renderer_->drawTerrain(*mesh, terrainMaterial_);
+        else renderer_->draw(*mesh, identityMatrix(), Vec4f{1, 1, 1, 1}, true);     // height-tinted vertex colours
     }
 }
 
@@ -1525,8 +1526,8 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                             }
                         }
                     }
-                    part.mesh = renderer_.createMesh(stored, piece.indices, false);
-                    part.skinBuffer = renderer_.createSkinBuffer(skinVertices);
+                    part.mesh = renderer_->createMesh(stored, piece.indices, false);
+                    part.skinBuffer = renderer_->createSkinBuffer(skinVertices);
                     part.skinNormals = !aniso;
                     part.skinOwner = &model;
                     model.skinAnimated = true;
@@ -1551,13 +1552,13 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                         sv.bone0 = uint32_t(staticBone);
                         sv.weight0 = 1.0f;
                     }
-                    part.mesh = renderer_.createMesh(stored, piece.indices, false);
-                    part.skinBuffer = renderer_.createSkinBuffer(skinVertices);
+                    part.mesh = renderer_->createMesh(stored, piece.indices, false);
+                    part.skinBuffer = renderer_->createSkinBuffer(skinVertices);
                     part.skinNormals = !aniso;
                     part.skinOwner = &model;
                     model.skinAnimated = true;
                 } else {
-                    part.mesh = renderer_.createMesh(vertices, piece.indices, false);
+                    part.mesh = renderer_->createMesh(vertices, piece.indices, false);
                 }
                 part.water = water;
                 model.hasWater = model.hasWater || water;
@@ -2075,20 +2076,20 @@ Mat4 SceneView::anisoNormalMatrix(const Model* model, const ModelPiece& piece, c
 
 void SceneView::setPieceSkin(const ModelPiece& piece) {
     if (!piece.skinBuffer || !piece.skinOwner) {
-        renderer_.clearSkin();
+        renderer_->clearSkin();
         return;
     }
     const Model& model = *piece.skinOwner;
     const auto posed = skinOverride_.find(&model);          // a creature's idle, posed for the placement being drawn
     if (posed != skinOverride_.end()) {
-        renderer_.setSkin(piece.skinBuffer, posed->second, piece.skinNormals);
+        renderer_->setSkin(piece.skinBuffer, posed->second, piece.skinNormals);
         return;
     }
     if (model.boneFrame != frameNumber_) {
-        model.boneBase = renderer_.addBones(currentSkin(model));
+        model.boneBase = renderer_->addBones(currentSkin(model));
         model.boneFrame = frameNumber_;
     }
-    renderer_.setSkin(piece.skinBuffer, model.boneBase, piece.skinNormals);
+    renderer_->setSkin(piece.skinBuffer, model.boneBase, piece.skinNormals);
 }
 
 // Avatar accessories: the accessory's plug (HPP_<name>, usage 2) is put on the body's socket (HPS_<name>, usage 1)
@@ -2274,7 +2275,7 @@ void SceneView::queueBillboards(const Model& model, const Mat4& placementWorld, 
                                   uint8_t(std::clamp(bb.diffuse.w, 0.0f, 1.0f) * 255.0f + 0.5f));
             quads.push_back(v);
         }
-        renderer_.drawParticles(quads, showTextures ? bb.texture : nullptr, 0, false);   // additive (Phase Additive), no fog
+        renderer_->drawParticles(quads, showTextures ? bb.texture : nullptr, 0, false);   // additive (Phase Additive), no fog
     }
 }
 
@@ -2328,10 +2329,10 @@ void SceneView::queueSkyLayers(const tr::Sky& sky, float fade) {
             struct SkinScope {
                 Renderer& renderer;
                 ~SkinScope() { renderer.clearSkin(); }
-            } skinScope{renderer_};
+            } skinScope{*renderer_};
             setPieceSkin(piece);
             if (piece.skyEmissive && !piece.additive) {
-                renderer_.drawSkyEmissive(piece.mesh, pieceWorld, emissiveTint, showTextures ? piece.texture : nullptr, !piece.twoSided);
+                renderer_->drawSkyEmissive(piece.mesh, pieceWorld, emissiveTint, showTextures ? piece.texture : nullptr, !piece.twoSided);
             } else if (piece.aniso && showTextures && showEffects) {
                 AnisoMaterial m = piece.anisoMaterial;
                 m.diffuseAlpha.w = key.alpha * fade;     // MatDiffuse.a = the key alpha (gModulateScale leaves alpha alone)
@@ -2341,7 +2342,7 @@ void SceneView::queueSkyLayers(const tr::Sky& sky, float fade) {
                     m.transform0u = uv.u0; m.transform0v = uv.v0; m.transform1u = uv.u1; m.transform1v = uv.v1;
                     m.transform2u = uv.u2; m.transform2v = uv.v2;
                 }
-                renderer_.drawAnisoAdditive(piece.mesh, pieceWorld, m, !piece.twoSided, true);
+                renderer_->drawAnisoAdditive(piece.mesh, pieceWorld, m, !piece.twoSided, true);
             }
         }
     }
@@ -2469,9 +2470,9 @@ bool SceneView::poseIdle(const ServerPlacement& s) {
         q.cacheParts = loadedParts;
     }
     idlePosed_ = q.posed;
-    skinOverride_[&base] = renderer_.addBones(q.baseSkin);
+    skinOverride_[&base] = renderer_->addBones(q.baseSkin);
     for (const auto& p : q.partSkins)
-        if (!skinOverride_.count(p.first)) skinOverride_[p.first] = renderer_.addBones(p.second);
+        if (!skinOverride_.count(p.first)) skinOverride_[p.first] = renderer_->addBones(p.second);
     return true;
 }
 
@@ -2594,15 +2595,15 @@ void SceneView::queueDraws(const Selection& selection) {
         sectionStart = t;
     };
     const int selectedEntity = selection.kind == SelectionKind::MapEntity ? int(selection.index) : -1;
-    const float aspect = float(renderer_.width()) / float(std::max<uint32_t>(1, renderer_.height()));
+    const float aspect = float(renderer_->width()) / float(std::max<uint32_t>(1, renderer_->height()));
     const Mat4 viewProjection = multiply(camera_.projectionMatrix(aspect), camera_.viewMatrix());
     frameLighting_ = lighting();
-    renderer_.beginFrame(viewProjection, camera_.position, frameLighting_);
-    renderer_.setCameraAxes(camera_.right(), camera_.up(), camera_.forward());
-    renderer_.setProjection(camera_.projectionMatrix(aspect));
+    renderer_->beginFrame(viewProjection, camera_.position, frameLighting_);
+    renderer_->setCameraAxes(camera_.right(), camera_.up(), camera_.forward());
+    renderer_->setProjection(camera_.projectionMatrix(aspect));
     {
         const auto cube = environmentCubes_.find(activeEnvironmentMap());
-        renderer_.setEnvironmentMap(cube == environmentCubes_.end() || !environmentMaps ? nullptr : cube->second);
+        renderer_->setEnvironmentMap(cube == environmentCubes_.end() || !environmentMaps ? nullptr : cube->second);
     }
 
     // Frustum test against the clip-space planes of viewProjection (Gribb/Hartmann, depth 0..1).
@@ -2644,7 +2645,7 @@ void SceneView::queueDraws(const Selection& selection) {
         return m;
     };
     auto drawEffect = [&](const Model* model, const ModelPiece& piece, const Mat4& world, const Mat4& placementWorld) {   // model: material tracks
-        SkinScope skinScope{renderer_};
+        SkinScope skinScope{*renderer_};
         setPieceSkin(piece);
         if (piece.aniso && showTextures) {
             AnisoMaterial m = piece.anisoMaterial;
@@ -2654,14 +2655,14 @@ void SceneView::queueDraws(const Selection& selection) {
                 m.transform0u = uv.u0; m.transform0v = uv.v0; m.transform1u = uv.u1; m.transform1v = uv.v1;
                 m.transform2u = uv.u2; m.transform2v = uv.v2;
             }
-            renderer_.drawAnisoAdditive(piece.mesh, world, m, !piece.twoSided);
+            renderer_->drawAnisoAdditive(piece.mesh, world, m, !piece.twoSided);
         }
         else if (piece.forwardLit) {
             const TrMaterial uv = forwardTransforms(model, piece);
-            renderer_.drawAdditive(piece.mesh, world, scaledTint(Vec4f{1, 1, 1, piece.matDiffuseAlpha}, piece.colourScale), showTextures ? piece.texture : nullptr,
+            renderer_->drawAdditive(piece.mesh, world, scaledTint(Vec4f{1, 1, 1, piece.matDiffuseAlpha}, piece.colourScale), showTextures ? piece.texture : nullptr,
                                    true, showTextures ? piece.detail : nullptr, piece.detailSet, !piece.twoSided, &uv);
         }
-        else renderer_.drawAdditive(piece.mesh, world, scaledTint(Vec4f{1, 1, 1, 1}, piece.colourScale), showTextures ? piece.texture : nullptr, false, nullptr,
+        else renderer_->drawAdditive(piece.mesh, world, scaledTint(Vec4f{1, 1, 1, 1}, piece.colourScale), showTextures ? piece.texture : nullptr, false, nullptr,
                                     false, !piece.twoSided);
     };
     auto waterTint = [](bool selected) { return Vec4f{0.22f, 0.42f, 0.58f, selected ? 0.75f : 0.55f}; };
@@ -2693,7 +2694,7 @@ void SceneView::queueDraws(const Selection& selection) {
         }
         if (!model.hasSolid) return;
         const Vec4f tint = modelTint(selected);
-        SkinScope skinScope{renderer_};
+        SkinScope skinScope{*renderer_};
         for (const ModelPiece& piece : model.pieces) {
             if (piece.additive || groupHidden(piece)) continue;
             setPieceSkin(piece);
@@ -2705,7 +2706,7 @@ void SceneView::queueDraws(const Selection& selection) {
                     if (animatedUvTransforms(model, piece, lightTime, uv)) {
                         m.transform0u = uv.u0; m.transform0v = uv.v0; m.transform1u = uv.u1; m.transform1v = uv.v1;
                     }
-                    renderer_.drawRefract(piece.mesh, world, m);
+                    renderer_->drawRefract(piece.mesh, world, m);
                 }
                 continue;
             }
@@ -2716,11 +2717,11 @@ void SceneView::queueDraws(const Selection& selection) {
                     m.transform[0] = uv.u0; m.transform[1] = uv.v0; m.transform[2] = uv.u1; m.transform[3] = uv.v1;
                     m.transform[4] = uv.u2; m.transform[5] = uv.v2; m.transform[6] = uv.u3; m.transform[7] = uv.v3;
                 }
-                renderer_.drawWater(piece.mesh, world, m);
-            } else if (piece.water) renderer_.drawTranslucent(piece.mesh, world, waterTint(selected));
+                renderer_->drawWater(piece.mesh, world, m);
+            } else if (piece.water) renderer_->drawTranslucent(piece.mesh, world, waterTint(selected));
             else if (piece.translucent) {
                 const TrMaterial uv = forwardTransforms(&model, piece);
-                renderer_.drawTranslucent(piece.mesh, world, scaledTint(Vec4f{tint.x, tint.y, tint.z, tint.w * piece.matDiffuseAlpha}, piece.colourScale),
+                renderer_->drawTranslucent(piece.mesh, world, scaledTint(Vec4f{tint.x, tint.y, tint.z, tint.w * piece.matDiffuseAlpha}, piece.colourScale),
                                           showTextures ? piece.texture : nullptr, showTextures ? piece.detail : nullptr, piece.detailSet, !piece.twoSided,
                                           piece.forwardLit ? &uv : nullptr);
             }
@@ -2734,11 +2735,11 @@ void SceneView::queueDraws(const Selection& selection) {
                     trm.transform2u = uv.u2; trm.transform2v = uv.v2;
                 }
                 if (fading && piece.fadeForward && showTextures && materialMaps && trm.active) {
-                    renderer_.drawFadingForward(piece.mesh, world, scaledTint(tint, piece.colourScale), piece.texture, trm, !piece.twoSided);
+                    renderer_->drawFadingForward(piece.mesh, world, scaledTint(tint, piece.colourScale), piece.texture, trm, !piece.twoSided);
                     ++fadingForwardPieces_;
                     continue;
                 }
-                renderer_.draw(piece.mesh, world, scaledTint(tint, piece.colourScale), true, showTextures ? piece.texture : nullptr, showTextures && piece.alphaTest,
+                renderer_->draw(piece.mesh, world, scaledTint(tint, piece.colourScale), true, showTextures ? piece.texture : nullptr, showTextures && piece.alphaTest,
                                 hue, showTextures ? piece.glow : nullptr, piece.twoSided, piece.alphaReference,
                                 showTextures && materialMaps ? piece.normalMap : nullptr, showTextures && materialMaps ? piece.glossMap : nullptr,
                                 showTextures && materialMaps && piece.environment,
@@ -2769,14 +2770,14 @@ void SceneView::queueDraws(const Selection& selection) {
                 // drawn above
             } else if (p.model && p.model->loaded && p.model->effectOnly) {
                 // Effect-only entity (particle emitters, light cones): with Placeholders on, a cyan wireframe of its bounds.
-                if (showEffects && showPlaceholders && p.hasBounds && !selected) renderer_.draw(unitBoxLines_, p.boxWorld, markerColour::placeholder, false);
+                if (showEffects && showPlaceholders && p.hasBounds && !selected) renderer_->draw(unitBoxLines_, p.boxWorld, markerColour::placeholder, false);
             } else if (showPlaceholders && p.hasBounds) {
                 // Wireframe, so large invisible volumes don't hide the scene.
                 // Red: unknown class; orange: model failed to load or is missing; blue: class has no model.
                 const Vec4f tint = !p.classKnown ? Vec4f{0.95f, 0.3f, 0.25f, 1} : p.model ? Vec4f{0.95f, 0.6f, 0.2f, 1} : Vec4f{0.45f, 0.6f, 1.0f, 1};
-                if (!selected) renderer_.draw(unitBoxLines_, p.boxWorld, tint, false);
+                if (!selected) renderer_->draw(unitBoxLines_, p.boxWorld, tint, false);
             }
-            if (selected) renderer_.draw(unitBoxLines_, p.boxWorld, Vec4f{1.0f, 0.85f, 0.1f, 1}, false);
+            if (selected) renderer_->draw(unitBoxLines_, p.boxWorld, Vec4f{1.0f, 0.85f, 0.1f, 1}, false);
         }
     }
 
@@ -2814,7 +2815,7 @@ void SceneView::queueDraws(const Selection& selection) {
             standalone_->buildQuads(g, right, up, particleScratch_);
             if (particleScratch_.empty()) continue;
             const tr::ParticleGroup& group = system.groups[g];
-            renderer_.drawParticles(particleScratch_, showTextures && !group.texture.empty() ? texture(group.texture) : nullptr, tr::particleBlendType(group));
+            renderer_->drawParticles(particleScratch_, showTextures && !group.texture.empty() ? texture(group.texture) : nullptr, tr::particleBlendType(group));
         }
     }
     // Particle systems (camera-facing sprites need the view's axes).
@@ -2832,7 +2833,7 @@ void SceneView::queueDraws(const Selection& selection) {
                 l.instance->buildQuads(g, right, up, particleScratch_);
                 if (particleScratch_.empty()) continue;
                 const tr::ParticleGroup& group = system.groups[g];
-                renderer_.drawParticles(particleScratch_, showTextures && !group.texture.empty() ? texture(group.texture) : nullptr, tr::particleBlendType(group));
+                renderer_->drawParticles(particleScratch_, showTextures && !group.texture.empty() ? texture(group.texture) : nullptr, tr::particleBlendType(group));
             }
         }
     }
@@ -2858,12 +2859,12 @@ void SceneView::queueDraws(const Selection& selection) {
             m.row0 = {rx, 0, 0, c.x};
             m.row1 = {0, 1, 0, c.y + 0.3f};
             m.row2 = {0, 0, rz, c.z};
-            renderer_.draw(box ? unitSquare_ : unitCircle_, m, colour, false);
+            renderer_->draw(box ? unitSquare_ : unitCircle_, m, colour, false);
             Mat4 pole = identityMatrix();
             pole.row0 = {1, 0, 0, c.x};
             pole.row1 = {0, 25, 0, c.y};
             pole.row2 = {0, 0, 1, c.z};
-            renderer_.draw(pole_, pole, colour, false);
+            renderer_->draw(pole_, pole, colour, false);
             continue;
         }
         // The link line (pole_ stretched from the marker to its target) is tested on its own: it stays in view when the marker
@@ -2875,7 +2876,7 @@ void SceneView::queueDraws(const Selection& selection) {
                 line.row0 = {1, l.x, 0, s.position.x};
                 line.row1 = {0, l.y, 0, s.position.y + 0.3f};
                 line.row2 = {0, l.z, 1, s.position.z};
-                renderer_.draw(pole_, line, colour, false);
+                renderer_->draw(pole_, line, colour, false);
             }
         }
         const tr::Vec3 d = subtract(s.position, camera_.position);
@@ -2901,25 +2902,25 @@ void SceneView::queueDraws(const Selection& selection) {
             const bool idling = poseIdle(s);
             Mat4 drawWorld = s.world;          // accessories on connection points draw elsewhere
             auto drawPiece = [&](const ModelPiece& piece, const Vec4f& partHue) {
-                SkinScope skinScope{renderer_};
+                SkinScope skinScope{*renderer_};
                 setPieceSkin(piece);
                 if (piece.additive) {
                     if (showEffects) drawEffect(nullptr, piece, drawWorld, drawWorld);   // avatar parts come from several models: no material tracks
                     return;
                 }
                 if (piece.water) {
-                    renderer_.drawTranslucent(piece.mesh, drawWorld, waterTint(selected));
+                    renderer_->drawTranslucent(piece.mesh, drawWorld, waterTint(selected));
                     return;
                 }
                 if (piece.translucent) {
-                    renderer_.drawTranslucent(piece.mesh, drawWorld, scaledTint(Vec4f{tint.x, tint.y, tint.z, tint.w * piece.matDiffuseAlpha}, piece.colourScale),
+                    renderer_->drawTranslucent(piece.mesh, drawWorld, scaledTint(Vec4f{tint.x, tint.y, tint.z, tint.w * piece.matDiffuseAlpha}, piece.colourScale),
                                               showTextures ? piece.texture : nullptr, showTextures ? piece.detail : nullptr, piece.detailSet, !piece.twoSided,
                                               piece.forwardLit ? &piece.forwardUv : nullptr);   // avatar parts: no material tracks
                     return;
                 }
                 Vec4f hue = !showTextures || !piece.hued ? Vec4f{0, 0, 0, 0} : piece.flesh ? s.skinHue : partHue;
                 if (hue.w > 0.5f && piece.hueUnweighted) hue.w = 2.0f;
-                renderer_.draw(piece.mesh, drawWorld, scaledTint(tint, piece.colourScale), true, showTextures ? piece.texture : nullptr, showTextures && piece.alphaTest, hue,
+                renderer_->draw(piece.mesh, drawWorld, scaledTint(tint, piece.colourScale), true, showTextures ? piece.texture : nullptr, showTextures && piece.alphaTest, hue,
                                showTextures ? piece.glow : nullptr, piece.twoSided, piece.alphaReference,
                                showTextures && materialMaps ? piece.normalMap : nullptr, showTextures && materialMaps ? piece.glossMap : nullptr,
                                showTextures && materialMaps && piece.environment,
@@ -2963,23 +2964,23 @@ void SceneView::queueDraws(const Selection& selection) {
             }
             drawWorld = s.world;
         } else {
-            renderer_.draw(unitBoxLines_, multiply(s.world, boxMatrix(tr::Bounds{tr::Vec3{-0.5f, 0, -0.5f}, tr::Vec3{0.5f, 2, 0.5f}})), colour, false);
+            renderer_->draw(unitBoxLines_, multiply(s.world, boxMatrix(tr::Bounds{tr::Vec3{-0.5f, 0, -0.5f}, tr::Vec3{0.5f, 2, 0.5f}})), colour, false);
         }
         if (s.ringRadius > 0) {
             Mat4 ring = identityMatrix();
             ring.row0 = {s.ringRadius, 0, 0, s.position.x};
             ring.row1 = {0, 1, 0, s.position.y + 0.15f};
             ring.row2 = {0, 0, s.ringRadius, s.position.z};
-            renderer_.draw(unitCircle_, ring, colour, false);
+            renderer_->draw(unitCircle_, ring, colour, false);
         }
         if (s.facing) {
             Mat4 arrow = s.world;                       // yaw placement scaled to 3 m, raised slightly
             arrow.row0 = {arrow.row0.x * 3, arrow.row0.y * 3, arrow.row0.z * 3, arrow.row0.w};
             arrow.row1 = {arrow.row1.x * 3, arrow.row1.y * 3, arrow.row1.z * 3, arrow.row1.w + 0.3f};
             arrow.row2 = {arrow.row2.x * 3, arrow.row2.y * 3, arrow.row2.z * 3, arrow.row2.w};
-            renderer_.draw(arrow_, arrow, colour, false);
+            renderer_->draw(arrow_, arrow, colour, false);
         }
-        if (selected && hasModel) renderer_.draw(unitBoxLines_, multiply(s.world, boxMatrix(s.model->bounds)), highlight, false);
+        if (selected && hasModel) renderer_->draw(unitBoxLines_, multiply(s.world, boxMatrix(s.model->bounds)), highlight, false);
     }
 
     // Map lights (lights.xml): a 0.5 m box at each light; the selected one also shows its reach - three range circles for a
@@ -2994,7 +2995,7 @@ void SceneView::queueDraws(const Selection& selection) {
             if (!selected && (dot(d, d) > maxDistance2 || !visible(light.position, 0.5f))) continue;
             const Vec4f colour = selected ? highlight : markerColour::light;
             const tr::Vec3& p = light.position;
-            renderer_.draw(unitBoxLines_, boxMatrix(tr::Bounds{tr::Vec3{p.x - 0.25f, p.y - 0.25f, p.z - 0.25f},
+            renderer_->draw(unitBoxLines_, boxMatrix(tr::Bounds{tr::Vec3{p.x - 0.25f, p.y - 0.25f, p.z - 0.25f},
                                                                tr::Vec3{p.x + 0.25f, p.y + 0.25f, p.z + 0.25f}}), colour, false);
             if (!selected) continue;
             const float r = light.range;
@@ -3003,28 +3004,28 @@ void SceneView::queueDraws(const Selection& selection) {
                 ring.row0 = {r, 0, 0, p.x};
                 ring.row1 = {0, 1, 0, p.y};
                 ring.row2 = {0, 0, r, p.z};
-                renderer_.draw(unitCircle_, ring, colour, false);
+                renderer_->draw(unitCircle_, ring, colour, false);
                 ring.row1 = {0, 0, r, p.y};
                 ring.row2 = {0, 1, 0, p.z};
-                renderer_.draw(unitCircle_, ring, colour, false);
+                renderer_->draw(unitCircle_, ring, colour, false);
                 ring.row0 = {0, 1, 0, p.x};
                 ring.row1 = {r, 0, 0, p.y};
                 ring.row2 = {0, 0, r, p.z};
-                renderer_.draw(unitCircle_, ring, colour, false);
+                renderer_->draw(unitCircle_, ring, colour, false);
             } else if (light.kind == tr::PlacedLight::Kind::Spot) {
                 const tr::Vec3 axis = scaled(normalized(light.direction()), r);
                 Mat4 line = identityMatrix();               // pole_ (0..1 along +y) stretched along the axis
                 line.row0 = {1, axis.x, 0, p.x};
                 line.row1 = {0, axis.y, 0, p.y};
                 line.row2 = {0, axis.z, 1, p.z};
-                renderer_.draw(pole_, line, colour, false);
+                renderer_->draw(pole_, line, colour, false);
             } else {
                 const tr::Vec3 half{light.width * 0.5f, light.length * 0.5f, r};
                 Mat4 frame = rotationMatrix(light.worldOrientation);
                 frame.row0.w = p.x;
                 frame.row1.w = p.y;
                 frame.row2.w = p.z;
-                renderer_.draw(unitBoxLines_, multiply(frame, boxMatrix(tr::Bounds{tr::Vec3{-half.x, -half.y, -half.z}, half})), colour, false);
+                renderer_->draw(unitBoxLines_, multiply(frame, boxMatrix(tr::Bounds{tr::Vec3{-half.x, -half.y, -half.z}, half})), colour, false);
             }
         }
     }
@@ -3038,14 +3039,14 @@ void SceneView::queueDraws(const Selection& selection) {
             ring.row0 = {r, 0, 0, p.x};
             ring.row1 = {0, 1, 0, p.y};
             ring.row2 = {0, 0, r, p.z};
-            renderer_.draw(unitCircle_, ring, colour, false);
+            renderer_->draw(unitCircle_, ring, colour, false);
             ring.row1 = {0, 0, r, p.y};
             ring.row2 = {0, 1, 0, p.z};
-            renderer_.draw(unitCircle_, ring, colour, false);
+            renderer_->draw(unitCircle_, ring, colour, false);
             ring.row0 = {0, 1, 0, p.x};
             ring.row1 = {r, 0, 0, p.y};
             ring.row2 = {0, 0, r, p.z};
-            renderer_.draw(unitCircle_, ring, colour, false);
+            renderer_->draw(unitCircle_, ring, colour, false);
         };
         for (size_t k = 0; k < audioEmitters_.size(); ++k) {
             const bool selected = selection.kind == SelectionKind::AudioEmitter && selection.index == k;
@@ -3055,7 +3056,7 @@ void SceneView::queueDraws(const Selection& selection) {
             const tr::Vec3 d = subtract(p, camera_.position);
             if (!selected && (dot(d, d) > maxDistance2 || !visible(p, 0.4f))) continue;
             const Vec4f colour = selected ? highlight : markerColour::sound;
-            renderer_.draw(unitBoxLines_, boxMatrix(tr::Bounds{tr::Vec3{p.x - 0.2f, p.y - 0.2f, p.z - 0.2f}, tr::Vec3{p.x + 0.2f, p.y + 0.2f, p.z + 0.2f}}),
+            renderer_->draw(unitBoxLines_, boxMatrix(tr::Bounds{tr::Vec3{p.x - 0.2f, p.y - 0.2f, p.z - 0.2f}, tr::Vec3{p.x + 0.2f, p.y + 0.2f, p.z + 0.2f}}),
                            colour, false);
             if (!selected) continue;
             sphere(p, e.minDistance, colour);
@@ -3076,19 +3077,19 @@ void SceneView::queueDraws(const Selection& selection) {
             pole.row0 = {1, 0, 0, m.position.x};
             pole.row1 = {0, 6, 0, m.position.y};
             pole.row2 = {0, 0, 1, m.position.z};
-            renderer_.draw(pole_, pole, colour, false);
+            renderer_->draw(pole_, pole, colour, false);
             Mat4 ring = identityMatrix();
             ring.row0 = {1, 0, 0, m.position.x};
             ring.row1 = {0, 1, 0, m.position.y + 6.0f};
             ring.row2 = {0, 0, 1, m.position.z};
-            renderer_.draw(unitCircle_, ring, colour, false);
+            renderer_->draw(unitCircle_, ring, colour, false);
             if (bound) {
                 const tr::Vec3 t = subtract(target, m.position);
                 Mat4 line = identityMatrix();
                 line.row0 = {1, t.x, 0, m.position.x};
                 line.row1 = {0, t.y, 0, m.position.y + 0.3f};
                 line.row2 = {0, t.z, 1, m.position.z};
-                renderer_.draw(pole_, line, colour, false);
+                renderer_->draw(pole_, line, colour, false);
             }
         }
     }
@@ -3186,7 +3187,7 @@ bool rayHitsBoxOutline(const tr::Vec3& origin, const tr::Vec3& dir, const tr::Ve
 }  // namespace
 
 Selection SceneView::pick(float ndcX, float ndcY, bool pickEntities, bool pickServer) const {
-    const float aspect = float(renderer_.width()) / float(std::max<uint32_t>(1, renderer_.height()));
+    const float aspect = float(renderer_->width()) / float(std::max<uint32_t>(1, renderer_->height()));
     const float tanHalf = std::tan(camera_.fovY * 0.5f);
     const tr::Vec3 direction = normalized(add(camera_.forward(), add(scaled(camera_.right(), ndcX * tanHalf * aspect),
                                                                      scaled(camera_.up(), ndcY * tanHalf))));
@@ -3365,7 +3366,7 @@ bool SceneView::rayHitsModel(const Model& model, const tr::Vec3& origin, const t
         // With back-face culling, only what is drawn can be hit (e.g. not the outward-facing light barrier box around
         // the Caves of Donn room, seen from inside).
         const bool twoSided = k / 3 < model.triangleTwoSided.size() && model.triangleTwoSided[k / 3] != 0;
-        if (renderer_.cullBackFaces && !twoSided && dot(cross(subtract(v[tri[k + 1]], v[tri[k]]), subtract(v[tri[k + 2]], v[tri[k]])), dir) >= 0.0f) continue;
+        if (renderer_->cullBackFaces && !twoSided && dot(cross(subtract(v[tri[k + 1]], v[tri[k]]), subtract(v[tri[k + 2]], v[tri[k]])), dir) >= 0.0f) continue;
         const float hitT = rayTriangle(origin, dir, v[tri[k]], v[tri[k + 1]], v[tri[k + 2]]);
         if (hitT > 0.0f && hitT < t) {
             t = hitT;
@@ -3648,7 +3649,7 @@ SceneView::Model* SceneView::modelFor(const std::string& mesh, const std::string
 void SceneView::refreshServerContent() { setServerContent(serverContent_, serverDatabase_, serverMeshForClass_, serverAvatarFor_); }
 
 void SceneView::viewRay(float ndcX, float ndcY, tr::Vec3& origin, tr::Vec3& direction) const {
-    const float aspect = float(renderer_.width()) / float(std::max<uint32_t>(1, renderer_.height()));
+    const float aspect = float(renderer_->width()) / float(std::max<uint32_t>(1, renderer_->height()));
     const float tanHalf = std::tan(camera_.fovY * 0.5f);
     origin = camera_.position;
     direction = normalized(add(camera_.forward(), add(scaled(camera_.right(), ndcX * tanHalf * aspect), scaled(camera_.up(), ndcY * tanHalf))));
@@ -3717,45 +3718,74 @@ bool SceneView::modelSurfaceHit(const tr::Vec3& origin, const tr::Vec3& directio
     float best = maxT;
     bool found = false;
     for (size_t k = 0; k < placements_.size(); ++k) {
-        const tr::MapEntity& e = map_.map.entities[k];
         const Placement& p = placements_[k];
         if (!p.model || !p.model->loaded || p.model->triangles.empty() || p.model->effectOnly) continue;
         if (onlyEntity >= 0 && int(k) != onlyEntity) continue;
         if (int(k) == excludeEntity) continue;
         if (gameDistances && entityDistanceAlpha(p) <= 0.01f) continue;     // not drawn
-        // In the entity's local space (scaled; t stays the world-space t of the normalised direction, the transform being affine).
-        const Mat4 r = rotationMatrix(e.orientation);
-        auto toLocal = [&](const tr::Vec3& v) {
-            return tr::Vec3{r.row0.x * v.x + r.row1.x * v.y + r.row2.x * v.z, r.row0.y * v.x + r.row1.y * v.y + r.row2.y * v.z,
-                            r.row0.z * v.x + r.row1.z * v.y + r.row2.z * v.z};
-        };
-        const float inverseScale = e.scale != 0 ? 1.0f / e.scale : 1.0f;
-        const tr::Vec3 o = scaled(toLocal(subtract(origin, e.location)), inverseScale);
-        const tr::Vec3 d = scaled(toLocal(direction), inverseScale);
-        const tr::Bounds& b = p.model->bounds;
-        float tNear = 0, tFar = best;
-        bool hit = true;
-        for (uint32_t axis = 0; axis < 3 && hit; ++axis) {
-            const float oa = tr::component(o, axis), da = tr::component(d, axis);
-            const float lo = tr::component(b.min, axis), hi = tr::component(b.max, axis);
-            if (std::fabs(da) < 1e-9f) { hit = oa >= lo && oa <= hi; continue; }
-            float t0 = (lo - oa) / da, t1 = (hi - oa) / da;
-            if (t0 > t1) std::swap(t0, t1);
-            tNear = std::max(tNear, t0);
-            tFar = std::min(tFar, t1);
-            hit = tNear <= tFar;
-        }
-        if (!hit) continue;
-        const std::vector<tr::Vec3>& v = p.model->positions;
-        const std::vector<uint32_t>& tri = p.model->triangles;
-        for (size_t i = 0; i + 2 < tri.size(); i += 3) {
-            const float hitT = rayTriangle(o, d, v[tri[i]], v[tri[i + 1]], v[tri[i + 2]]);
-            if (hitT > 0.0f && hitT < best) {
-                best = hitT;
-                found = true;
-            }
+        if (rayHitsEntityModel(k, origin, direction, best)) found = true;
+    }
+    if (found) t = best;
+    return found;
+}
+
+// The nearest hit of a ray with one map entity's model triangles before best (updated); false if none.
+bool SceneView::rayHitsEntityModel(size_t k, const tr::Vec3& origin, const tr::Vec3& direction, float& best) const {
+    const tr::MapEntity& e = map_.map.entities[k];
+    const Placement& p = placements_[k];
+    if (!p.model || !p.model->loaded || p.model->triangles.empty() || p.model->effectOnly) return false;
+    bool found = false;
+    // In the entity's local space (scaled; t stays the world-space t of the normalised direction, the transform being affine).
+    const Mat4 r = rotationMatrix(e.orientation);
+    auto toLocal = [&](const tr::Vec3& v) {
+        return tr::Vec3{r.row0.x * v.x + r.row1.x * v.y + r.row2.x * v.z, r.row0.y * v.x + r.row1.y * v.y + r.row2.y * v.z,
+                        r.row0.z * v.x + r.row1.z * v.y + r.row2.z * v.z};
+    };
+    const float inverseScale = e.scale != 0 ? 1.0f / e.scale : 1.0f;
+    const tr::Vec3 o = scaled(toLocal(subtract(origin, e.location)), inverseScale);
+    const tr::Vec3 d = scaled(toLocal(direction), inverseScale);
+    const tr::Bounds& b = p.model->bounds;
+    float tNear = 0, tFar = best;
+    bool hit = true;
+    for (uint32_t axis = 0; axis < 3 && hit; ++axis) {
+        const float oa = tr::component(o, axis), da = tr::component(d, axis);
+        const float lo = tr::component(b.min, axis), hi = tr::component(b.max, axis);
+        if (std::fabs(da) < 1e-9f) { hit = oa >= lo && oa <= hi; continue; }
+        float t0 = (lo - oa) / da, t1 = (hi - oa) / da;
+        if (t0 > t1) std::swap(t0, t1);
+        tNear = std::max(tNear, t0);
+        tFar = std::min(tFar, t1);
+        hit = tNear <= tFar;
+    }
+    if (!hit) return false;
+    const std::vector<tr::Vec3>& v = p.model->positions;
+    const std::vector<uint32_t>& tri = p.model->triangles;
+    for (size_t i = 0; i + 2 < tri.size(); i += 3) {
+        const float hitT = rayTriangle(o, d, v[tri[i]], v[tri[i + 1]], v[tri[i + 2]]);
+        if (hitT > 0.0f && hitT < best) {
+            best = hitT;
+            found = true;
         }
     }
+    return found;
+}
+
+bool SceneView::entityWorldTriangles(size_t k, std::vector<tr::Vec3>& out) const {
+    if (k >= placements_.size() || k >= map_.map.entities.size()) return false;
+    const Placement& p = placements_[k];
+    if (!p.model || !p.model->loaded || p.model->triangles.empty() || p.model->effectOnly || p.neverDrawn) return false;
+    const tr::MapEntity& e = map_.map.entities[k];
+    const Mat4 world = placementMatrix(e.location, e.orientation, e.scale);
+    const std::vector<tr::Vec3>& v = p.model->positions;
+    for (uint32_t index : p.model->triangles) out.push_back(transformPoint(world, v[index]));
+    return true;
+}
+
+bool SceneView::probeHit(const tr::Vec3& origin, const tr::Vec3& direction, float maxT, float& t, const std::vector<uint32_t>& entities) const {
+    float best = maxT;
+    bool found = false;
+    for (uint32_t k : entities)
+        if (k < placements_.size() && !placements_[k].neverDrawn && rayHitsEntityModel(k, origin, direction, best)) found = true;
     if (found) t = best;
     return found;
 }

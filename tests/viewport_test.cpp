@@ -3,6 +3,7 @@
 //   viewport_test <game root> <game.zip> <map> <out.rgba> <width> <height> <eye x y z> <target x y z>
 #include "Avatar.h"
 #include "SceneView.h"
+#include "PvsBuilder.h"
 #include "UiCanvas.h"
 #include "UiSchema.h"
 #include "gamedata.h"
@@ -1642,6 +1643,65 @@ int main(int argc, char** argv) {
         if (envValue("RASA_NOGAMEDISTANCES")) scene.gameDistances = false;   // draw every entity within the editor's draw distance
         // RASA_NOSERVER=1: hide the server layer (markers, creatures) while RASA_DB still supplies the regions (sky, environment map).
         if (envValue("RASA_NOSERVER")) { scene.showServer = false; scene.showMissionAreas = false; }
+        // RASA_PVSTEST=<rows>: the PVS builder (PvsBuilder.h) against the shipped .vis - every leaf scouted for camera points (a leaf the
+        // game found none for has no row data), then <rows> computed rows (spread over the leaves with shipped data, or the leaves in
+        // RASA_PVSLEAVES=a,b,...) compared bit for bit with the shipped ones.
+        if (const char* pvsTest = envValue("RASA_PVSTEST")) {
+            PvsBuilder builder(device, scene, map, map.vis);
+            if (const char* th = envValue("RASA_PVSTHRESHOLD")) builder.pixelThreshold = uint32_t(std::atoi(th));
+            const uint32_t leaves = builder.leafCount();
+            if (!envValue("RASA_PVSNOSCOUT")) {
+                size_t both = 0, noneBoth = 0, shippedOnly = 0, builtOnly = 0, cameraSum = 0;
+                const auto t0 = std::chrono::steady_clock::now();
+                for (uint32_t leaf = 0; leaf < leaves; ++leaf) {
+                    const size_t n = builder.cameras(leaf).size();
+                    cameraSum += n;
+                    const bool shipped = leaf < map.vis.rows.size() && tr::pvsHasData(map.vis.rows[leaf]);
+                    if (shipped && n) ++both;
+                    else if (!shipped && !n) ++noneBoth;
+                    else if (shipped) ++shippedOnly;
+                    else ++builtOnly;
+                }
+                const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+                std::printf("PVS scout: %u leaves in %.1f s, %zu camera points; cameras and shipped data %zu, neither %zu, shipped data but no camera %zu, "
+                            "cameras but no shipped data %zu\n", leaves, s, cameraSum, both, noneBoth, shippedOnly, builtOnly);
+            }
+            std::vector<uint32_t> sample;
+            if (const char* list = envValue("RASA_PVSLEAVES")) {
+                for (const char* q = list; *q;) {
+                    sample.push_back(uint32_t(std::strtoul(q, nullptr, 10)));
+                    while (*q && *q != ',') ++q;
+                    if (*q == ',') ++q;
+                }
+            } else {
+                std::vector<uint32_t> withData;
+                for (uint32_t leaf = 0; leaf < leaves && leaf < map.vis.rows.size(); ++leaf)
+                    if (tr::pvsHasData(map.vis.rows[leaf])) withData.push_back(leaf);
+                const size_t want = std::min<size_t>(size_t(std::atoi(pvsTest)), withData.size());
+                for (size_t k = 0; k < want; ++k) sample.push_back(withData[k * withData.size() / std::max<size_t>(want, 1)]);
+            }
+            size_t totalShipped = 0, totalBuilt = 0, totalBoth = 0;
+            for (uint32_t leaf : sample) {
+                const std::vector<uint32_t> row = builder.computeRow(leaf);
+                size_t shipped = 0, built = 0, common = 0;
+                const bool hasShipped = leaf < map.vis.rows.size() && tr::pvsHasData(map.vis.rows[leaf]);
+                for (uint32_t other = 0; other < leaves; ++other) {
+                    const bool s = hasShipped && tr::pvsLeafVisible(map.vis.rows[leaf], other);
+                    const bool b = !row.empty() && ((row[other >> 5] >> (other & 0x1F)) & 0x1) != 0;
+                    shipped += s; built += b; common += s && b;
+                }
+                totalShipped += shipped; totalBuilt += built; totalBoth += common;
+                const int32_t node = builder.leafNode(leaf);
+                const tr::Bounds& box = map.vis.nodes[size_t(node)].bounds;
+                std::printf("PVS leaf %u (%.0f %.0f %.0f .. %.0f %.0f %.0f): %u views, scout %.2f s, views %.2f s; shipped %zu, built %zu, both %zu, "
+                            "shipped only %zu, built only %zu\n", leaf, box.min.x, box.min.y, box.min.z, box.max.x, box.max.y, box.max.z, builder.lastViews,
+                            builder.lastScoutSeconds, builder.lastViewSeconds, shipped, built, common, shipped - common, built - common);
+            }
+            if (!sample.empty())
+                std::printf("PVS rows: %zu leaves; shipped bits %zu, built %zu, both %zu - recall %.3f, precision %.3f\n", sample.size(), totalShipped, totalBuilt,
+                            totalBoth, totalShipped ? double(totalBoth) / double(totalShipped) : 0.0, totalBuilt ? double(totalBoth) / double(totalBuilt) : 0.0);
+            return 0;
+        }
         if (const char* flora = envValue("RASA_FLORA")) scene.clutterDensity = float(std::atof(flora));   // density factor
         else {
             scene.clutterCellsPerFrame = 1000;
@@ -1966,6 +2026,35 @@ int main(int argc, char** argv) {
                 }
             }
             std::printf("lights edit test: %zu of %zu lights.xml files passed (%zu modifier tracks written back unchanged)\n", passed, files, modTracksTotal);
+        }
+        // RASA_VISROUNDTRIP=1: every map's .vis - written back unchanged it is byte-identical; with every computed row encoded again by
+        // setPvsRow (zlib level 1, as the game's SetPVS) it is still byte-identical (damaged rows kept as stored).
+        if (envValue("RASA_VISROUNDTRIP")) {
+            size_t files = 0, same = 0, reencoded = 0, rowsTotal = 0;
+            std::error_code ec;
+            for (const auto& dir : std::filesystem::directory_iterator(std::filesystem::path(argv[1]) / "data" / "maps", ec)) {
+                const auto path = dir.path() / (dir.path().filename().string() + ".vis");
+                if (!std::filesystem::exists(path, ec)) continue;
+                ++files;
+                try {
+                    const tr::Bytes data = tr::readFile(path.string());
+                    tr::VisFile vis = tr::readVis(data);
+                    const bool unchanged = tr::writeVis(vis) == data;
+                    same += unchanged ? 1 : 0;
+                    for (uint32_t k = 0; k < vis.rows.size(); ++k)
+                        if (!vis.rows[k].stored.empty() && !vis.rows[k].damaged) {
+                            const std::vector<uint32_t> words = vis.rows[k].words;
+                            tr::setPvsRow(vis, k, words, vis.rows[k].timestamp);
+                            ++rowsTotal;
+                        }
+                    const bool again = tr::writeVis(vis) == data;
+                    reencoded += again ? 1 : 0;
+                    if (!unchanged || !again) std::printf("vis round trip FAILED: %s (unchanged %d, rows re-encoded %d)\n", path.filename().string().c_str(), unchanged, again);
+                } catch (const std::exception& e) {
+                    std::printf("vis round trip ERROR: %s: %s\n", path.filename().string().c_str(), e.what());
+                }
+            }
+            std::printf("vis round trip: %zu of %zu files byte-identical, %zu identical with all %zu computed rows re-encoded\n", same, files, reencoded, rowsTotal);
         }
         // RASA_AUDIOEDITTEST=1: every map's audioemitters.xml - the document finds as many emitters as readAudioEmitters and writes
         // back byte-identical untouched; moving emitter 0, duplicating it (new UID) and removing the copy read back; adding one to an

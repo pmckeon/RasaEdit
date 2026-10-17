@@ -471,6 +471,7 @@ struct VisPvsRow {
     bool compressed = false;
     bool damaged = false;                 // stream ended early (seen in characterselection.vis); padded with zeros
     std::vector<uint32_t> words;          // empty when the leaf has no PVS data
+    Bytes stored;                         // the row's bytes as in the file (written back unchanged by writeVis)
 };
 
 inline bool pvsHasData(const VisPvsRow& row) { return !row.words.empty(); }
@@ -494,10 +495,19 @@ struct VisFile {
     size_t damagedRows = 0;
     size_t bytesConsumed = 0;
     size_t fileSize = 0;
+    Bytes tail;                           // everything after the rows: the flag byte and the byte the client never reads
 };
 
 VisFile readVis(const Bytes& data);
 VisFile readVis(const std::string& path);
+// The file again: unchanged rows keep their stored bytes, so a file read and written back is byte-identical (all 77 shipped maps).
+Bytes writeVis(const VisFile& vis);
+// A row the way the game's TRasa::PVS::SetPVS (tabula_rasa.exe FUN_00855090) stores one: the words as given, zlib level 1 (every
+// shipped row re-compresses byte for byte at level 1), "compressed" 1 - or stored raw, "compressed" 0, when that is larger - and
+// the time as its timestamp. clearPvsRow leaves a row
+// without data, which the game reads as every leaf visible (TRasa::PVS::LoadPVS FUN_00855260 fills it with 0xFF) - always safe.
+void setPvsRow(VisFile& vis, uint32_t leaf, const std::vector<uint32_t>& words, uint64_t timestamp);
+void clearPvsRow(VisFile& vis, uint32_t leaf);
 // Index of the leaf node containing a point (descends by split planes); -1 if outside the root.
 int32_t findLeafNode(const VisFile& vis, const Vec3& point);
 

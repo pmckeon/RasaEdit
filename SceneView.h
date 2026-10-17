@@ -26,6 +26,9 @@ struct ViewCamera {
     float fovY = 1.0f;             // radians (about 57 degrees)
     float nearZ = 0.5f;
     float farZ = 4000.0f;
+    // Axes given directly instead of yaw / pitch (the PVS builder's cube faces look straight up and down).
+    bool explicitAxes = false;
+    tr::Vec3 axisRight{1, 0, 0}, axisUp{0, 1, 0}, axisForward{0, 0, 1};
 
     tr::Vec3 forward() const;
     tr::Vec3 right() const;        // cross(world up, forward)
@@ -112,6 +115,15 @@ public:
     bool surfacePoint(const tr::Vec3& origin, const tr::Vec3& direction, float fallbackY, tr::Vec3& point, int excludeEntity = -1) const;
     // The nearest model triangle of a drawn map entity the ray hits within maxT (t along the normalised direction).
     bool modelSurfaceHit(const tr::Vec3& origin, const tr::Vec3& direction, float maxT, float& t, int excludeEntity = -1) const;
+    // PVS builder (PvsBuilder.h): the nearest hit of a ray with the given map entities' model triangles (no distance rule; layer-6
+    // entities skipped) - the stand-in for the game's collision world in the camera probes.
+    bool probeHit(const tr::Vec3& origin, const tr::Vec3& direction, float maxT, float& t, const std::vector<uint32_t>& entities) const;
+    // A map entity's model triangles in world space (3 points each), appended; false without a loaded model.
+    bool entityWorldTriangles(size_t entityIndex, std::vector<tr::Vec3>& out) const;
+    // Whether a map entity is in the game's graphics scene: it has a model and is not on culling layer 6.
+    bool entityHasModel(size_t entityIndex) const { return entityIndex < placements_.size() && placements_[entityIndex].model && !placements_[entityIndex].neverDrawn; }
+    // Where queueDraws sends its draws: another renderer (a PVS view's), or nullptr for the scene's own.
+    void setDrawTarget(Renderer* target) { renderer_ = target ? target : ownRenderer_; }
     // Snap to ground: the first surface straight down from (x, fromY, z) - architecture or terrain, holes excluded; fallback
     // when there is none (e.g. under the terrain with no cave floor loaded).
     float surfaceHeightBelow(float x, float z, float fromY, float fallback, int excludeEntity = -1) const;
@@ -576,6 +588,7 @@ private:
     // Puts the camera distance metres from target, looking at it (see focusOn).
     void frameTarget(const tr::Vec3& target, float distance);
     bool rayHitsModel(const Model& model, const tr::Vec3& origin, const tr::Vec3& dir, float& t) const;
+    bool rayHitsEntityModel(size_t entityIndex, const tr::Vec3& origin, const tr::Vec3& direction, float& best) const;
     // Terrain chunk: samples rows row0..row1, columns col0..col1 (edges shared with the neighbours), one mesh per level
     // (step 1, 2, 4, 8); level 3 is built at load, finer ones on demand and released when the camera has moved away.
     struct TerrainChunk {
@@ -597,7 +610,8 @@ private:
     SDL_GPUTexture* texture(const std::string& name);       // cached; nullptr if missing or unreadable
     SDL_GPUTexture* volumeTexture(const std::string& name); // 3D (volume DDS); cached; nullptr if missing or unreadable
 
-    Renderer& renderer_;
+    Renderer* renderer_;                    // where draws go (the own renderer, or a PVS view's - setDrawTarget)
+    Renderer* ownRenderer_;
     const tr::AssetLibrary& assets_;
     const tr::MapBundle& map_;
     ViewCamera camera_;

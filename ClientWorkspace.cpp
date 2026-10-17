@@ -25,6 +25,7 @@ void ClientWorkspace::buildDefaultLayout(ImGuiID dockspace) {
     ImGui::DockBuilderDockWindow("Entities###Client.Entities", bottom);
     ImGui::DockBuilderDockWindow("Lights###Client.Lights", bottom);
     ImGui::DockBuilderDockWindow("Sounds###Client.Sounds", bottom);
+    ImGui::DockBuilderDockWindow("PVS###Client.Pvs", right);
     ImGui::DockBuilderDockWindow("Map###Client.Map", right);
     ImGui::DockBuilderDockWindow("Entity###Client.Entity", right);
     ImGui::DockBuilderFinish(dockspace);
@@ -45,6 +46,14 @@ void ClientWorkspace::onMapLoaded() {
     cleanReachable_ = true;
     fitBounds_.clear();
     saved_ = snapshot();
+    pvsBuilder_.reset();
+    pvsQueue_.clear();
+    pvsQueueTotal_ = 0;
+    pvsRowStarted_ = false;
+    pvsChanged_ = false;
+    pvsResult_.clear();
+    pvsBaseline_ = ctx_.map ? ctx_.map->map.entities : std::vector<tr::MapEntity>{};
+    pvsSavedVis_ = ctx_.map ? ctx_.map->vis : tr::VisFile{};
 }
 
 // ------------------------------------------------------------------------------------------
@@ -408,8 +417,19 @@ bool ClientWorkspace::saveMap() {
                               tr::writeMap(ctx_.map->map) == [&] { tr::MapFile m = ctx_.map->map; m.entities = saved_.entities; m.generatedAbvs = saved_.abvs; return tr::writeMap(m); }());
     const bool lightsChanged = ctx_.map->lightsXml != saved_.lights;
     const bool emittersChanged = ctx_.map->audioEmittersXml != saved_.emitters;
+    const bool visChanged = pvsChanged_;
     std::string error;
     try {
+        if (visChanged) {
+            // The .vis beside the .map (same name); read back before it replaces the old one.
+            fs::path visPath = path;
+            visPath.replace_extension(".vis");
+            const tr::Bytes data = tr::writeVis(ctx_.map->vis);
+            const tr::VisFile check = tr::readVis(data);
+            if (check.leafCount != ctx_.map->vis.leafCount || check.nodes.size() != ctx_.map->vis.nodes.size() || check.damagedRows != 0)
+                throw std::runtime_error("the written .vis does not read back");
+            if (!writeFileWithBackup(visPath.string(), data, error)) throw std::runtime_error(error);
+        }
         if (mapChanged) {
             const tr::Bytes data = tr::writeMap(ctx_.map->map);
             const tr::MapFile check = tr::readMap(data);
@@ -433,7 +453,9 @@ bool ClientWorkspace::saveMap() {
     cleanUndoDepth_ = 0;
     cleanReachable_ = true;
     saved_ = snapshot();
-    ctx_.setStatus(std::string("Saved") + (mapChanged ? " " + path.filename().string() : "") + (lightsChanged ? " lights.xml" : "") + (emittersChanged ? " audioemitters.xml" : "") + " in " +
+    pvsChanged_ = false;
+    pvsSavedVis_ = ctx_.map->vis;
+    ctx_.setStatus(std::string("Saved") + (mapChanged ? " " + path.filename().string() : "") + (visChanged ? " " + path.stem().string() + ".vis" : "") + (lightsChanged ? " lights.xml" : "") + (emittersChanged ? " audioemitters.xml" : "") + " in " +
                        path.parent_path().string() + ". The game reads them on the next map load.",
                    false);
     return true;
@@ -442,6 +464,13 @@ bool ClientWorkspace::saveMap() {
 void ClientWorkspace::revertMap() {
     if (!hasUnsavedChanges()) return;
     restore(saved_);
+    if (pvsChanged_) {
+        pvsQueue_.clear();
+        pvsQueueTotal_ = 0;
+        pvsRowStarted_ = false;
+        ctx_.map->vis = pvsSavedVis_;
+        pvsChanged_ = false;
+    }
     undoStack_.clear();
     redoStack_.clear();
     cleanUndoDepth_ = 0;
@@ -477,6 +506,8 @@ void ClientWorkspace::drawPanels() {
     drawEntitiesPanel();
     drawLightsPanel();
     drawSoundsPanel();
+    pvsStep();
+    drawPvsPanel();
     drawEntityPanel();
     OverviewLayers layers;
     layers.selection = &selection_;

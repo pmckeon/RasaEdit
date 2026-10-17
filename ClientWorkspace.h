@@ -1,9 +1,11 @@
 #pragma once
 
 #include "Panels.h"
+#include "PvsBuilder.h"
 #include "SoundPlayer.h"
 #include "Workspace.h"
 
+#include <memory>
 #include <vector>
 
 // Client-side content: the static map (entities from the .map file), models, textures and other assets.
@@ -17,7 +19,7 @@ public:
     explicit ClientWorkspace(EditorContext& ctx) : Workspace(ctx) {}
     void handleShortcuts() override;
     void drawEditMenu() override;
-    bool hasUnsavedChanges() const override { return !cleanReachable_ || undoStack_.size() != cleanUndoDepth_; }
+    bool hasUnsavedChanges() const override { return !cleanReachable_ || undoStack_.size() != cleanUndoDepth_ || pvsChanged_; }
     bool saveChanges() override { return !hasUnsavedChanges() || saveMap(); }
     bool saveMap();
     void revertMap();
@@ -25,6 +27,11 @@ public:
     void redo();
     void duplicateSelected();
     void addEmitter();                               // a sound emitter at the view centre's first surface, as Add places things
+    // PVS rows after edits (ClientPvs.cpp; public for the smoke test).
+    void pvsStep();                                  // this frame's share of a rebuild (between frames' draw lists)
+    std::vector<uint32_t> pvsAffectedRows() const;
+    void pvsStartRebuild(const std::vector<uint32_t>& rows);
+    void pvsClearRows(const std::vector<uint32_t>& rows);
     // ViewportEditHooks (map entities)
     bool editable() const override { return ctx_.map != nullptr; }
     tr::Vec3* selectedPosition() override;
@@ -86,6 +93,23 @@ private:
     unsigned editItem_ = 0;
     int32_t newClass_ = 0;
     std::vector<size_t> fitBounds_;                  // entities whose class changed: take the new model's bounds once it is loaded
+
+    // PVS (.vis) rows after map edits (ClientPvs.cpp). The rows were made for the entities in pvsBaseline_ (as loaded, then as of
+    // the last rebuild / clear); an entity that moved, changed or went away can uncover what it hid, so every row that sees a leaf
+    // its old box overlaps is affected (and, optionally, rows seeing its new box, which could only get tighter).
+    void drawPvsPanel();
+    std::vector<tr::MapEntity> pvsBaseline_;
+    std::unique_ptr<PvsBuilder> pvsBuilder_;
+    std::vector<uint32_t> pvsQueue_;                 // rows still to rebuild
+    size_t pvsQueueTotal_ = 0;
+    bool pvsRowStarted_ = false;
+    std::vector<tr::MapEntity> pvsRebuildBaseline_;  // the entities the running rebuild started from
+    bool pvsChanged_ = false;                        // rows changed since the .vis was loaded / saved
+    bool pvsIncludeNewBoxes_ = true;
+    bool pvsMerge_ = true;                           // OR rebuilt rows into the existing ones (never lose visibility)
+    size_t pvsViewsPerFrame_ = 60;
+    std::string pvsResult_;
+    tr::VisFile pvsSavedVis_;                        // as loaded / last saved (Revert)
 
     Selection selection_;
     std::vector<size_t> visibleEntities_;            // indices into the map's entities passing the filter

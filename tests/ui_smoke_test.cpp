@@ -846,6 +846,54 @@ int main() {
                 check(ok && saved && reread.size() == now && backup && (before == 0 || std::fabs(reread[0].position.x - moved.x) < 1e-3f),
                       "sound emitter moved, duplicated, added, saved to a copy and read back");
             }
+            // PVS: deleting the largest drawn entity affects rows that saw it; three of them rebuilt (merged into the shipped rows, so
+            // nothing visible before is lost); the .vis saves with the map (copied into the test folder first) and reads back.
+            {
+                fs::path visName = fs::path(ctx.map->name + ".vis");
+                for (const auto& f : fs::directory_iterator(realFolder, ec))
+                    if (tr::toLowerAscii(f.path().filename().string()) == tr::toLowerAscii(visName.string())) fs::copy_file(f.path(), copyFolder / f.path().filename(), ec), visName = f.path().filename();
+                ctx.scene->loadPending(1e9);
+                client.pvsBuilder_ = std::make_unique<PvsBuilder>(ctx.device, *ctx.scene, *ctx.map, ctx.map->vis);
+                size_t largest = SIZE_MAX;
+                float largestSize = 0;
+                for (size_t k = 0; k < ctx.map->map.entities.size(); ++k) {
+                    if (!ctx.scene->entityHasModel(k)) continue;
+                    const tr::Bounds b = PvsBuilder::entityWorldBox(ctx.map->map.entities[k]);
+                    const float size = (b.max.x - b.min.x) + (b.max.y - b.min.y) + (b.max.z - b.min.z);
+                    if (size > largestSize && size < 400.0f) { largestSize = size; largest = k; }
+                }
+                const tr::VisFile shipped = ctx.map->vis;
+                bool ok = largest != SIZE_MAX;
+                std::vector<uint32_t> affected;
+                if (ok) {
+                    client.selection_ = Selection{SelectionKind::MapEntity, largest};
+                    client.deleteSelected();
+                    affected = client.pvsAffectedRows();
+                    ok = !affected.empty();
+                }
+                std::vector<uint32_t> some(affected.begin(), affected.begin() + std::min<size_t>(3, affected.size()));
+                bool superset = true;
+                if (ok) {
+                    client.pvsViewsPerFrame_ = 100000;
+                    client.pvsStartRebuild(some);
+                    for (int guard = 0; guard < 100 && !client.pvsQueue_.empty(); ++guard) client.pvsStep();
+                    for (uint32_t r : some)
+                        for (size_t w = 0; w < shipped.rows[r].words.size(); ++w)
+                            if ((shipped.rows[r].words[w] & ~ctx.map->vis.rows[r].words[w]) != 0) superset = false;
+                }
+                frames(editor, device, 2);
+                const bool saved = ok && client.saveMap();
+                tr::VisFile reread;
+                try { reread = tr::readVis((copyFolder / visName).string()); } catch (const std::exception&) {}
+                bool same = reread.rows.size() == ctx.map->vis.rows.size();
+                for (size_t r = 0; same && r < reread.rows.size(); ++r) same = reread.rows[r].words == ctx.map->vis.rows[r].words;
+                fs::path visBackup = copyFolder / visName;
+                visBackup += ".rasaedit-original";
+                std::printf("      pvs: deleted entity %zu (box size %.0f m), %zu rows affected, %zu rebuilt, superset %d, saved %d, read back %d\n", largest, largestSize,
+                            affected.size(), some.size(), superset ? 1 : 0, saved ? 1 : 0, same ? 1 : 0);
+                check(ok && superset && saved && same && fs::exists(visBackup, ec) && !client.pvsChanged_,
+                      "PVS rows affected by a deletion, rebuilt merged, saved with the map and read back");
+            }
             ctx.map->folder = realFolder;
         }
 

@@ -1156,10 +1156,11 @@ std::vector<uint32_t> inflatePvsRow(const uint8_t* src, size_t size, size_t word
     zs.avail_in = uInt(size);
     zs.next_out = out.data();
     zs.avail_out = uInt(out.size());
-    inflate(&zs, Z_FINISH);
+    const int rc = inflate(&zs, Z_FINISH);
     const size_t produced = out.size() - zs.avail_out;
     inflateEnd(&zs);
-    damaged = produced != out.size();
+    // Short output, or a stream cut off before its end (112 rows of characterselection.vis: their bits arrive, the end does not).
+    damaged = produced != out.size() || rc != Z_STREAM_END;
     std::vector<uint32_t> words(wordCount);
     for (size_t k = 0; k < wordCount; ++k) words[k] = loadU32(out.data() + k * 4);
     return words;
@@ -1215,6 +1216,7 @@ VisFile readVis(const Bytes& data) {
             const size_t start = r.tell();
             r.skip(row.dataSize);
             const uint8_t* src = data.data() + start;
+            row.stored.assign(src, src + row.dataSize);
             if (row.compressed) {
                 row.words = inflatePvsRow(src, row.dataSize, wordCount, row.damaged);
             } else {
@@ -1230,7 +1232,77 @@ VisFile readVis(const Bytes& data) {
         }
     }
     v.bytesConsumed = r.tell();                // shipped files have one more byte the client never reads
+    v.tail.assign(data.begin() + std::ptrdiff_t(v.hasTrailingFlag ? v.bytesConsumed - 1 : v.bytesConsumed), data.end());
     return v;
+}
+
+Bytes writeVis(const VisFile& v) {
+    ByteWriter w;
+    w.u8(v.streamFlags);
+    w.u32(v.containerVersion);
+    w.u8(v.hasTree ? 1 : 0);
+    if (v.hasTree) {
+        w.u32(v.treeVersion);
+        w.u32(v.nodeFormatVersion);
+        w.u32(uint32_t(v.nodes.size()));
+        for (const VisNode& n : v.nodes) {
+            w.u32(n.index);
+            w.i32(n.parent);
+            w.i32(n.child0);
+            w.i32(n.child1);
+            w.u32(n.leafIndex);
+            w.vec3(n.bounds.min);
+            w.vec3(n.bounds.max);
+            w.u32(n.splitAxis);
+            w.f32(n.planeD);
+        }
+    }
+    if (!v.hasPvs) {
+        // A file without a PVS ends after its flag (none shipped).
+        if (v.fileSize > v.bytesConsumed || v.bytesConsumed > 0) w.u8(0);
+        return w.out;
+    }
+    w.u8(1);
+    w.u32(v.pvsVersion);
+    w.u32(v.leafCount);
+    for (const VisPvsRow& row : v.rows) {
+        w.u32(uint32_t(row.stored.size()));
+        const uint64_t t = row.timestamp;
+        w.raw(&t, 8);
+        if (v.pvsVersion == 2) w.u32(row.compressed ? 1 : 0);
+        w.bytes(row.stored);
+    }
+    w.bytes(v.tail);
+    return w.out;
+}
+
+void setPvsRow(VisFile& vis, uint32_t leaf, const std::vector<uint32_t>& words, uint64_t timestamp) {
+    if (leaf >= vis.rows.size()) return;
+    VisPvsRow& row = vis.rows[leaf];
+    const size_t wordCount = (size_t(vis.leafCount) + 31) / 32;
+    row.words.assign(wordCount, 0);
+    for (size_t k = 0; k < wordCount && k < words.size(); ++k) row.words[k] = words[k];
+    Bytes raw(wordCount * 4);
+    for (size_t k = 0; k < wordCount; ++k) std::memcpy(raw.data() + k * 4, &row.words[k], 4);
+    uLongf size = compressBound(uLong(raw.size()));
+    row.stored.resize(size);
+    if (compress2(row.stored.data(), &size, raw.data(), uLong(raw.size()), 1) != Z_OK) throw FormatError("vis: zlib compression failed");
+    row.stored.resize(size);
+    row.compressed = true;
+    // Stored as it is when compressing makes it larger (497 shipped rows: "compressed" 0, the row's own size; rows that compress to exactly their size stay compressed).
+    if (row.stored.size() > raw.size()) {
+        row.stored = raw;
+        row.compressed = false;
+    }
+    row.dataSize = uint32_t(row.stored.size());
+    row.damaged = false;
+    row.timestamp = timestamp;
+}
+
+void clearPvsRow(VisFile& vis, uint32_t leaf) {
+    if (leaf >= vis.rows.size()) return;
+    VisPvsRow& row = vis.rows[leaf];
+    row = VisPvsRow{};                         // as the shipped rows never computed: size 0, timestamp 0, "compressed" 0
 }
 
 VisFile readVis(const std::string& path) { return readVis(readFile(path)); }

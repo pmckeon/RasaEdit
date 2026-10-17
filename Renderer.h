@@ -278,6 +278,22 @@ public:
     static constexpr float shadowDepth = 400.0f;
     static constexpr float shadowAhead = 27.7f;     // centre: metres ahead of the camera, horizontally
     void record(SDL_GPUCommandBuffer* commands);
+
+    // PVS builder (PvsBuilder.h, shaders/pvs.hlsl): one view of the game's BuildPVS. setPvsTree uploads the .vis BSP and sizes the
+    // per-leaf buffers; recordPvsView draws the queued opaque draws (the shadow pass's set: lit, triangles - terrain holes and
+    // alpha cut-outs discard) depth-only into the depth target, back faces culled except two-sided pieces, then counts per leaf the
+    // pixels whose ray enters its box in front of the scene and sets the row bit of every leaf over the threshold (26, the game's
+    // occlusion query test). The row accumulates over views until clearPvsRow; downloadPvsRow waits for the GPU.
+    struct PvsNodeGpu {
+        float minX, minY, minZ, split;
+        float maxX, maxY, maxZ, pad;
+        int32_t axis, child0, child1, leaf;
+    };
+    void setPvsTree(const std::vector<PvsNodeGpu>& nodes, uint32_t leafCount);
+    void recordPvsView(const Mat4& inverseViewProjection, const tr::Vec3& eye, uint32_t threshold);
+    void clearPvsRow();
+    std::vector<uint32_t> downloadPvsRow();
+
     size_t queuedDraws() const { return draws_.size() + translucentDraws_.size() + additiveDraws_.size() + particleBatches_.size(); }
     size_t queuedParticleVertices() const { return particleVertices_.size(); }
 
@@ -432,4 +448,20 @@ private:
     std::vector<DrawItem> translucentDraws_;
     std::vector<DrawItem> additiveDraws_;
     std::vector<DrawItem> skyDraws_;
+
+    // PVS builder state (created by setPvsTree).
+    SDL_GPUGraphicsPipeline* pvsDepthPipeline_ = nullptr;          // back faces culled
+    SDL_GPUGraphicsPipeline* pvsDepthTwoSidedPipeline_ = nullptr;
+    SDL_GPUComputePipeline* pvsCountPipeline_ = nullptr;
+    SDL_GPUComputePipeline* pvsMarkPipeline_ = nullptr;
+    SDL_GPUBuffer* pvsNodes_ = nullptr;
+    SDL_GPUBuffer* pvsCounts_ = nullptr;
+    SDL_GPUBuffer* pvsBits_ = nullptr;
+    SDL_GPUTransferBuffer* pvsDownload_ = nullptr;
+    uint32_t pvsLeafCount_ = 0;
+    void createPvsPipelines();
+    SDL_GPUComputePipeline* createComputePipeline(const unsigned char* dxil, size_t dxilSize, const unsigned char* spirv, size_t spirvSize,
+                                                  const char* entryPoint, uint32_t samplers, uint32_t readOnlyBuffers, uint32_t readWriteBuffers,
+                                                  uint32_t threadsX, uint32_t threadsY);
+    void uploadBuffer(SDL_GPUBuffer* buffer, const void* data, uint32_t size);
 };

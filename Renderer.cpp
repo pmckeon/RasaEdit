@@ -342,6 +342,13 @@ Renderer::~Renderer() {
     if (frameCopy_) SDL_ReleaseGPUTexture(device_, frameCopy_);
     for (SDL_GPUShader* s : {sceneVertex_, sceneFragment_, terrainVertex_, terrainFragment_, refractFragment_})
         if (s) SDL_ReleaseGPUShader(device_, s);
+    for (SDL_GPUGraphicsPipeline* p : {pvsDepthPipeline_, pvsDepthTwoSidedPipeline_})
+        if (p) SDL_ReleaseGPUGraphicsPipeline(device_, p);
+    for (SDL_GPUComputePipeline* p : {pvsCountPipeline_, pvsMarkPipeline_})
+        if (p) SDL_ReleaseGPUComputePipeline(device_, p);
+    for (SDL_GPUBuffer* b : {pvsNodes_, pvsCounts_, pvsBits_})
+        if (b) SDL_ReleaseGPUBuffer(device_, b);
+    if (pvsDownload_) SDL_ReleaseGPUTransferBuffer(device_, pvsDownload_);
 }
 
 SDL_GPUShader* Renderer::createShader(const unsigned char* dxil, size_t dxilSize, const unsigned char* spirv, size_t spirvSize,
@@ -1183,4 +1190,233 @@ void Renderer::recordItem(SDL_GPUCommandBuffer*& commands, SDL_GPURenderPass*& p
         SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof u);
     }
     SDL_DrawGPUIndexedPrimitives(pass, item.mesh->indexCount, 1, 0, 0, 0);
+}
+
+// ------------------------------------------------------------------------------------------
+// PVS builder views (see Renderer.h / PvsBuilder.h)
+// ------------------------------------------------------------------------------------------
+SDL_GPUComputePipeline* Renderer::createComputePipeline(const unsigned char* dxil, size_t dxilSize, const unsigned char* spirv, size_t spirvSize,
+                                                        const char* entryPoint, uint32_t samplers, uint32_t readOnlyBuffers, uint32_t readWriteBuffers,
+                                                        uint32_t threadsX, uint32_t threadsY) {
+    const SDL_GPUShaderFormat formats = SDL_GetGPUShaderFormats(device_);
+    SDL_GPUComputePipelineCreateInfo info = {};
+    if (formats & SDL_GPU_SHADERFORMAT_DXIL) {
+        info.code = dxil;
+        info.code_size = dxilSize;
+        info.format = SDL_GPU_SHADERFORMAT_DXIL;
+    } else {
+        info.code = spirv;
+        info.code_size = spirvSize;
+        info.format = SDL_GPU_SHADERFORMAT_SPIRV;
+    }
+    info.entrypoint = entryPoint;
+    info.num_samplers = samplers;
+    info.num_readonly_storage_buffers = readOnlyBuffers;
+    info.num_readwrite_storage_buffers = readWriteBuffers;
+    info.num_uniform_buffers = 1;
+    info.threadcount_x = threadsX;
+    info.threadcount_y = threadsY;
+    info.threadcount_z = 1;
+    SDL_GPUComputePipeline* pipeline = SDL_CreateGPUComputePipeline(device_, &info);
+    if (!pipeline) fail("SDL_CreateGPUComputePipeline");
+    return pipeline;
+}
+
+void Renderer::createPvsPipelines() {
+    if (pvsDepthPipeline_) return;
+    // The shadow pipeline's layout (depth only, psShadow: alpha cut-outs and terrain holes discard) without its depth bias; back
+    // faces culled as PalGlobalEffect's CCW baseline does in the game (two-sided pieces: the four CULLMODE NONE effects).
+    SDL_GPUVertexBufferDescription buffer = {};
+    buffer.slot = 0;
+    buffer.pitch = sizeof(MeshVertex);
+    buffer.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
+    SDL_GPUVertexAttribute attributes[8] = {};
+    const uint32_t offsets[8] = {uint32_t(offsetof(MeshVertex, positionX)), uint32_t(offsetof(MeshVertex, normalX)), uint32_t(offsetof(MeshVertex, colour)),
+                                 uint32_t(offsetof(MeshVertex, texU)), uint32_t(offsetof(MeshVertex, texU1)), uint32_t(offsetof(MeshVertex, tangentX)),
+                                 uint32_t(offsetof(MeshVertex, binormalX)), uint32_t(offsetof(MeshVertex, texU2))};
+    const SDL_GPUVertexElementFormat formats[8] = {SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM,
+                                                   SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3,
+                                                   SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3, SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2};
+    for (uint32_t k = 0; k < 8; ++k) {
+        attributes[k].location = k;
+        attributes[k].format = formats[k];
+        attributes[k].offset = offsets[k];
+    }
+    for (int culled = 0; culled < 2; ++culled) {
+        SDL_GPUGraphicsPipelineCreateInfo info = {};
+        info.vertex_shader = sceneVertex_;
+        info.fragment_shader = shadowFragment_;
+        info.vertex_input_state.vertex_buffer_descriptions = &buffer;
+        info.vertex_input_state.num_vertex_buffers = 1;
+        info.vertex_input_state.vertex_attributes = attributes;
+        info.vertex_input_state.num_vertex_attributes = 8;
+        info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+        info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
+        info.rasterizer_state.cull_mode = culled ? SDL_GPU_CULLMODE_BACK : SDL_GPU_CULLMODE_NONE;
+        info.rasterizer_state.front_face = SDL_GPU_FRONTFACE_CLOCKWISE;
+        info.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
+        info.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_LESS_OR_EQUAL;
+        info.depth_stencil_state.enable_depth_test = true;
+        info.depth_stencil_state.enable_depth_write = true;
+        info.target_info.num_color_targets = 0;
+        info.target_info.depth_stencil_format = depthFormat_;
+        info.target_info.has_depth_stencil_target = true;
+        SDL_GPUGraphicsPipeline* pipeline = SDL_CreateGPUGraphicsPipeline(device_, &info);
+        if (!pipeline) fail("SDL_CreateGPUGraphicsPipeline (PVS depth)");
+        (culled ? pvsDepthPipeline_ : pvsDepthTwoSidedPipeline_) = pipeline;
+    }
+    pvsCountPipeline_ = createComputePipeline(pvsCountDxil, sizeof pvsCountDxil, pvsCountSpirv, sizeof pvsCountSpirv, "csCount", 1, 1, 2, 8, 8);
+    pvsMarkPipeline_ = createComputePipeline(pvsMarkDxil, sizeof pvsMarkDxil, pvsMarkSpirv, sizeof pvsMarkSpirv, "csMark", 0, 0, 2, 64, 1);
+}
+
+void Renderer::uploadBuffer(SDL_GPUBuffer* buffer, const void* data, uint32_t size) {
+    SDL_GPUTransferBufferCreateInfo transferInfo = {};
+    transferInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+    transferInfo.size = size;
+    SDL_GPUTransferBuffer* transfer = SDL_CreateGPUTransferBuffer(device_, &transferInfo);
+    if (!transfer) fail("SDL_CreateGPUTransferBuffer (PVS)");
+    void* mapped = SDL_MapGPUTransferBuffer(device_, transfer, false);
+    if (data) std::memcpy(mapped, data, size);
+    else std::memset(mapped, 0, size);
+    SDL_UnmapGPUTransferBuffer(device_, transfer);
+    SDL_GPUCommandBuffer* commands = SDL_AcquireGPUCommandBuffer(device_);
+    if (!commands) fail("SDL_AcquireGPUCommandBuffer");
+    SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(commands);
+    SDL_GPUTransferBufferLocation source = {};
+    source.transfer_buffer = transfer;
+    SDL_GPUBufferRegion destination = {};
+    destination.buffer = buffer;
+    destination.size = size;
+    SDL_UploadToGPUBuffer(copy, &source, &destination, false);
+    SDL_EndGPUCopyPass(copy);
+    SDL_SubmitGPUCommandBuffer(commands);
+    SDL_ReleaseGPUTransferBuffer(device_, transfer);
+}
+
+void Renderer::setPvsTree(const std::vector<PvsNodeGpu>& nodes, uint32_t leafCount) {
+    createPvsPipelines();
+    for (SDL_GPUBuffer** b : {&pvsNodes_, &pvsCounts_, &pvsBits_})
+        if (*b) { SDL_ReleaseGPUBuffer(device_, *b); *b = nullptr; }
+    if (pvsDownload_) { SDL_ReleaseGPUTransferBuffer(device_, pvsDownload_); pvsDownload_ = nullptr; }
+    pvsLeafCount_ = leafCount;
+    const uint32_t nodeBytes = uint32_t(std::max<size_t>(nodes.size(), 1) * sizeof(PvsNodeGpu));
+    const uint32_t countBytes = std::max<uint32_t>(leafCount, 1) * 4;
+    const uint32_t wordBytes = ((std::max<uint32_t>(leafCount, 1) + 31) / 32) * 4;
+    SDL_GPUBufferCreateInfo info = {};
+    info.usage = SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ;
+    info.size = nodeBytes;
+    pvsNodes_ = SDL_CreateGPUBuffer(device_, &info);
+    info.usage = SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_READ | SDL_GPU_BUFFERUSAGE_COMPUTE_STORAGE_WRITE;
+    info.size = countBytes;
+    pvsCounts_ = SDL_CreateGPUBuffer(device_, &info);
+    info.size = wordBytes;
+    pvsBits_ = SDL_CreateGPUBuffer(device_, &info);
+    SDL_GPUTransferBufferCreateInfo transferInfo = {};
+    transferInfo.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+    transferInfo.size = wordBytes;
+    pvsDownload_ = SDL_CreateGPUTransferBuffer(device_, &transferInfo);
+    if (!pvsNodes_ || !pvsCounts_ || !pvsBits_ || !pvsDownload_) fail("PVS buffers");
+    if (!nodes.empty()) uploadBuffer(pvsNodes_, nodes.data(), nodeBytes);
+    uploadBuffer(pvsCounts_, nullptr, countBytes);
+    uploadBuffer(pvsBits_, nullptr, wordBytes);
+}
+
+void Renderer::clearPvsRow() {
+    if (pvsBits_) uploadBuffer(pvsBits_, nullptr, ((std::max<uint32_t>(pvsLeafCount_, 1) + 31) / 32) * 4);
+}
+
+namespace {
+struct PvsUniforms {
+    Mat4 inverseViewProjection;
+    Vec4f eye;
+    uint32_t width, height, leafCount, threshold;
+};
+}
+
+void Renderer::recordPvsView(const Mat4& inverseViewProjection, const tr::Vec3& eye, uint32_t threshold) {
+    if (!depth_ || !pvsCountPipeline_ || !pvsNodes_) return;
+    SDL_GPUCommandBuffer* commands = SDL_AcquireGPUCommandBuffer(device_);
+    if (!commands) fail("SDL_AcquireGPUCommandBuffer");
+    samplerDescriptors_ = viewDescriptors_ = 0;
+    uploadBones(commands);
+    SDL_GPUDepthStencilTargetInfo depth = {};
+    depth.texture = depth_;
+    depth.clear_depth = 1.0f;
+    depth.load_op = SDL_GPU_LOADOP_CLEAR;
+    depth.store_op = SDL_GPU_STOREOP_STORE;
+    depth.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
+    depth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
+    depth.cycle = true;
+    SDL_GPURenderPass* pass = beginPass(commands, nullptr, &depth);
+    SDL_GPUGraphicsPipeline* bound = nullptr;
+    for (const DrawItem& item : draws_) {
+        if (item.mesh->lines || !item.lit) continue;
+        if (reserveDescriptors(commands, pass, 1, 2)) bound = nullptr;
+        SDL_GPUGraphicsPipeline* pipeline = cullBackFaces && !item.twoSided ? pvsDepthPipeline_ : pvsDepthTwoSidedPipeline_;
+        if (pipeline != bound) {
+            SDL_BindGPUGraphicsPipeline(pass, pipeline);
+            bound = pipeline;
+        }
+        SDL_GPUBufferBinding vertexBinding = {item.mesh->vertices, 0};
+        SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
+        SDL_GPUBufferBinding indexBinding = {item.mesh->indices, 0};
+        SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_32BIT);
+        const VertexUniforms vertexUniforms{viewProjection_, item.model, item.skinVertices ? 1u : 0u, item.boneBase, item.skinNormals ? 1u : 0u, 0};
+        SDL_PushGPUVertexUniformData(commands, 0, &vertexUniforms, sizeof vertexUniforms);
+        bindSkin(pass, item.skinVertices);
+        const bool alphaTest = !item.terrain && item.alphaTest;
+        const SDL_GPUTextureSamplerBinding sampler = {alphaTest && item.texture ? item.texture : white_, linearSampler_};
+        SDL_BindGPUFragmentSamplers(pass, 0, &sampler, 1);
+        const Vec4f options{alphaTest ? item.alphaReference : 0.0f, item.terrain ? 1.0f : 0.0f, 0, 0};
+        SceneFragmentUniforms u{Vec4f{1, 1, 1, 1}, towardsLight_, options, Vec4f{0, 0, 0, 0},
+                                lightingUniforms(lighting_, cameraPosition_, shadowMatrix_, false, float(shadowSize))};
+        SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof u);
+        SDL_DrawGPUIndexedPrimitives(pass, item.mesh->indexCount, 1, 0, 0, 0);
+    }
+    SDL_EndGPURenderPass(pass);
+
+    const PvsUniforms uniforms{inverseViewProjection, Vec4f{eye.x, eye.y, eye.z, 1}, width_, height_, pvsLeafCount_, threshold};
+    SDL_GPUStorageBufferReadWriteBinding writable[2] = {};
+    writable[0].buffer = pvsCounts_;
+    writable[1].buffer = pvsBits_;
+    SDL_GPUComputePass* compute = SDL_BeginGPUComputePass(commands, nullptr, 0, writable, 2);
+    SDL_BindGPUComputePipeline(compute, pvsCountPipeline_);
+    const SDL_GPUTextureSamplerBinding depthBinding = {depth_, pointSampler_};
+    SDL_BindGPUComputeSamplers(compute, 0, &depthBinding, 1);
+    SDL_BindGPUComputeStorageBuffers(compute, 0, &pvsNodes_, 1);
+    SDL_PushGPUComputeUniformData(commands, 0, &uniforms, sizeof uniforms);
+    SDL_DispatchGPUCompute(compute, (width_ + 7) / 8, (height_ + 7) / 8, 1);
+    SDL_EndGPUComputePass(compute);
+    // A second pass sees every count of the first (SDL synchronises read-write storage between compute passes).
+    compute = SDL_BeginGPUComputePass(commands, nullptr, 0, writable, 2);
+    SDL_BindGPUComputePipeline(compute, pvsMarkPipeline_);
+    SDL_PushGPUComputeUniformData(commands, 0, &uniforms, sizeof uniforms);
+    SDL_DispatchGPUCompute(compute, (pvsLeafCount_ + 63) / 64, 1, 1);
+    SDL_EndGPUComputePass(compute);
+    SDL_SubmitGPUCommandBuffer(commands);
+}
+
+std::vector<uint32_t> Renderer::downloadPvsRow() {
+    const uint32_t words = (std::max<uint32_t>(pvsLeafCount_, 1) + 31) / 32;
+    std::vector<uint32_t> out(words, 0);
+    if (!pvsBits_ || !pvsDownload_) return out;
+    SDL_GPUCommandBuffer* commands = SDL_AcquireGPUCommandBuffer(device_);
+    if (!commands) fail("SDL_AcquireGPUCommandBuffer");
+    SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(commands);
+    SDL_GPUBufferRegion source = {};
+    source.buffer = pvsBits_;
+    source.size = words * 4;
+    SDL_GPUTransferBufferLocation destination = {};
+    destination.transfer_buffer = pvsDownload_;
+    SDL_DownloadFromGPUBuffer(copy, &source, &destination);
+    SDL_EndGPUCopyPass(copy);
+    SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(commands);
+    if (fence) {
+        SDL_WaitForGPUFences(device_, true, &fence, 1);
+        SDL_ReleaseGPUFence(device_, fence);
+    }
+    const void* mapped = SDL_MapGPUTransferBuffer(device_, pvsDownload_, false);
+    if (mapped) std::memcpy(out.data(), mapped, words * 4);
+    SDL_UnmapGPUTransferBuffer(device_, pvsDownload_);
+    return out;
 }
