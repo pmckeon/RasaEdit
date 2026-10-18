@@ -1773,6 +1773,27 @@ int main(int argc, char** argv) {
                 }
             }
         }
+        // RASA_SKYFADEFROM=x,y,z with RASA_SKYFADEAT=<s>: the camera starts at the point (outside a region), the sky is settled there,
+        // then the camera goes to the frame's position and the sky clock runs for <s> seconds: the render shows the cross-fade at that time.
+        if (const char* from = envValue("RASA_SKYFADEFROM")) {
+            float fx = 0, fy = 0, fz = 0;
+            std::sscanf(from, "%f,%f,%f", &fx, &fy, &fz);
+            const tr::Vec3 target = scene.camera().position;
+            scene.camera().position = tr::Vec3{fx, fy, fz};
+            for (int k = 0; k < 30; ++k) scene.advanceLights(0.1f);
+            scene.camera().position = target;
+            const float seconds = envValue("RASA_SKYFADEAT") ? float(std::atof(envValue("RASA_SKYFADEAT"))) : 0.0f;
+            // RASA_SKYFADEIN=x,y,z: the point the region test uses while the clock runs (the render camera is restored after).
+            tr::Vec3 inside = target;
+            if (const char* in = envValue("RASA_SKYFADEIN")) std::sscanf(in, "%f,%f,%f", &inside.x, &inside.y, &inside.z);
+            scene.camera().position = inside;
+            for (int k = 0; k < int(seconds * 10.0f + 0.5f); ++k) scene.advanceLights(0.1f);
+            scene.camera().position = target;
+            std::printf("sky fade at +%.1f s:", seconds);
+            for (const SceneView::SkyWeight& w : scene.skyWeights())
+                std::printf(" %s x%.2f", scene.skies()[w.index].name.c_str(), w.weight);
+            std::printf("\n");
+        }
         scene.advanceParticles(0.0f);
         for (float t = 0; t < particleSeconds; t += 1.0f / 30.0f) scene.advanceParticles(1.0f / 30.0f);
         std::printf("particle systems running: %zu, %zu particles\n", scene.liveParticleSystems(), scene.liveParticles());
