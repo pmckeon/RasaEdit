@@ -2470,6 +2470,45 @@ std::vector<std::string> SceneView::debugServerBodyEffects() const {
     return lines;
 }
 
+// The accessories drawn on server placements (a teleporter's state-56 accessories, e.g. the waypoint column): per accessory model
+// whether it is animated, its material tracks, and per piece the forward-phase flag and the UV track each TexCoordTransform uses.
+std::vector<std::string> SceneView::debugServerAccessories() const {
+    std::vector<std::string> lines;
+    for (size_t k = 0; k < serverPlacements_.size(); ++k) {
+        const ServerPlacement& s = serverPlacements_[k];
+        if (s.accessories.empty()) continue;
+        char head[200];
+        std::snprintf(head, sizeof head, "server placement %zu (kind %d) at %.1f %.1f %.1f: %zu accessories", k,
+                      int(s.selection.kind), s.position.x, s.position.y, s.position.z, s.accessories.size());
+        lines.push_back(head);
+        for (size_t a = 0; a < s.accessories.size(); ++a) {
+            const Model* m = s.accessories[a];
+            if (!m) { lines.push_back("  accessory null"); continue; }
+            char line[240];
+            std::snprintf(line, sizeof line, "  accessory %zu: loaded %d animated %d materialAnimated %d pieces %zu material tracks %zu duration %.2f s",
+                          a, int(m->loaded), int(m->animated), int(m->materialAnimated), m->pieces.size(),
+                          m->animation.materialTracks.size(), m->animation.duration);
+            lines.push_back(line);
+            for (size_t p = 0; p < m->pieces.size(); ++p) {
+                const ModelPiece& piece = m->pieces[p];
+                char pl[200];
+                std::snprintf(pl, sizeof pl, "    piece %zu: forwardLit %d uvTrack %d %d %d", p, int(piece.forwardLit),
+                              piece.uvTrack0, piece.uvTrack1, piece.uvTrack2);
+                lines.push_back(pl);
+                // The UV transforms the animation gives this piece at the current light time (what the draw uses).
+                UvTransforms uv{};
+                const bool animated = animatedUvTransforms(*m, piece, lightTime, uv);
+                char ul[240];
+                std::snprintf(ul, sizeof ul, "      t %.2f s: animated %d  transform0 u (%.4f %.4f %.4f) v (%.4f %.4f %.4f)  transform1 u (%.4f %.4f %.4f) v (%.4f %.4f %.4f)",
+                              lightTime, int(animated), uv.u0.x, uv.u0.y, uv.u0.z, uv.v0.x, uv.v0.y, uv.v0.z,
+                              uv.u1.x, uv.u1.y, uv.u1.z, uv.v1.x, uv.v1.y, uv.v1.z);
+                lines.push_back(ul);
+            }
+        }
+    }
+    return lines;
+}
+
 std::vector<std::string> SceneView::debugServerPose(float x, float z) {
     std::vector<std::string> lines;
     size_t best = serverPlacements_.size();

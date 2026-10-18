@@ -298,6 +298,8 @@ int main(int argc, char** argv) {
             if (envValue("RASA_SHOWLIGHT")) scene.showLightBuffer = true;
             if (envValue("RASA_NOENV")) scene.environmentMaps = false;
             if (const char* lt = envValue("RASA_LIGHTTIME")) scene.lightTime = float(std::atof(lt));   // light modifier time, s
+            // RASA_LIGHTSTEPS=<seconds>: advance the clock frame by frame as the app does (advanceLights at 30 Hz) instead of setting it.
+            if (const char* ls = envValue("RASA_LIGHTSTEPS")) for (int k = 0; k < int(std::atof(ls) * 30.0f); ++k) scene.advanceLights(1.0f / 30.0f);
             if (envValue("RASA_NOLIGHTMODS")) scene.animateLights = false;
             if (envValue("RASA_SHOWNORMALS")) scene.debugView = 2;                  // like the game's /dl_shownormals
             if (envValue("RASA_SHOWSPEC")) scene.debugView = 3;
@@ -1775,6 +1777,8 @@ int main(int argc, char** argv) {
         }
         if (envValue("RASA_LISTSERVEREFFECTS"))       // server objects whose models bring their own lights / particle systems
             for (const std::string& line : scene.debugServerBodyEffects()) std::printf("%s\n", line.c_str());
+        if (envValue("RASA_ACCESSORIES"))            // RASA_ACCESSORIES=1: the accessories drawn on server placements (teleporter columns)
+            for (const std::string& line : scene.debugServerAccessories()) std::printf("%s\n", line.c_str());
         for (const auto& e : scene.textureErrors()) std::printf("texture error: %s: %s\n", e.first.c_str(), e.second.c_str());
         // RASA_SELECT=<map entity index>: draw that entity highlighted, as the editor shows a selection.
         Selection highlighted{};
