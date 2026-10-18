@@ -292,7 +292,7 @@ float4 psMain(VertexOutput input) : SV_Target0
             sf.hemiTop = hemiTop.rgb;
             sf.hemiBottom = hemiBottom.rgb;
             sf.sunVisibility = 1.0;
-            rgb *= skyLight(nf, sf) + extraSkyLight(nf, extraTowards, extraFront, extraBack, true) + localLights(input.world, nf, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner, localRotation, globeMaps, globeSampler, cookieMaps, cookieSampler, shadowAtlas, localShadowSlots, localShadowBase);
+            rgb *= skyLight(nf, sf) + extraSkyLight(nf, extraTowards, extraFront, extraBack, true) + localLights(input.world, nf, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner, localRotation, globeMaps, globeSampler, cookieMaps, cookieSampler, shadowAtlas, localShadowSlots, localShadowBase, 0.0);
         }
         const float3 added = rgb * texel.a * input.colour.a * (options.z > 1.5 ? tint.a : 1.0);
         const float3 black = applyFog(added, length(cameraPosition.xyz - input.world), float4(0, 0, 0, fogColour.w), fogRange);
@@ -375,9 +375,18 @@ float4 psMain(VertexOutput input) : SV_Target0
     s.sunVisibility = options.y > 1.5 ? 1.0 : sunShadow(shadowMap, shadowSampler, shadowMatrix, shadowParams, shadowExtra, cameraPosition.xyz, input.world, n);
     // Fading forward pieces (trBits 0x10): the effect's forward vertex shader lights with the hemi and directional sky light only.
     const int localLightCount = (trBits & 0x10) ? 0 : (int)localCount.x;
-    const float3 light = skyLight(n, s) + extraSkyLight(n, extraTowards, extraFront, extraBack, options.y > 1.5) + localLights(input.world, n, localLightCount, localPosition, localColour, localSpot, localSpotInner, localRotation, globeMaps, globeSampler, cookieMaps, cookieSampler, shadowAtlas, localShadowSlots, localShadowBase);
+    // The pixel's specular power as the G-buffer holds it (Pal: gloss map r; TR: saturate(MatSpecular.x); else 0) - it picks
+    // TRPlaneLight's diffuse branch.
+    const float specPower = material.y > 0.5 ? glossTexture.Sample(glossSampler, input.uv).r : (trBits & 0x4) ? saturate(trSpecular.x) : 0.0;
+    const float3 light = skyLight(n, s) + extraSkyLight(n, extraTowards, extraFront, extraBack, options.y > 1.5) + localLights(input.world, n, localLightCount, localPosition, localColour, localSpot, localSpotInner, localRotation, globeMaps, globeSampler, cookieMaps, cookieSampler, shadowAtlas, localShadowSlots, localShadowBase, specPower);
     if (fogRange.z > 0.5)
+    {
+        // The game's light buffer holds deferred lights only: translucent (forward) pieces - the goo pool's distortion and other
+        // Translucent-phase surfaces - are not in it (their forward pass is after the composite), so they add no light here.
+        if (options.y > 1.5)
+            return float4(0, 0, 0, 0);
         return float4(light * 0.2, 1.0);       // the game's light buffer (x OO_LIGHT_MULTIPLIER), as /dl_showlight shows it
+    }
     if (fogRange.w > 1.5)
     {
         if (options.y > 1.5)
@@ -403,7 +412,7 @@ float4 psMain(VertexOutput input) : SV_Target0
                 lit += extraFront[k].rgb * specularFactor(n, v, extraTowards[k].xyz, gloss.r, gloss.g);
         lit += hemiSpecular(n, v, gloss.r, gloss.g, hemiTop.rgb);
         lit += sunFront.rgb * specularFactor(n, v, s.towardsLight, gloss.r, gloss.g) * s.sunVisibility +
-               localSpecular(input.world, n, v, gloss.r, gloss.g, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner, shadowAtlas, localShadowSlots, localShadowBase);
+               localSpecular(input.world, n, v, gloss.r, gloss.g, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner, localRotation, shadowAtlas, localShadowSlots, localShadowBase);
     }
     // Alpha: only translucent draws blend with it. Opaque draws keep it 1 - the viewport image is composited with alpha.
     const float blendAlpha = (trBits & 0x10) ? fadeAlpha : base.a * texel.a;

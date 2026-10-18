@@ -599,6 +599,78 @@ std::vector<SceneView::SkyWeight> SceneView::skyWeights() const {
 
 bool SceneView::skyFromRegion() const { return skyByRegion && serverContent_ && !serverContent_->regions.empty(); }
 
+int SceneView::shadowCacheEntry(ShadowCache& cache, const tr::PlacedLight& light, uint32_t size, int views) const {
+    const int kind = int(light.kind);
+    const tr::Quat& q = light.worldOrientation;
+    for (size_t k = 0; k < cache.entries.size(); ++k) {
+        const ShadowCacheEntry& e = cache.entries[k];
+        if (e.alive && e.kind == kind && e.size == size && e.views == views && e.isStatic == light.isStatic && e.range == light.range &&
+            e.width == light.width && e.length == light.length && e.penumbra == light.penumbraAngle && e.position.x == light.position.x &&
+            e.position.y == light.position.y && e.position.z == light.position.z && e.orientation.x == q.x && e.orientation.y == q.y &&
+            e.orientation.z == q.z && e.orientation.w == q.w)
+            return int(k);
+    }
+    constexpr int perSide = int(Renderer::shadowAtlasSize / 128u);
+    const int cells = int(size / 128u);
+    for (;;) {
+        std::vector<uint8_t> used(size_t(perSide * perSide), 0);
+        for (const ShadowCacheEntry& e : cache.entries) {
+            if (!e.alive) continue;
+            const int c = int(e.size / 128u);
+            for (const auto& cell : e.cells)
+                for (int y = cell.second; y < cell.second + c; ++y)
+                    for (int x = cell.first; x < cell.first + c; ++x) used[size_t(y * perSide + x)] = 1;
+        }
+        std::vector<std::pair<int, int>> placed;
+        for (int v = 0; v < views; ++v) {
+            bool found = false;
+            for (int y = 0; y + cells <= perSide && !found; y += cells)
+                for (int x = 0; x + cells <= perSide && !found; x += cells) {
+                    bool free = true;
+                    for (int yy = y; yy < y + cells && free; ++yy)
+                        for (int xx = x; xx < x + cells && free; ++xx) free = used[size_t(yy * perSide + xx)] == 0;
+                    if (!free) continue;
+                    for (int yy = y; yy < y + cells; ++yy)
+                        for (int xx = x; xx < x + cells; ++xx) used[size_t(yy * perSide + xx)] = 1;
+                    placed.emplace_back(x, y);
+                    found = true;
+                }
+            if (!found) break;
+        }
+        if (int(placed.size()) == views) {
+            ShadowCacheEntry e;
+            e.alive = true;
+            e.kind = kind;
+            e.position = light.position;
+            e.range = light.range;
+            e.width = light.width;
+            e.length = light.length;
+            e.penumbra = light.penumbraAngle;
+            e.orientation = q;
+            e.size = size;
+            e.views = views;
+            e.isStatic = light.isStatic;
+            e.cells = placed;
+            for (size_t k = 0; k < cache.entries.size(); ++k)
+                if (!cache.entries[k].alive) {
+                    cache.entries[k] = e;
+                    return int(k);
+                }
+            cache.entries.push_back(e);
+            return int(cache.entries.size() - 1);
+        }
+        // Full: free the least recently used entry not in use this frame, and try again.
+        int oldest = -1;
+        for (size_t k = 0; k < cache.entries.size(); ++k) {
+            const ShadowCacheEntry& e = cache.entries[k];
+            if (e.alive && e.lastUsed != shadowFrame_ && (oldest < 0 || e.lastUsed < cache.entries[size_t(oldest)].lastUsed)) oldest = int(k);
+        }
+        if (oldest < 0) return -1;
+        cache.entries[size_t(oldest)].alive = false;
+        cache.entries[size_t(oldest)].cells.clear();
+    }
+}
+
 SceneLighting SceneView::lighting() const {
     SceneLighting l = skyLightingAt();
     l.showLight = showLightBuffer;
@@ -724,6 +796,7 @@ SceneLighting SceneView::lighting() const {
             light.coneAngle = tr::sfxCurveValue(e.coneAngle, lightTime);
             light.globeMap = e.globeMap;
             light.castsShadows = e.castsShadows;
+            light.isStatic = false;          // the SLIT trigger (FUN_0075a510) sets IsStatic "false" on every light it makes
             light.position = transformPoint(s.world, transformPoint(frame, add(e.position, e.offset)));
             light.worldOrientation = multiplyQuat(quatFromMatrix(s.world), multiplyQuat(cpRotation, e.rotation));
             consider(light);
@@ -743,7 +816,9 @@ SceneLighting SceneView::lighting() const {
     // PVS (FUN_007cfc10).
     std::vector<bool> shadowAllowed(nearest.size(), false);
     {
-        const float maxValue = 25.0f + 50.0f * std::clamp(shadowDistance, 0.0f, 1.0f);
+        // FUN_008475b0: with deferred lighting active (render settings + 0xbf, set by FUN_007bfd10 in render mode 5) the limit is
+        // 25 + 50 x ShadowDistance while the RQS option "Shadow Distance" is on, 25 when it is off (otherwise -1).
+        const float maxValue = 25.0f + 50.0f * (rqsShadowDistance ? std::clamp(shadowDistance, 0.0f, 1.0f) : 0.0f);
         std::vector<ShadowCandidate> chosen;
         for (const ShadowCandidate& c : shadowPool)
             if (c.value <= maxValue) chosen.push_back(c);
@@ -760,8 +835,21 @@ SceneLighting SceneView::lighting() const {
                     shadowAllowed[k] = nearest[k].second.castsShadows;
     }
     int shadowLightCount = 0;                                       // lights given shadow views (the casters' mask bits)
-    constexpr int atlasCellsPerSide = int(Renderer::shadowAtlasSize / 128u);
-    std::vector<uint8_t> atlasCells(size_t(atlasCellsPerSide * atlasCellsPerSide), 0);   // 128 x 128 texel units in use
+    // The renderer's kept shadow maps: maps queued in an earlier frame count as drawn once the renderer has recorded a shadow pass
+    // since (a fresh renderer - fewer passes than seen - starts empty).
+    ShadowCache& cache = shadowCache_[renderer_];
+    {
+        const uint64_t passes = renderer_->localShadowPassesRecorded();
+        if (passes < cache.passesSeen) cache.entries.clear();
+        cache.passesSeen = passes;
+        for (ShadowCacheEntry& e : cache.entries)
+            if (e.pendingVersion != 0 && passes > e.pendingPass) {
+                e.drawnVersion = e.pendingVersion;
+                e.pendingVersion = 0;
+            }
+    }
+    ++shadowFrame_;
+    frameShadowEntries_.clear();
     for (size_t nIndex = 0; nIndex < nearest.size(); ++nIndex) {
         const auto& n = nearest[nIndex];
         if (l.localCount >= SceneLighting::maxLocalLights) break;
@@ -774,6 +862,8 @@ SceneLighting SceneView::lighting() const {
         const tr::Vec3 c{std::pow(light.colour.x, lightColourGamma), std::pow(light.colour.y, lightColourGamma), std::pow(light.colour.z, lightColourGamma)};
         l.localColour[i] = Vec4f{c.x * light.intensity, c.y * light.intensity, c.z * light.intensity,
                                  (1.0f - std::clamp(light.falloffPercent, 0.0f, 1.0f)) * light.range};
+        l.localBackColour[i] = Vec4f{light.backColour.x * light.intensity, light.backColour.y * light.intensity,
+                                     light.backColour.z * light.intensity, 0};
         if (light.kind == tr::PlacedLight::Kind::Spot) {
             const tr::Vec3 d = normalized(light.direction());
             const float outer = std::max(light.penumbraAngle, light.coneAngle) * 0.5f * 0.0174533f;   // full angles (UNVERIFIED)
@@ -807,8 +897,9 @@ SceneLighting SceneView::lighting() const {
         // - point: six 90-degree faces (0x00bc7b18), near 0.05, far = Range (rendered only while far > 0.05, 0x00c2b6f8), here along
         //   the world axes (the engine's face frame - g_ShadowView, face 4 - only orients the lookup).
         // Far = Range is the field the spot's trace confirms (+ 0x354); for plane and point lights it is the same field (UNVERIFIED).
-        // Map size 128 << ShadowQuality (128 / 256 seen in the trace; 512 for quality 2 UNVERIFIED), packed into the atlas in
-        // 128-texel units. Not compared with the game: plane and point shadows (no capture has one).
+        // The views are packed into the renderer's atlas in 128-texel units and kept there between frames (shadowCacheEntry): a
+        // static light's map is drawn once and redrawn only when the casters change, a non-static light's every frame. Compared
+        // with the game: spot (firing range), point (command tent) and plane (great stairs, Light_29) shadows.
         if (localShadows && shadowAllowed[nIndex]) {
             // Map size (tabula_rasa.exe FUN_00808b70, read 2026-10-17): by ShadowQuality 0 / 1 -> 128, 2 -> 256, 3 -> 512 (cube and plane
             // maps); a perspective (spot) map instead covers its width at the range, 2 R tan(penumbra / 2), at a texel size of 0.254 /
@@ -826,23 +917,20 @@ SceneLighting SceneView::lighting() const {
             }
             const int views = light.kind == tr::PlacedLight::Kind::Point ? 6 : 1;
             int first = -1;
+            bool redraw = false;
             if (l.localShadowCount + views <= SceneLighting::maxLocalShadows && shadowLightCount < 32) {
-                first = l.localShadowCount;
-                for (int v = 0; v < views && first >= 0; ++v) {
-                    const int cells = int(size / 128u);
-                    bool placed = false;
-                    for (int y = 0; y + cells <= atlasCellsPerSide && !placed; y += cells)
-                        for (int x = 0; x + cells <= atlasCellsPerSide && !placed; x += cells) {
-                            bool free = true;
-                            for (int yy = y; yy < y + cells && free; ++yy)
-                                for (int xx = x; xx < x + cells && free; ++xx) free = atlasCells[size_t(yy * atlasCellsPerSide + xx)] == 0;
-                            if (!free) continue;
-                            for (int yy = y; yy < y + cells; ++yy)
-                                for (int xx = x; xx < x + cells; ++xx) atlasCells[size_t(yy * atlasCellsPerSide + xx)] = 1;
-                            l.localShadowRect[first + v] = Vec4f{float(x * 128), float(y * 128), float(size), float(shadowLightCount)};
-                            placed = true;
-                        }
-                    if (!placed) first = -1;        // the atlas is full: no shadow for this light
+                const int entry = shadowCacheEntry(cache, light, size, views);
+                if (entry >= 0) {
+                    ShadowCacheEntry& e = cache.entries[size_t(entry)];
+                    e.lastUsed = shadowFrame_;
+                    first = l.localShadowCount;
+                    for (int v = 0; v < views; ++v)
+                        l.localShadowRect[first + v] = Vec4f{float(e.cells[size_t(v)].first * 128), float(e.cells[size_t(v)].second * 128),
+                                                             float(size), float(shadowLightCount)};
+                    // A static light's map is drawn once (the game: when the light is created) and redrawn only when the casters
+                    // change; a non-static one every frame.
+                    redraw = !cacheShadowMaps || !e.isStatic || e.drawnVersion != shadowCasterVersion_;
+                    frameShadowEntries_.push_back(entry);
                 }
             }
             if (first >= 0) {
@@ -878,6 +966,7 @@ SceneLighting SceneView::lighting() const {
                 }
                 l.localShadowCount += views;
                 l.localShadowBase[i] = Vec4f{float(first + 1), float(views), float(shadowLightCount), light.isStatic ? 0.0f : 1.0f};
+                if (!redraw) l.localShadowRedraw &= ~(1u << uint32_t(shadowLightCount));
                 ++shadowLightCount;
             }
         }
@@ -1036,7 +1125,7 @@ SceneLighting SceneView::skyLightingAt() const {
     // gets the sun shadow map; the others are drawn unshadowed (extra directional lights).
     l.sunFront = Vec4f{0, 0, 0, 1};
     l.sunBack = Vec4f{0, 0, 0, 1};
-    struct Directional { tr::Vec3 towards; tr::Vec3 front; tr::Vec3 back; float shadowOpacity; };
+    struct Directional { tr::Vec3 towards; tr::Vec3 front; tr::Vec3 back; float shadowOpacity; bool castsShadows; };
     std::vector<Directional> directional;
     for (const SkyWeight& w : weights)
     for (const tr::SkyLayer& layer : skies_[w.index].sky.layers) {
@@ -1047,17 +1136,31 @@ SceneLighting SceneView::skyLightingAt() const {
             const tr::Vec3 back = scaled(tr::skyLightColour(light, 4, t), w.weight);
             if (luminance(front) <= 0.0f && luminance(back) <= 0.0f) continue;
             const tr::Vec3 travel = tr::skyLayerDirection(layer, light.orientation, t);
-            directional.push_back(Directional{normalized(tr::Vec3{-travel.x, -travel.y, -travel.z}), front, back, tr::skyLightShadowOpacity(light, t)});
+            directional.push_back(Directional{normalized(tr::Vec3{-travel.x, -travel.y, -travel.z}), front, back, tr::skyLightShadowOpacity(light, t), light.castsShadows});
         }
     }
     std::stable_sort(directional.begin(), directional.end(), [&](const Directional& a, const Directional& b) { return luminance(a.front) > luminance(b.front); });
+    // Global (non-layer) directional lights in the deferred modes: the Bane interior skies carry one (RenderMode 2, DIntensity 1,
+    // Type 3, CastsShadows false - sky_bane_interior_default.sky). The game's light pass takes it like a layer light, unshadowed
+    // (traced 2026-10-18: its colour gives the floor's blue: (0.11, 0.14, 0.34) x N.L 0.97 + the hemi top (0.17, 0.23, 0.36) =
+    // (0.28, 0.37, 0.70) against the game's (0.29, 0.35, 0.65)). Appended after the sort: no shadow map, opacity 0.
+    for (const SkyWeight& w : weights)
+        for (const tr::SkyLight& g : skies_[w.index].sky.globalLights) {
+            if (g.hemi || g.renderMode == 0 || !g.active) continue;
+            const tr::Vec3 front = scaled(tr::skyLightColour(g, 3, t), w.weight);
+            const tr::Vec3 back = scaled(tr::skyLightColour(g, 4, t), w.weight);
+            if (luminance(front) <= 0.0f && luminance(back) <= 0.0f) continue;
+            directional.push_back(Directional{normalized(tr::Vec3{-g.orientation.x, -g.orientation.y, -g.orientation.z}), front, back, 0.0f, false});
+        }
     for (size_t k = 0; k < directional.size(); ++k) {
         const Directional& d = directional[k];
         if (k == 0) {
             l.towardsLight = d.towards;
             l.sunFront = vec4(d.front);
             l.sunBack = vec4(d.back);
-            l.sunShadows = showShadows;
+            // The sun's shadow map only for a light that casts shadows (the Bane interior's directional "Light" has CastsShadows false:
+            // a roof-covered sun map darkened its floor, where the game lights it).
+            l.sunShadows = showShadows && d.castsShadows;
             l.shadowOpacity = d.shadowOpacity;
         } else if (l.extraDirectionalCount < SceneLighting::maxExtraDirectional) {
             const int e = l.extraDirectionalCount++;
@@ -1839,6 +1942,7 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 if (trDesc.known) {
                     TrMaterial& m = part.trMaterial;
                     part.fadeForward = effect.rfind("trdiffmapdiffmap", 0) == 0;
+                    part.lavaForward = effect.rfind("trlava", 0) == 0;
                     m.active = true;
                     auto textureOf = [&](const char* key) -> SDL_GPUTexture* {
                         for (const tr::GeoParameter& gp : piece.parameters)
@@ -2066,6 +2170,7 @@ void SceneView::loadPending(double budgetSeconds) {
         pending_.pop_front();
         Model& model = models_[name];
         loadModel(name, model);
+        invalidateShadowMaps();                 // a model that casts may have appeared
         for (const tr::PlacedLight& light : model.lights)
             if (!light.globeMap.empty() && !globeIndex_.count(tr::toLowerAscii(light.globeMap))) newGlobe = true;
         if (std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() > budgetSeconds) break;
@@ -2791,6 +2896,16 @@ void SceneView::queueDraws(const Selection& selection) {
     const int selectedEntity = selection.kind == SelectionKind::MapEntity ? int(selection.index) : -1;
     const float aspect = float(renderer_->width()) / float(std::max<uint32_t>(1, renderer_->height()));
     const Mat4 viewProjection = multiply(camera_.projectionMatrix(aspect), camera_.viewMatrix());
+    {
+        // Toggles that change the placed-light shadow casters redraw the kept maps (see invalidateShadowMaps).
+        uint64_t signature = uint64_t(showEntities) | uint64_t(showServer) << 1 | uint64_t(showTerrain) << 2 | uint64_t(localShadowTerrain) << 3 |
+                             uint64_t(renderer_->cullBackFaces) << 4 | uint64_t(uint32_t(onlyEntity + 1)) << 8;
+        for (const auto& g : garrisonViews) signature = signature * 1000003u ^ (uint64_t(g.first) * 31u + uint64_t(uint32_t(g.second)));
+        if (signature != shadowCasterSignature_) {
+            shadowCasterSignature_ = signature;
+            invalidateShadowMaps();
+        }
+    }
     frameLighting_ = lighting();
     renderer_->beginFrame(viewProjection, camera_.position, frameLighting_);
     renderer_->setCameraAxes(camera_.right(), camera_.up(), camera_.forward());
@@ -2933,6 +3048,7 @@ void SceneView::queueDraws(const Selection& selection) {
                     ++fadingForwardPieces_;
                     continue;
                 }
+                if (showLightBuffer && piece.lavaForward) continue;       // forward-only: not in the game's light buffer
                 renderer_->draw(piece.mesh, world, scaledTint(tint, piece.colourScale), true, showTextures ? piece.texture : nullptr, showTextures && piece.alphaTest,
                                 hue, showTextures ? piece.glow : nullptr, piece.twoSided, piece.alphaReference,
                                 showTextures && materialMaps ? piece.normalMap : nullptr, showTextures && materialMaps ? piece.glossMap : nullptr,
@@ -2981,6 +3097,7 @@ void SceneView::queueDraws(const Selection& selection) {
     // (TRasa::GraphicsUtil::DropActorsObjs, switched by + 0x339 = IsStatic - see tr::PlacedLight::isStatic). Their opaque pieces
     // only, as the main pass draws them (alpha cut-outs kept).
     lastActorShadowCasters = 0;
+    lastShadowMapsDrawn = 0;
     if (frameLighting_.localShadowCount > 0) {
         // One entry per shadow light (localShadowBase z = its mask bit): where its casters can be - its reach sphere (a spot's range,
         // a plane's box radius in localPosition.w, a point's range) and, for spots and planes, in front of it (a spot's axis; a plane
@@ -2994,11 +3111,19 @@ void SceneView::queueDraws(const Selection& selection) {
             bool actors = false;     // a non-static light: characters cast into it
         };
         std::vector<ShadowSlot> slots(32);
+        lastShadowMapsDrawn = 0;
         for (int i = 0; i < frameLighting_.localCount; ++i) {
             const Vec4f& base = frameLighting_.localShadowBase[i];
             if (base.x < 0.5f) continue;
             const size_t s = size_t(base.z + 0.5f);
             if (s >= slots.size()) continue;
+            if (((frameLighting_.localShadowRedraw >> uint32_t(s)) & 0x1) == 0) continue;     // kept from an earlier frame: no casters
+            ++lastShadowMapsDrawn;
+            if (s < frameShadowEntries_.size()) {
+                ShadowCacheEntry& e = shadowCache_[renderer_].entries[size_t(frameShadowEntries_[s])];
+                e.pendingVersion = shadowCasterVersion_;
+                e.pendingPass = renderer_->localShadowPassesRecorded();
+            }
             const Vec4f& p = frameLighting_.localPosition[i];
             const Vec4f& a = frameLighting_.localSpot[i];
             slots[s] = ShadowSlot{tr::Vec3{p.x, p.y, p.z}, p.w, tr::Vec3{a.x, a.y, a.z}, a.w > -1.5f, true, base.w > 0.5f};
@@ -3793,6 +3918,7 @@ SceneView::Placement SceneView::makePlacement(const tr::MapEntity& e) {
 }
 
 void SceneView::refreshEntity(size_t entityIndex) {
+    invalidateShadowMaps();                     // placed-light shadow casters changed
     if (entityIndex >= placements_.size() || entityIndex >= map_.map.entities.size()) return;
     placements_[entityIndex] = makePlacement(map_.map.entities[entityIndex]);
     liveParticles_.erase(std::remove_if(liveParticles_.begin(), liveParticles_.end(),
@@ -3801,6 +3927,7 @@ void SceneView::refreshEntity(size_t entityIndex) {
 }
 
 void SceneView::setEntityAnimation(size_t entityIndex, const std::string& animation) {
+    invalidateShadowMaps();                     // placed-light shadow casters changed
     if (entityIndex >= placements_.size() || entityIndex >= map_.map.entities.size()) return;
     refreshEntity(entityIndex);
     if (!animation.empty() && meshForClass_) {
@@ -3822,6 +3949,7 @@ void SceneView::reloadAudioEmitters() {
 }
 
 void SceneView::reloadMapLights() {
+    invalidateShadowMaps();                     // placed-light shadow casters changed
     mapLights_.clear();
     lightModifiers_.clear();
     mapLightsError_.clear();
@@ -3840,6 +3968,7 @@ void SceneView::reloadMapLights() {
 }
 
 void SceneView::rebuildEntities() {
+    invalidateShadowMaps();                     // placed-light shadow casters changed
     placements_.clear();
     placements_.reserve(map_.map.entities.size());
     for (const tr::MapEntity& e : map_.map.entities) placements_.push_back(makePlacement(e));
@@ -4116,6 +4245,7 @@ bool SceneView::surfacePoint(const tr::Vec3& origin, const tr::Vec3& direction, 
 
 void SceneView::setServerContent(const WorldContent* content, const WorldDatabase* database, std::function<std::string(int32_t)> meshForClass,
                                  AvatarResolver avatarFor) {
+    invalidateShadowMaps();                     // placed-light shadow casters changed
     serverContent_ = content;
     serverDatabase_ = database;
     serverMeshForClass_ = meshForClass;

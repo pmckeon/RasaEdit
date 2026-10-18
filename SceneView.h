@@ -287,6 +287,16 @@ public:
     // Client.Graphics.ShadowMaxSimultaneous (render settings + 0x34) and Client.Graphics.ShadowDistance (+ 0x30).
     float shadowMaxSimultaneous = 1.0f;
     float shadowDistance = 1.0f;
+    // The real-time quality scaling option "Shadow Distance" (TRRQS + 0x84, on at full quality; tabula_rasa.exe FUN_00846c..: the RQS
+    // table, FUN_008475b0 reads it): off - as when the frame rate falls below Client.Graphics.RealTimeQualityScaling - the shadow
+    // distance limit drops from 25 + 50 x ShadowDistance to 25 m. The editor models full quality (viewport_test RASA_RQSSHADOWDISTANCE=0).
+    bool rqsShadowDistance = true;
+    // Static lights' shadow maps are drawn once and kept (the game renders a static light's map when it is created, never again);
+    // anything that changes the casters calls this (model loads, entity / server content edits, caster toggles) so they are redrawn.
+    void invalidateShadowMaps() { ++shadowCasterVersion_; }
+    bool cacheShadowMaps = true;            // off: every placed-light shadow map is redrawn every frame (viewport_test RASA_NOSHADOWCACHE=1)
+    // The last queueDraws: shadow lights whose maps were drawn (diagnostic, viewport_test RASA_LISTLIGHTS).
+    int lastShadowMapsDrawn = 0;
     // The last lighting()'s shadow candidates (diagnostic, viewport_test RASA_LISTLIGHTS): value, position, range, kept.
     struct ShadowCandidateInfo {
         float value;
@@ -371,6 +381,7 @@ private:
         // TRDiffMapDiffMap* effect: in the game's distance fade band (SceneView::entityDistanceAlpha < 0.999) the piece is drawn with
         // the effect's one static forward technique (see "fade band" in queueDraws), which the fountain capture verifies.
         bool fadeForward = false;
+        bool lavaForward = false;              // TRLava: forward-only effect (no deferred technique), drawn after the composite - not in the light buffer
         // The material's stored Hue parameter (w = 1 when set): what a map entity's pieces keep when the entity is not hued.
         Vec4f materialHue = Vec4f{0, 0, 0, 0};
         TrMaterial trMaterial;                 // TR* deferred material (stage 3), trMaterial.active
@@ -633,6 +644,37 @@ private:
     SDL_GPUTexture* volumeTexture(const std::string& name); // 3D (volume DDS); cached; nullptr if missing or unreadable
 
     Renderer* renderer_;                    // where draws go (the own renderer, or a PVS view's - setDrawTarget)
+    // Placed-light shadow maps kept in a renderer's atlas (one cache per renderer): an entry per light that has had a shadow - its
+    // atlas cells (128-texel units, one square per view) and the caster version its map was drawn at. A static light's map is redrawn
+    // only when shadowCasterVersion_ moves on; a non-static light's every frame. Entries not used this frame are evicted, oldest
+    // first, when a new light needs room.
+    struct ShadowCacheEntry {
+        bool alive = false;
+        int kind = 0;
+        tr::Vec3 position;
+        float range = 0, width = 0, length = 0, penumbra = 0;
+        tr::Quat orientation;
+        uint32_t size = 0;
+        int views = 0;
+        bool isStatic = true;
+        std::vector<std::pair<int, int>> cells;     // per view: the square's first cell (x, y)
+        uint64_t drawnVersion = 0;                  // caster version of the map in the atlas (0 = none)
+        uint64_t pendingVersion = 0;                // queued for drawing at this version, once the renderer's pass count passes pendingPass
+        uint64_t pendingPass = 0;
+        uint64_t lastUsed = 0;
+    };
+    struct ShadowCache {
+        std::vector<ShadowCacheEntry> entries;
+        uint64_t passesSeen = 0;
+    };
+    mutable std::map<const Renderer*, ShadowCache> shadowCache_;
+    // The cache entry of a light (same kind, place, orientation, size, range, static flag), else a new one with atlas cells for its
+    // views (evicting entries not used this frame, oldest first); -1 when the atlas cannot hold it.
+    int shadowCacheEntry(ShadowCache& cache, const tr::PlacedLight& light, uint32_t size, int views) const;
+    mutable std::vector<int> frameShadowEntries_;    // this frame's shadow lights (by mask bit) -> their cache entry
+    mutable uint64_t shadowFrame_ = 0;
+    uint64_t shadowCasterVersion_ = 1;
+    uint64_t shadowCasterSignature_ = 0;
     Renderer* ownRenderer_;
     const tr::AssetLibrary& assets_;
     const tr::MapBundle& map_;

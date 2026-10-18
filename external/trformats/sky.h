@@ -118,6 +118,7 @@ struct PlacedLight {
     Vec3 position;
     Vec3 offset;                      // Offset: in a light template (.ltmp), its place relative to the contact point
     Vec3 colour{1, 1, 1};
+    Vec3 backColour;                  // BackColor (r, g, b): TRPlaneLight's LightBackColor (61 of 136 shipped plane lights set one)
     float intensity = 1;
     float range = 10;
     float falloffPercent = 1;

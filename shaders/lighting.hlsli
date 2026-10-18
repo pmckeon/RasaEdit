@@ -47,6 +47,9 @@ float3 skyLight(float3 n, SkyLighting s)
 // position: xyz, w range; colour: rgb * intensity, w fade start distance; spot: xyz axis, w cos(penumbra) or -2 for a
 // point light; spotInner: x cos(cone).
 #define MAX_LOCAL_LIGHTS 32
+// The slot buffer holds the shadow views (SceneLighting::maxLocalShadows), then one entry per placed light (view.rgb = its back colour x
+// intensity - plane lights).
+#define MAX_LOCAL_SHADOWS 72
 
 // Sun shadow: 3x3 filtered comparisons in the sun's depth map, offset along the normal against acne; outside the map
 // (beyond the area around the camera) everything is lit. params: x on, y opacity (the game lets part of the sun through),
@@ -91,19 +94,17 @@ float3 rotateBy(float4 q, float3 v)
     return 2.0 * dot(u, v) * u + (q.w * q.w - dot(u, u)) * v + 2.0 * q.w * cross(u, v);
 }
 
-// Plane light (TRPlaneLight pixel shader, effects.glm, disassembled 2026-10-12): p = the pixel in the light's frame; outside
-// the box |p| < dims nothing; per-axis fade 1 - (clamp(|p|, falloff, dims) - falloff) / (dims - falloff), the smallest of
-// the three; direction fixed: sat(N . -(light's local z axis)). The caller multiplies by colour x intensity. BackColor is
-// not applied (0 in the shipped lights checked); the shadowed variant is not reproduced.
-float planeLight(float3 world, float3 n, float4 position, float4 dims, float4 falloff, float4 q)
+// Plane light box fade (TRPlaneLight pixel shader, effects.glm, disassembled 2026-10-12): p = the pixel in the light's frame;
+// outside the box |p| < dims nothing; per-axis fade 1 - (clamp(|p|, falloff, dims) - falloff) / (dims - falloff), the smallest
+// of the three. The light's direction is fixed (-its local z axis); see localLights / localSpecular for the rest.
+float planeFade(float3 world, float4 position, float4 dims, float4 falloff, float4 q)
 {
     const float3 p = abs(rotateInverse(q, world - position.xyz));
     if (any(p > dims.xyz))
         return 0.0;
     const float3 f = float3(falloff.x, falloff.z, falloff.w);
     const float3 fade = 1.0 - (clamp(p, f, dims.xyz) - f) / max(dims.xyz - f, 0.0001);
-    const float3 axis = rotateBy(q, float3(0, 0, 1));
-    return min(fade.x, min(fade.y, fade.z)) * saturate(dot(n, -axis));
+    return min(fade.x, min(fade.y, fade.z));
 }
 
 // One placed-light shadow view, read from a fragment storage buffer (Renderer's localShadowBuffer_): a spot light has one, a plane
@@ -225,11 +226,14 @@ float localShadowOf(float3 world, float3 lightPosition, float4 shadowBase, Struc
 // Globe maps (GlobeMapFile): the game's trpointlight globe variant samples a cube map with the pixel's position in the
 // light's own frame (Proj2LightView) and multiplies the light colour by it (disassembled from effects.glm). A spot light's 2D globe
 // (spotInner.w = layer + 1; TRSpotLight's globe variants): uv = (x / z, -y / z) x LightProjDistance + 0.5 in the light's frame, z
-// along its axis, LightProjDistance = 0.5 / tan(PenumbraAngle / 2) (the sign of x / y is UNVERIFIED).
+// along its axis, LightProjDistance = 0.5 / tan(PenumbraAngle / 2). Verified 2026-10-18 in the firing-range trace: ps3SpotLight[3]
+// samples Tex_Sampler_Globe at (x / z, -y / z) x LightProjDistance + 0.5 of the pixel in the light's frame (Proj2LightView =
+// inverse(Light2World) x the inverse view-projection, to 4e-6), and the flashlights' / lamps' Light2World axes equal the editor's.
+// specPower: the pixel's specular power (the G-buffer's), which picks TRPlaneLight's branch (below).
 float3 localLights(float3 world, float3 n, int count, float4 position[MAX_LOCAL_LIGHTS], float4 colour[MAX_LOCAL_LIGHTS],
                    float4 spot[MAX_LOCAL_LIGHTS], float4 spotInner[MAX_LOCAL_LIGHTS], float4 rotation[MAX_LOCAL_LIGHTS],
                    TextureCubeArray globes, SamplerState globeSampler, Texture2DArray cookies, SamplerState cookieSampler,
-                   Texture2D<float> atlas, StructuredBuffer<LocalShadowSlot> slots, float4 shadowBase[MAX_LOCAL_LIGHTS])
+                   Texture2D<float> atlas, StructuredBuffer<LocalShadowSlot> slots, float4 shadowBase[MAX_LOCAL_LIGHTS], float specPower)
 {
     float3 sum = float3(0, 0, 0);
     for (int i = 0; i < count; ++i)
@@ -243,9 +247,19 @@ float3 localLights(float3 world, float3 n, int count, float4 position[MAX_LOCAL_
             continue;
         if (spot[i].w < -2.5)
         {
-            // Shadowed like a spot (TRPlaneLight ps3[1]: the orthographic branch of the same test).
-            sum += colour[i].rgb * planeLight(world, n, position[i], spot[i], spotInner[i], rotation[i]) *
-                   localShadowOf(world, position[i].xyz, shadowBase[i], slots, atlas);
+            // TRPlaneLight DeferredPlaneLightWithSpec ps3[0..7] (disassembled 2026-10-18): f = box fade x LightIntensity (nothing
+            // where f <= 0.001), L = -(local z axis), vis = the shadow (ps3[1]: the orthographic branch of the spot test; applied
+            // where N.L > 0). Pixels without specular power: f sat(N.L) (vis LightColor - LightBackColor); with it:
+            // f (vis sat(N.L) LightColor + sat(-N.L) LightBackColor). colour = LightColor x intensity, back colour x intensity
+            // (the slot buffer's entry after the shadow views). The pass writes an unsigned target, so it adds at least 0.
+            const float f = planeFade(world, position[i], spot[i], spotInner[i], rotation[i]);
+            if (f <= 0.001)
+                continue;
+            const float nl = dot(n, -rotateBy(rotation[i], float3(0, 0, 1)));
+            const float vis = nl > 0.0 ? localShadowOf(world, position[i].xyz, shadowBase[i], slots, atlas) : 1.0;
+            const float3 back = slots[MAX_LOCAL_SHADOWS + i].view.rgb;
+            sum += max(specPower > 0.0 ? f * (vis * saturate(nl) * colour[i].rgb + saturate(-nl) * back)
+                                       : f * saturate(nl) * (vis * colour[i].rgb - back), 0.0);
             continue;
         }
         const float3 l = toLight / max(d, 0.0001);
@@ -324,7 +338,8 @@ float3 hemiSpecular(float3 n, float3 v, float sp, float i, float3 top)
 // Placed lights' specular: the same fade and cone as localLights (globe maps not applied to the specular - UNVERIFIED).
 float3 localSpecular(float3 world, float3 n, float3 v, float sp, float i, int count, float4 position[MAX_LOCAL_LIGHTS],
                      float4 colour[MAX_LOCAL_LIGHTS], float4 spot[MAX_LOCAL_LIGHTS], float4 spotInner[MAX_LOCAL_LIGHTS],
-                     Texture2D<float> atlas, StructuredBuffer<LocalShadowSlot> slots, float4 shadowBase[MAX_LOCAL_LIGHTS])
+                     float4 rotation[MAX_LOCAL_LIGHTS], Texture2D<float> atlas, StructuredBuffer<LocalShadowSlot> slots,
+                     float4 shadowBase[MAX_LOCAL_LIGHTS])
 {
     float3 sum = float3(0, 0, 0);
     for (int k = 0; k < count; ++k)
@@ -337,7 +352,16 @@ float3 localSpecular(float3 world, float3 n, float3 v, float sp, float i, int co
         if (d >= range && !(spot[k].w > -1.5))
             continue;
         if (spot[k].w < -2.5)
-            continue;                           // plane lights: specular not decoded
+        {
+            // TRPlaneLight (ps3[4..7]): f vis LightColor x the common specular factor, L = -(local z axis).
+            const float f = planeFade(world, position[k], spot[k], spotInner[k], rotation[k]);
+            if (f <= 0.001)
+                continue;
+            const float3 l = -rotateBy(rotation[k], float3(0, 0, 1));
+            const float vis = dot(n, l) > 0.0 ? localShadowOf(world, position[k].xyz, shadowBase[k], slots, atlas) : 1.0;
+            sum += colour[k].rgb * f * vis * specularFactor(n, v, l, sp, i);
+            continue;
+        }
         const bool isSpot = spot[k].w > -1.5;
         const float along = isSpot ? dot(-toLight, spot[k].xyz) : d;
         if (isSpot && along <= 0.0)

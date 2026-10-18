@@ -216,6 +216,11 @@ std::vector<PlacedLight> readLights(const Bytes& data, const std::map<std::strin
             const std::vector<float> c = numbers(colour->second);
             if (c.size() >= 3) light.colour = Vec3{c[0], c[1], c[2]};
         }
+        const auto back = p.find("BackColor");
+        if (back != p.end()) {
+            const std::vector<float> c = numbers(back->second);
+            if (c.size() >= 3) light.backColour = Vec3{c[0], c[1], c[2]};
+        }
         light.intensity = number(p, "Intensity", 1);
         light.range = number(p, "Range", 10);
         light.falloffPercent = number(p, "FalloffPercent", 1);

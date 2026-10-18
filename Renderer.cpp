@@ -254,6 +254,12 @@ Renderer::Renderer(SDL_GPUDevice* device) : device_(device) {
         info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_BACK;
         localShadowPipeline_ = SDL_CreateGPUGraphicsPipeline(device_, &info);
         if (!localShadowPipeline_) fail("SDL_CreateGPUGraphicsPipeline (local shadow, culled)");
+        // Clearing one view's square before it is redrawn (the atlas is kept between frames): a quad at depth 1, always written.
+        info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
+        info.rasterizer_state.enable_depth_clip = false;
+        info.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_ALWAYS;
+        localShadowClearPipeline_ = SDL_CreateGPUGraphicsPipeline(device_, &info);
+        if (!localShadowClearPipeline_) fail("SDL_CreateGPUGraphicsPipeline (local shadow clear)");
         t.width = t.height = shadowAtlasSize;
         shadowAtlas_ = SDL_CreateGPUTexture(device_, &t);
         if (!shadowAtlas_) fail("SDL_CreateGPUTexture (shadow atlas)");
@@ -383,6 +389,8 @@ Renderer::~Renderer() {
     if (cookies_) SDL_ReleaseGPUTexture(device_, cookies_);
     if (localShadowPipeline_) SDL_ReleaseGPUGraphicsPipeline(device_, localShadowPipeline_);
     if (localShadowTwoSidedPipeline_) SDL_ReleaseGPUGraphicsPipeline(device_, localShadowTwoSidedPipeline_);
+    if (localShadowClearPipeline_) SDL_ReleaseGPUGraphicsPipeline(device_, localShadowClearPipeline_);
+    destroyMesh(localShadowClearQuad_);
     for (SDL_GPUGraphicsPipeline* p : {pvsDepthPipeline_, pvsDepthTwoSidedPipeline_})
         if (p) SDL_ReleaseGPUGraphicsPipeline(device_, p);
     for (SDL_GPUComputePipeline* p : {pvsCountPipeline_, pvsMarkPipeline_})
@@ -577,7 +585,8 @@ void Renderer::beginFrame(const Mat4& viewProjection, const tr::Vec3& cameraPosi
     viewProjection_ = viewProjection;
     localCasters_.clear();
     towardsLight_ = Vec4f{lighting.towardsLight.x, lighting.towardsLight.y, lighting.towardsLight.z, 1.0f};
-    clearColour_ = lighting.clearColour;
+    // The game's light buffer is cleared to black: the sky carries no light (/dl_showlight shows the sky black).
+    clearColour_ = lighting.showLight ? SDL_FColor{0, 0, 0, 1} : lighting.clearColour;
     lighting_ = lighting;
     // Sun shadow map: orthographic from the sun, centred ahead of the camera as the game's (see shadowExtent).
     shadowsActive_ = lighting.sunShadows && lighting.towardsLight.y > 0.02f;
@@ -641,6 +650,8 @@ void Renderer::draw(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, b
 }
 
 void Renderer::drawRefract(const GpuMesh& mesh, const Mat4& model, const RefractMaterial& material) {
+    // Refraction is drawn after the composite in game, so it is not in the light buffer (the light view, SceneLighting::showLight).
+    if (lighting_.showLight) return;
     if (!mesh.vertices || mesh.indexCount == 0) return;
     refractDraws_.push_back(RefractItem{&mesh, model, material, currentSkin_, currentBoneBase_, currentSkinNormals_});
 }
@@ -740,6 +751,7 @@ void Renderer::drawAnisoAdditive(const GpuMesh& mesh, const Mat4& model, const A
 
 void Renderer::drawWater(const GpuMesh& mesh, const Mat4& model, const WaterMaterial& material) {
     if (!mesh.vertices || mesh.indexCount == 0) return;
+    if (lighting_.showLight) return;           // water is drawn after the composite in game: not in the light buffer
     waterDraws_.push_back(WaterItem{&mesh, model, material});
 }
 
@@ -851,7 +863,8 @@ void Renderer::uploadBones(SDL_GPUCommandBuffer* commands) {
 // The frame's placed-light shadow slots into localShadowBuffer_ (lighting.hlsli LocalShadowSlot), read by the scene and terrain
 // fragment shaders.
 void Renderer::uploadLocalShadows(SDL_GPUCommandBuffer* commands) {
-    const uint32_t bytes = uint32_t(SceneLighting::maxLocalShadows * sizeof(LocalShadowSlotGpu));
+    // The shadow views, then one entry per placed light (view = its back colour; lighting.hlsli MAX_LOCAL_SHADOWS).
+    const uint32_t bytes = uint32_t((SceneLighting::maxLocalShadows + SceneLighting::maxLocalLights) * sizeof(LocalShadowSlotGpu));
     if (!localShadowBuffer_) {
         SDL_GPUBufferCreateInfo info = {};
         info.usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ;
@@ -867,6 +880,8 @@ void Renderer::uploadLocalShadows(SDL_GPUCommandBuffer* commands) {
     for (int k = 0; k < SceneLighting::maxLocalShadows; ++k)
         slots[k] = LocalShadowSlotGpu{lighting_.localShadowMatrix[k], lighting_.localShadowView[k], lighting_.localShadowRect[k],
                                       lighting_.localShadowParams[k], lighting_.localShadowBias[k], lighting_.localShadowCamera[k]};
+    for (int k = 0; k < SceneLighting::maxLocalLights; ++k)
+        slots[SceneLighting::maxLocalShadows + k] = LocalShadowSlotGpu{Mat4{}, lighting_.localBackColour[k], Vec4f{}, Vec4f{}, Vec4f{}, Vec4f{}};
     SDL_UnmapGPUTransferBuffer(device_, localShadowTransfer_);
     SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(commands);
     SDL_GPUTransferBufferLocation source = {};
@@ -968,14 +983,30 @@ void Renderer::drawLocalShadowCaster(const GpuMesh& mesh, const Mat4& model, SDL
                                         terrain ? nullptr : currentSkin_, currentBoneBase_});
 }
 
-// The placed lights' shadow maps: each slot's square of the atlas, its casters drawn depth-only with the light's perspective view
-// (psShadow: alpha cut-outs and terrain holes discard). The game renders a static light's map once at its creation (IsStatic); the
-// editor redraws them every frame.
+// The placed lights' shadow maps: each view's square of the atlas, its casters drawn depth-only with the light's view (psShadow:
+// alpha cut-outs and terrain holes discard). Only the views of lights in lighting_.localShadowRedraw are drawn - cleared to depth 1
+// first; the atlas keeps the others from earlier frames (the game renders a static light's map once, at its creation).
 void Renderer::recordLocalShadows(SDL_GPUCommandBuffer*& commands) {
+    bool any = false;
+    for (int slot = 0; slot < lighting_.localShadowCount && slot < SceneLighting::maxLocalShadows; ++slot)
+        any = any || ((lighting_.localShadowRedraw >> uint32_t(lighting_.localShadowRect[slot].w)) & 0x1) != 0;
+    if (!any) return;
+    ++localShadowPasses_;
+    if (!localShadowClearQuad_.vertices) {
+        std::vector<MeshVertex> corners(4);
+        const float xy[4][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}};
+        for (int k = 0; k < 4; ++k) {
+            corners[size_t(k)].positionX = xy[k][0];
+            corners[size_t(k)].positionY = xy[k][1];
+            corners[size_t(k)].positionZ = 1.0f;
+        }
+        localShadowClearQuad_ = createMesh(corners, {0, 1, 2, 0, 2, 3}, false);
+    }
     SDL_GPUDepthStencilTargetInfo depth = {};
     depth.texture = shadowAtlas_;
     depth.clear_depth = 1.0f;
-    depth.load_op = SDL_GPU_LOADOP_CLEAR;
+    depth.load_op = localShadowAtlasCleared_ ? SDL_GPU_LOADOP_LOAD : SDL_GPU_LOADOP_CLEAR;
+    localShadowAtlasCleared_ = true;
     depth.store_op = SDL_GPU_STOREOP_STORE;
     depth.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
     depth.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
@@ -983,10 +1014,32 @@ void Renderer::recordLocalShadows(SDL_GPUCommandBuffer*& commands) {
     SDL_GPUGraphicsPipeline* bound = nullptr;
     for (int slot = 0; slot < lighting_.localShadowCount && slot < SceneLighting::maxLocalShadows; ++slot) {
         const Vec4f& rect = lighting_.localShadowRect[slot];
+        if (((lighting_.localShadowRedraw >> uint32_t(rect.w)) & 0x1) == 0) continue;     // kept from an earlier frame
         SDL_GPUViewport viewport = {rect.x, rect.y, rect.z, rect.z, 0.0f, 1.0f};
         SDL_SetGPUViewport(pass, &viewport);
         const SDL_Rect scissor = {int(rect.x), int(rect.y), int(rect.z), int(rect.z)};
         SDL_SetGPUScissor(pass, &scissor);
+        {
+            if (reserveDescriptors(commands, pass, 1, 2)) {
+                SDL_SetGPUViewport(pass, &viewport);
+                SDL_SetGPUScissor(pass, &scissor);
+            }
+            SDL_BindGPUGraphicsPipeline(pass, localShadowClearPipeline_);
+            bound = localShadowClearPipeline_;
+            SDL_GPUBufferBinding vertexBinding = {localShadowClearQuad_.vertices, 0};
+            SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
+            SDL_GPUBufferBinding indexBinding = {localShadowClearQuad_.indices, 0};
+            SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_32BIT);
+            const VertexUniforms vertexUniforms{identityMatrix(), identityMatrix(), 0u, 0u, 1u, 0};
+            SDL_PushGPUVertexUniformData(commands, 0, &vertexUniforms, sizeof vertexUniforms);
+            bindSkin(pass, nullptr);
+            const SDL_GPUTextureSamplerBinding sampler = {white_, linearSampler_};
+            SDL_BindGPUFragmentSamplers(pass, 0, &sampler, 1);
+            SceneFragmentUniforms u{Vec4f{1, 1, 1, 1}, towardsLight_, Vec4f{0, 0, 0, 0}, Vec4f{0, 0, 0, 0},
+                                    lightingUniforms(lighting_, cameraPosition_, shadowMatrix_, false, float(shadowSize))};
+            SDL_PushGPUFragmentUniformData(commands, 0, &u, sizeof u);
+            SDL_DrawGPUIndexedPrimitives(pass, localShadowClearQuad_.indexCount, 1, 0, 0, 0);
+        }
         for (const LocalCaster& c : localCasters_) {
             if (((c.lightMask >> uint32_t(rect.w)) & 0x1) == 0) continue;    // rect.w: the view's shadow light
             if (reserveDescriptors(commands, pass, 1, 2)) {
@@ -1033,7 +1086,7 @@ void Renderer::record(SDL_GPUCommandBuffer* /*caller's command buffer: the scene
     uploadBones(commands);
     uploadLocalShadows(commands);
     if (shadowsActive_) recordShadows(commands);
-    if (lighting_.localShadowCount > 0 && !localCasters_.empty()) recordLocalShadows(commands);
+    if (lighting_.localShadowCount > 0) recordLocalShadows(commands);
     uploadParticles(commands);
     SDL_GPUColorTargetInfo colour = {};
     colour.texture = colour_;

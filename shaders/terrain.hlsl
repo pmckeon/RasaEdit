@@ -139,7 +139,7 @@ float4 psMain(VertexOutput input) : SV_Target0
     s.hemiTop = hemiTop.rgb;
     s.hemiBottom = hemiBottom.rgb;
     s.sunVisibility = sunShadow(shadowMap, shadowSampler, shadowMatrix, shadowParams, shadowExtra, cameraPosition.xyz, input.world, n);
-    const float3 light = skyLight(n, s) + extraSkyLight(n, extraTowards, extraFront, extraBack, false) + localLights(input.world, n, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner, localRotation, globeMaps, globeSampler, cookieMaps, cookieSampler, shadowAtlas, localShadowSlots, localShadowBase);
+    const float3 light = skyLight(n, s) + extraSkyLight(n, extraTowards, extraFront, extraBack, false) + localLights(input.world, n, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner, localRotation, globeMaps, globeSampler, cookieMaps, cookieSampler, shadowAtlas, localShadowSlots, localShadowBase, 0.0);
     if (fogRange.w > 1.5)
         return float4(fogRange.w < 2.5 ? n * 0.5 + 0.5 : fogRange.w > 3.5 ? saturate(colour) : float3(0, 0, 0), 1.0);   // normals / spec / albedo views
     if (fogRange.z > 0.5)

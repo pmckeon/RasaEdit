@@ -177,6 +177,10 @@ struct SceneLighting {
     static constexpr int maxLocalShadows = 72;      // views: at most 12 shadow lights (the game's cap) x 6 faces
     int localShadowCount = 0;
     Vec4f localShadowBase[maxLocalLights] = {};
+    Vec4f localBackColour[maxLocalLights] = {};     // placed light i's LightBackColor x intensity (plane lights; in the slot buffer)
+    // Shadow lights (bit = shadow-light index) whose views are drawn this frame; the others keep what the atlas holds (a static
+    // light's map is drawn once, as the game does - see SceneView::lighting).
+    uint32_t localShadowRedraw = 0xFFFFFFFFu;
     Mat4 localShadowMatrix[maxLocalShadows];      // world -> the view's clip space
     Vec4f localShadowView[maxLocalShadows] = {};  // xyz: the view's axis, w: -dot(axis, eye) - linear depth = dot(axis, p) + w
     Vec4f localShadowRect[maxLocalShadows] = {};  // x, y: the square's first texel in the atlas, z: its size in texels, w: shadow-light index
@@ -207,6 +211,8 @@ public:
 
     GpuMesh createMesh(const std::vector<MeshVertex>& vertices, const std::vector<uint32_t>& indices, bool lines);
     void destroyMesh(GpuMesh& mesh);
+    // How many placed-light shadow passes this renderer has recorded: SceneView counts a cached map as drawn once this moves on.
+    uint64_t localShadowPassesRecorded() const { return localShadowPasses_; }
     // GPU skinning: a storage buffer of SkinVertex per mesh vertex; the frame's bone palettes (addBones, per frame, returns the
     // palette's first row); setSkin applies to every draw call until clearSkin (skinNormals false: the normal stays as stored,
     // e.g. TRAdditiveAnisoSpec pieces, whose game shader skins only the position).
@@ -451,6 +457,10 @@ private:
     SDL_GPUTexture* shadowAtlas_ = nullptr;       // placed-light shadow maps (depth)
     SDL_GPUGraphicsPipeline* localShadowPipeline_ = nullptr;           // back faces culled
     SDL_GPUGraphicsPipeline* localShadowTwoSidedPipeline_ = nullptr;
+    SDL_GPUGraphicsPipeline* localShadowClearPipeline_ = nullptr;      // depth 1 over a view's square (ALWAYS, depth clamped)
+    GpuMesh localShadowClearQuad_;
+    bool localShadowAtlasCleared_ = false;      // the atlas starts undefined: cleared by the first shadow pass
+    uint64_t localShadowPasses_ = 0;            // shadow passes recorded (localShadowPassesRecorded)
     struct LocalCaster {
         const GpuMesh* mesh;
         Mat4 model;

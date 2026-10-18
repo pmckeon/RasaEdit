@@ -293,6 +293,8 @@ int main(int argc, char** argv) {
             scene.shadowDistance = clientConfigValue(argv[1], "Client.Graphics.ShadowDistance", 100.0f) / 100.0f;
             if (const char* v = envValue("RASA_SHADOWMAX")) scene.shadowMaxSimultaneous = float(std::atof(v)) / 100.0f;
             if (const char* v = envValue("RASA_SHADOWDISTANCE")) scene.shadowDistance = float(std::atof(v)) / 100.0f;
+            if (const char* v = envValue("RASA_RQSSHADOWDISTANCE")) scene.rqsShadowDistance = std::atoi(v) != 0;
+            if (envValue("RASA_NOSHADOWCACHE")) scene.cacheShadowMaps = false;
             if (envValue("RASA_SHOWLIGHT")) scene.showLightBuffer = true;
             if (envValue("RASA_NOENV")) scene.environmentMaps = false;
             if (const char* lt = envValue("RASA_LIGHTTIME")) scene.lightTime = float(std::atof(lt));   // light modifier time, s
@@ -1635,6 +1637,12 @@ int main(int argc, char** argv) {
                             active.localPosition[i].y, active.localPosition[i].z, active.localPosition[i].w, active.localColour[i].x, active.localColour[i].y,
                             active.localColour[i].z, active.localColour[i].w, active.localSpot[i].w == -2.0f ? "point" : active.localSpot[i].w == -3.0f ? "plane" : "spot",
                             active.localSpotInner[i].y, active.localSpot[i].x, active.localSpot[i].y, active.localSpot[i].z, active.localSpot[i].w, active.localSpotInner[i].x);
+            for (int i = 0; i < active.localCount; ++i) {          // the light's frame (localRotation): its x / y / z axes in world space
+                const Vec4f& q = active.localRotation[i];
+                const Mat4 r = rotationMatrix(tr::Quat{q.x, q.y, q.z, q.w});
+                std::printf("light %d frame x %.4f %.4f %.4f y %.4f %.4f %.4f z %.4f %.4f %.4f\n", i, r.row0.x, r.row1.x, r.row2.x, r.row0.y, r.row1.y,
+                            r.row2.y, r.row0.z, r.row1.z, r.row2.z);
+            }
             for (int i = 0; i < active.localCount; ++i) {
                 const Vec4f& b = active.localShadowBase[i];
                 if (b.x > 0.5f)
@@ -1644,6 +1652,7 @@ int main(int argc, char** argv) {
                 if (active.localSpot[i].w > -1.5f && active.localSpotInner[i].w > 0.5f) std::printf("light %d cookie %.0f\n", i, active.localSpotInner[i].w);
             }
             std::printf("characters in placed-light shadow maps: %d\n", scene.lastActorShadowCasters);
+            std::printf("shadow maps drawn in the last frame: %d\n", scene.lastShadowMapsDrawn);
             std::printf("shadow limits: ShadowMaxSimultaneous %.2f, ShadowDistance %.2f\n", scene.shadowMaxSimultaneous, scene.shadowDistance);
             for (const SceneView::ShadowCandidateInfo& c : scene.lastShadowCandidates)
                 std::printf("shadow candidate %.2f at %.1f %.1f %.1f range %.1f%s\n", c.value, c.position.x, c.position.y, c.position.z, c.range,
@@ -2180,6 +2189,72 @@ int main(int argc, char** argv) {
                 if (times[f].total > 2.0 * median)
                     std::printf("  frame %3zu total %7.2f  load %6.2f particles %6.2f lights %6.2f queue %6.2f record %6.2f gpu %6.2f\n", f,
                                 times[f].total, times[f].load, times[f].particles, times[f].lights, times[f].queue, times[f].record, times[f].gpu);
+        }
+        // RASA_SHADOWCACHETEST=x,y,z: kept placed-light shadow maps follow edits. Renders this view twice (the second from the kept maps),
+        // moves the map entity nearest to (x, y, z) 0.8 m east (refreshEntity), renders with the cache and again with every map redrawn:
+        // the last two must be equal and differ from the first.
+        if (const char* at = envValue("RASA_SHADOWCACHETEST")) {
+            tr::Vec3 p{};
+            std::sscanf(at, "%f,%f,%f", &p.x, &p.y, &p.z);
+            auto frame = [&] {
+                scene.queueDraws(highlighted);
+                SDL_GPUTransferBufferCreateInfo ti = {};
+                ti.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+                ti.size = width * height * 4;
+                SDL_GPUTransferBuffer* dl = SDL_CreateGPUTransferBuffer(device, &ti);
+                SDL_GPUCommandBuffer* cb = SDL_AcquireGPUCommandBuffer(device);
+                renderer.record(cb);
+                SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cb);
+                SDL_GPUTextureRegion src = {};
+                src.texture = renderer.colourTarget();
+                src.w = width;
+                src.h = height;
+                src.d = 1;
+                SDL_GPUTextureTransferInfo dst = {};
+                dst.transfer_buffer = dl;
+                dst.pixels_per_row = width;
+                dst.rows_per_layer = height;
+                SDL_DownloadFromGPUTexture(copy, &src, &dst);
+                SDL_EndGPUCopyPass(copy);
+                SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cb);
+                SDL_WaitForGPUFences(device, true, &fence, 1);
+                SDL_ReleaseGPUFence(device, fence);
+                const uint8_t* px = static_cast<const uint8_t*>(SDL_MapGPUTransferBuffer(device, dl, false));
+                std::vector<uint8_t> image(px, px + size_t(width) * height * 4);
+                SDL_UnmapGPUTransferBuffer(device, dl);
+                SDL_ReleaseGPUTransferBuffer(device, dl);
+                return std::make_pair(image, scene.lastShadowMapsDrawn);
+            };
+            auto differing = [](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
+                size_t n = 0;
+                for (size_t k = 0; k + 3 < a.size(); k += 4)
+                    if (std::abs(int(a[k]) - int(b[k])) > 2 || std::abs(int(a[k + 1]) - int(b[k + 1])) > 2 || std::abs(int(a[k + 2]) - int(b[k + 2])) > 2) ++n;
+                return n;
+            };
+            size_t nearest = 0;
+            float best = 1e30f;
+            for (size_t k = 0; k < map.map.entities.size(); ++k) {
+                if (data.className(map.map.entities[k].classId).rfind("ABV", 0) == 0) continue;     // invisible collision boxes
+                const tr::Vec3& l = map.map.entities[k].location;
+                const float d = (l.x - p.x) * (l.x - p.x) + (l.y - p.y) * (l.y - p.y) + (l.z - p.z) * (l.z - p.z);
+                if (d < best) { best = d; nearest = k; }
+            }
+            const auto a = frame();
+            const auto a2 = frame();
+            tr::MapBundle& editable = const_cast<tr::MapBundle&>(map);     // as the Client workspace edits the bundle the scene shows
+            editable.map.entities[nearest].location.x += 0.8f;
+            scene.refreshEntity(nearest);
+            const auto b = frame();
+            scene.cacheShadowMaps = false;
+            const auto c = frame();
+            scene.cacheShadowMaps = true;
+            editable.map.entities[nearest].location.x -= 0.8f;
+            scene.refreshEntity(nearest);
+            std::printf("shadow cache test: entity %zu (%s); maps drawn %d / %d (kept) / %d (after the edit) / %d (no cache)\n", nearest,
+                        data.className(map.map.entities[nearest].classId).c_str(), a.second, a2.second, b.second, c.second);
+            std::printf("shadow cache test: kept vs first %zu px, edited vs first %zu px, edited cached vs redrawn %zu px -> %s\n",
+                        differing(a.first, a2.first), differing(a.first, b.first), differing(b.first, c.first),
+                        differing(a.first, a2.first) == 0 && differing(b.first, c.first) == 0 && differing(a.first, b.first) > 0 ? "PASS" : "FAIL");
         }
         if (envValue("RASA_SKINTIMING")) {
             for (int pass = 0; pass < 3; ++pass) {        // on, off, on: the first pass also pays one-time costs
