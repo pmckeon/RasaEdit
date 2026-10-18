@@ -141,7 +141,7 @@ float4 psMain(VertexOutput input) : SV_Target0
     s.sunVisibility = sunShadow(shadowMap, shadowSampler, shadowMatrix, shadowParams, shadowExtra, cameraPosition.xyz, input.world, n);
     const float3 light = skyLight(n, s) + extraSkyLight(n, extraTowards, extraFront, extraBack, false) + localLights(input.world, n, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner, localRotation, globeMaps, globeSampler, cookieMaps, cookieSampler, shadowAtlas, localShadowSlots, localShadowBase, 0.0);
     if (fogRange.w > 1.5)
-        return float4(fogRange.w < 2.5 ? n * 0.5 + 0.5 : fogRange.w > 3.5 ? saturate(colour) : float3(0, 0, 0), 1.0);   // normals / spec / albedo views
+        return float4(fogRange.w < 2.5 ? n * 0.5 + 0.5 : (fogRange.w > 3.5 && fogRange.w < 4.5) ? saturate(colour) : float3(0, 0, 0), 1.0);   // normals / spec / albedo views (terrain has no spec: 0; spec power view 5 too)
     if (fogRange.z > 0.5)
         return float4(light * 0.2, 1.0);       // the game's light buffer (x OO_LIGHT_MULTIPLIER), as /dl_showlight shows it
     const float3 lit = colour * light;

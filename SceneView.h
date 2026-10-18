@@ -308,8 +308,8 @@ public:
     int lastActorShadowCasters = 0;          // characters drawn into non-static lights' shadow maps this frame (queueDraws)
     int onlyLight = -1;                     // diagnostic: >= 0 lights the frame with that placed light only
     bool showLightBuffer = false;
-    int debugView = 0;                      // 2: normals, 3: specular intensity, 4: albedo (the game's /dl_shownormals,
-                                            // /dl_showspecintensity, /dl_showdiffuse)
+    int debugView = 0;                      // 2: normals, 3: specular intensity, 4: albedo, 5: specular power (the game's
+                                            // /dl_shownormals, /dl_showspecintensity, /dl_showdiffuse, /dl_showspecpower)
     bool materialMaps = true;               // normal and gloss maps (Pal* materials); off for comparison
     bool environmentMaps = true;
     bool showStateEffects = true;           // server objects' use-state particles and lights (special-FX packages)

@@ -301,6 +301,7 @@ int main(int argc, char** argv) {
             if (envValue("RASA_NOLIGHTMODS")) scene.animateLights = false;
             if (envValue("RASA_SHOWNORMALS")) scene.debugView = 2;                  // like the game's /dl_shownormals
             if (envValue("RASA_SHOWSPEC")) scene.debugView = 3;
+            if (envValue("RASA_SHOWSPECPOWER")) scene.debugView = 5;                // like the game's /dl_showspecpower
             if (envValue("RASA_SHOWDIFFUSE")) scene.debugView = 4;                  // like the game's /dl_showdiffuse                     // like the game's /dl_showspecintensity     // like the game's /dl_showlight
             if (const char* a = envValue("RASA_AMBIENT")) scene.ambientScale = float(std::atof(a));
             if (envValue("RASA_NOMAPS")) scene.materialMaps = false;                // normal / gloss maps off   // scales the sky hemi light

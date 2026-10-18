@@ -393,6 +393,8 @@ float4 psMain(VertexOutput input) : SV_Target0
             return float4(0, 0, 0, 0);         // translucent (forward) pieces are not in the G-buffer
         if (fogRange.w < 2.5)
             return float4(n * 0.5 + 0.5, 1.0);
+        if (fogRange.w > 4.5)
+            return float4(specPower.xxx, 1.0);        // G-buffer spec power (Pal gloss r / TR saturate(MatSpecular.x)): debug view 5
         if (fogRange.w > 3.5)
             return float4(saturate(base.rgb), 1.0);   // G-buffer albedo (8-bit target: clamped - UNVERIFIED format)
         const float specIntensity = material.y > 0.5 ? glossTexture.Sample(glossSampler, input.uv).g : (trBits & 0x4) ? trSpecular.y * trGloss : 0.0;
