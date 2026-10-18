@@ -498,6 +498,17 @@ int main(int argc, char** argv) {
                     std::printf("pkg %s particles %s target %u contact point %u (v%u, unknown0 %u, unknown2 %u, flag %d)\n", pkg, a.file.c_str(), a.target,
                                 a.contactPoint, a.version, a.unknown0, a.unknown2, int(a.flag));
                 std::printf("pkg %s: %zu lights\n", pkg, p.lights.size());
+                for (const tr::SfxLight& l : p.lights) {
+                    std::printf("  light duration %u ms target %u contact point %u spot %d shadows %d priority %.2f\n", l.durationMs,
+                                l.target, l.contactPoint, int(l.spot), int(l.castsShadows), l.priority);
+                    static const char* names[9] = {"colourR", "colourG", "colourB", "colourA", "range", "falloff", "intensity", "penumbra", "cone"};
+                    for (int k = 0; k < 9; ++k) {
+                        const tr::SfxCurve& c = tr::sfxLightCurve(l, k);
+                        std::printf("    %-10s loop %d:", names[k], int(c.loop));
+                        for (const auto& key : c.keys) std::printf(" (%.3f s, %.3f)", key.first, key.second);
+                        std::printf("\n");
+                    }
+                }
             } catch (const std::exception& e) {
                 std::printf("pkg %s: %s\n", pkg, e.what());
             }

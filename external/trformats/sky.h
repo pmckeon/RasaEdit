@@ -100,6 +100,7 @@ Sky readSky(const Bytes& data);
 // The game's spot pass shines along the light's local +z (verified in trspotlight); WorldOrientation is read as
 // x, y, z, w (UNVERIFIED). UNVERIFIED readings: Cone/PenumbraAngle are full angles in degrees; FalloffPercent × Range
 // is the distance where the light starts to fade (the shaders' LightFalloff).
+struct LightModifierTrack;
 struct PlacedLight {
     enum class Kind : uint8_t { Point, Spot, Plane };
     Kind kind = Kind::Point;
@@ -128,6 +129,9 @@ struct PlacedLight {
     float coneAngle = 45;             // spot, degrees
     float penumbraAngle = 60;         // spot, degrees
     uint64_t id = 0;                  // "ID": what a lights.xml <Mod LightID="..."> refers to
+    // Modifier tracks of the light's own template (.ltmp <Mods>), for lights on contact points: the game attaches them with the
+    // light (the waypoint column's blue light animates this way, 2026-10-19). Map lights take theirs from lights.xml instead.
+    std::vector<LightModifierTrack> modifiers;
     float width = 0;                  // plane: Width, Length (the box's full x / y extents), FalloffPercentVec (x y z)
     float length = 0;
     Vec3 falloffPercentVec;

@@ -756,7 +756,7 @@ SceneLighting SceneView::lighting() const {
         // A light on a contact point of an animated bone follows it (e.g. prop_hum_light_rotate_v01's beacon).
         const std::vector<Mat4> animated = animatedPieceMatrices(model, lightTime);
         for (size_t k = 0; k < model.lights.size(); ++k) {
-            tr::PlacedLight light = model.lights[k];
+            tr::PlacedLight light = animateLights ? modifiedLight(model.lights[k]) : model.lights[k];
             const int32_t bone = k < model.lightBones.size() ? model.lightBones[k] : -1;
             if (bone >= 0 && size_t(bone) < animated.size()) {
                 light.position = transformPoint(animated[size_t(bone)], light.position);
@@ -1055,11 +1055,10 @@ size_t SceneView::mapLightModifierTracks(const tr::PlacedLight& light) const {
 }
 
 tr::PlacedLight SceneView::modifiedLight(const tr::PlacedLight& light) const {
-    if (light.id == 0 || lightModifiers_.empty()) return light;
+    if (light.id == 0 && light.modifiers.empty()) return light;
     tr::PlacedLight out = light;
-    for (const tr::LightModifier& mod : lightModifiers_) {
-        if (mod.lightId != light.id) continue;
-        for (const tr::LightModifierTrack& track : mod.tracks) {
+    auto applyTracks = [&](const std::vector<tr::LightModifierTrack>& list) {
+        for (const tr::LightModifierTrack& track : list) {
             if (!track.enabled) continue;
             const float w = tr::lightModifierWeight(track, lightTime);
             switch (track.kind) {
@@ -1092,7 +1091,11 @@ tr::PlacedLight SceneView::modifiedLight(const tr::PlacedLight& light) const {
                     break;
             }
         }
-    }
+    };
+    if (light.id != 0)
+        for (const tr::LightModifier& mod : lightModifiers_)
+            if (mod.lightId == light.id) applyTracks(mod.tracks);
+    applyTracks(light.modifiers);       // the template's own tracks (contact-point lights)
     return out;
 }
 
@@ -2136,6 +2139,12 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 } catch (const std::exception&) {
                     continue;
                 }
+                // The template's own <Mods> (its LightID names one of its lights) travel with the light.
+                const std::vector<tr::LightModifier> templateMods = tr::readLightModifiers(data);
+                for (tr::PlacedLight& light : lights)
+                    for (const tr::LightModifier& mod : templateMods)
+                        if (mod.lightId == light.id)
+                            light.modifiers.insert(light.modifiers.end(), mod.tracks.begin(), mod.tracks.end());
                 const Mat4 frame = contactPointFrame(geo, *target);
                 for (tr::PlacedLight light : lights) {
                     light.position = transformPoint(frame, light.offset);
