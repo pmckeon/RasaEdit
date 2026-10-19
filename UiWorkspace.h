@@ -188,6 +188,9 @@ private:
     bool interactive_ = false;
     std::set<const tr::XmlNode*> toggled_;  // interactive mode: toggle buttons switched on
     const tr::XmlNode* pushed_ = nullptr;   // interactive mode: the button the mouse went down on
+    std::map<const tr::XmlNode*, float> scrollValues_;   // interactive mode: each scroll bar's / slider's thumb (0..1), once dragged
+    const tr::XmlNode* thumbBar_ = nullptr;              // interactive mode: the bar whose thumb is being dragged
+    int32_t grabX_ = 0, grabY_ = 0;                      // the mouse's offset into that thumb when it was grabbed
     char filter_[128] = {};
     // Definitions panel.
     tr::UiSection defSection_ = tr::UiSection::Textures;

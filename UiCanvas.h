@@ -61,6 +61,8 @@ public:
         float progress = -1.0f;
         // Scroll bars' and sliders' thumbs, 0..1 of their travel; below 0: as exported (each one's currentValue).
         float scroll = -1.0f;
+        // Interactive mode: each scroll bar's / slider's own thumb position (0..1 of its travel), taking precedence over `scroll`.
+        const std::map<const tr::XmlNode*, float>* scrollValues = nullptr;
         // Animations (Definitions/Animations, see sampleAnimation): milliseconds since every widget's animation started; below 0: none
         // applied (the export's own state).
         float animTime = -1.0f;
@@ -115,6 +117,12 @@ public:
     std::vector<int32_t> pick(int32_t x, int32_t y) const;
     // The button (a widget with button textures) under a point of the last render: the picked widget or its nearest such ancestor.
     const tr::XmlNode* buttonAt(int32_t x, int32_t y) const;
+    // Interactive scroll bars / sliders: the thumb drawn under (x, y) (or nullptr), its bar, and the thumb position (0..1) that puts
+    // the thumb's top left at (x - grabX, y - grabY) - applyScroll's layout backwards.
+    const tr::XmlNode* thumbAt(int32_t x, int32_t y) const;
+    const tr::XmlNode* parentOf(const tr::XmlNode* child) const;
+    bool drawnRect(const tr::XmlNode* widget, Rect& rect) const;     // where the last draw put it
+    float thumbRatioAt(const tr::XmlNode& bar, int32_t x, int32_t y) const;
     static bool isButton(const tr::XmlNode& n) { return n.hasAttribute("UpTextureDef"); }
     // Whether the last render sampled an animation that has not come to rest (repeat / pingpong, or before its end).
     bool animating() const { return animating_; }

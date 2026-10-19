@@ -1051,7 +1051,12 @@ void UiCanvas::applyProgress(const tr::XmlNode& bar) {
 // Sliders (Slider, Selector, RangeTarget; loader FUN_008da640 not traced in detail): offset (trunc((track width - thumb width) x
 // (value - min) / (max - min)), (track height - thumb height) / 2) fits all 11 exported thumbs exactly.
 void UiCanvas::applyScroll(const tr::XmlNode& bar) {
-    if (options_.scroll < 0 || !bar.hasAttribute("maxRange")) return;
+    float ratio = options_.scroll;
+    if (options_.scrollValues) {
+        const auto own = options_.scrollValues->find(&bar);
+        if (own != options_.scrollValues->end()) ratio = own->second;
+    }
+    if (ratio < 0 || !bar.hasAttribute("maxRange")) return;
     const tr::XmlNode* thumb = nullptr;
     const tr::XmlNode* track = nullptr;
     const tr::XmlNode* up = nullptr;
@@ -1066,7 +1071,7 @@ void UiCanvas::applyScroll(const tr::XmlNode& bar) {
     const int32_t trackW = track ? intAttribute(*track, "sizeW") : intAttribute(bar, "sizeW");
     const int32_t trackH = track ? intAttribute(*track, "sizeH") : intAttribute(bar, "sizeH");
     const int32_t thumbW = intAttribute(*thumb, "sizeW"), thumbH = intAttribute(*thumb, "sizeH");
-    const float r = std::clamp(options_.scroll, 0.0f, 1.0f);
+    const float r = std::clamp(ratio, 0.0f, 1.0f);
     ButtonOverride& o = buttonOverrides_[thumb];
     o.offset = true;
     if (bar.tag == "ScrollBar") {
@@ -1175,6 +1180,64 @@ std::vector<UiCanvas::DrawnWidget> UiCanvas::render(const std::vector<int32_t>& 
         rgba[k * 4 + 3] = 255;
     }
     return drawn_;
+}
+
+const tr::XmlNode* UiCanvas::thumbAt(int32_t x, int32_t y) const {
+    for (auto it = drawn_.rbegin(); it != drawn_.rend(); ++it) {
+        const tr::XmlNode* n = node(it->path);
+        if (n && n->tag == "Thumb" && it->rect.contains(x, y)) return n;
+    }
+    return nullptr;
+}
+
+bool UiCanvas::drawnRect(const tr::XmlNode* widget, Rect& rect) const {
+    for (const DrawnWidget& d : drawn_)
+        if (node(d.path) == widget) {
+            rect = d.rect;
+            return true;
+        }
+    return false;
+}
+
+const tr::XmlNode* UiCanvas::parentOf(const tr::XmlNode* child) const {
+    for (const DrawnWidget& d : drawn_)
+        if (node(d.path) == child && !d.path.empty()) {
+            std::vector<int32_t> up = d.path;
+            up.pop_back();
+            return up.empty() ? nullptr : node(up);
+        }
+    return nullptr;
+}
+
+float UiCanvas::thumbRatioAt(const tr::XmlNode& bar, int32_t x, int32_t y) const {
+    // The bar's drawn rectangle and the same sizes applyScroll uses: thumb offset = lead (+ arrow button) + trunc(travel x r).
+    Rect barRect{0, 0, 0, 0};
+    bool found = false;
+    for (const DrawnWidget& d : drawn_)
+        if (node(d.path) == &bar) {
+            barRect = d.rect;
+            found = true;
+            break;
+        }
+    if (!found) return 0.0f;
+    const tr::XmlNode *thumb = nullptr, *track = nullptr, *up = nullptr, *down = nullptr;
+    for (const tr::XmlNode& c : bar.children) {
+        if (c.tag == "Thumb") thumb = &c;
+        else if (c.tag == "Track") track = &c;
+        else if (c.tag == "ScrollUpBtn") up = &c;
+        else if (c.tag == "ScrollDownBtn") down = &c;
+    }
+    if (!thumb) return 0.0f;
+    const int32_t trackW = track ? intAttribute(*track, "sizeW") : intAttribute(bar, "sizeW");
+    const int32_t trackH = track ? intAttribute(*track, "sizeH") : intAttribute(bar, "sizeH");
+    const int32_t thumbW = intAttribute(*thumb, "sizeW"), thumbH = intAttribute(*thumb, "sizeH");
+    const bool vertical = bar.tag == "ScrollBar" && bar.attribute("style") != "horizontal";
+    if (vertical) {
+        const int32_t lead = barRect.y0 + (up ? intAttribute(*up, "sizeH") : 0);
+        return trackH > thumbH ? std::clamp(float(y - lead) / float(trackH - thumbH), 0.0f, 1.0f) : 0.0f;
+    }
+    const int32_t lead = barRect.x0 + (bar.tag == "ScrollBar" && down ? intAttribute(*down, "sizeW") : 0);
+    return trackW > thumbW ? std::clamp(float(x - lead) / float(trackW - thumbW), 0.0f, 1.0f) : 0.0f;
 }
 
 const tr::XmlNode* UiCanvas::buttonAt(int32_t x, int32_t y) const {

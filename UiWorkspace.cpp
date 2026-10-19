@@ -351,10 +351,13 @@ void UiWorkspace::drawCanvasPanel() {
     if (ImGui::Combo("##mode", &mode, "Edit\0Interactive\0") && (mode == 1) != interactive_) {
         interactive_ = mode == 1;
         toggled_.clear();
+        scrollValues_.clear();
+        thumbBar_ = nullptr;
         pushed_ = nullptr;
         options_.interactiveButtons = interactive_;
         options_.hoveredButton = options_.pushedButton = nullptr;
         options_.toggledButtons = &toggled_;
+        options_.scrollValues = interactive_ ? &scrollValues_ : nullptr;
         options_.mouseHighlight = interactive_;
         options_.animTime = interactive_ ? 0.0f : -1.0f;
         if (interactive_) options_.mouseX = options_.mouseY = -10000.0f;     // until the mouse is over the canvas
@@ -496,6 +499,24 @@ void UiWorkspace::drawCanvasPanel() {
             // over it toggles a toggle button.
             const tr::XmlNode* button = canvas_.buttonAt(x, y);
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) pushed_ = button;
+            // Scroll bar / slider thumbs follow a drag along their track (the thumb layout backwards, UiCanvas::thumbRatioAt). Arrow
+            // buttons and track clicks do not step them: their step sizes are not traced.
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+                if (const tr::XmlNode* thumb = canvas_.thumbAt(x, y)) {
+                    UiCanvas::Rect r{0, 0, 0, 0};
+                    thumbBar_ = canvas_.drawnRect(thumb, r) ? canvas_.parentOf(thumb) : nullptr;
+                    grabX_ = x - r.x0;
+                    grabY_ = y - r.y0;
+                }
+            if (thumbBar_ && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                const float ratio = canvas_.thumbRatioAt(*thumbBar_, x - grabX_, y - grabY_);
+                const auto old = scrollValues_.find(thumbBar_);
+                if (old == scrollValues_.end() || old->second != ratio) {
+                    scrollValues_[thumbBar_] = ratio;
+                    dirty_ = true;
+                }
+            }
+            if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) thumbBar_ = nullptr;
             if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
                 if (pushed_ && pushed_ == button && button->attribute("enabled") == "true" && (button->tag == "Button" || button->tag == "ToggleButton")) {
                     if (!toggled_.erase(button)) toggled_.insert(button);
@@ -835,6 +856,8 @@ void UiWorkspace::syncWithDocument() {
     canvas_.setExport(ui());
     // Node pointers changed with the re-parse.
     toggled_.clear();
+    scrollValues_.clear();
+    thumbBar_ = nullptr;
     pushed_ = nullptr;
     options_.hoveredButton = options_.pushedButton = nullptr;
     options_.dragNode = nullptr;

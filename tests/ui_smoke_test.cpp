@@ -1200,6 +1200,37 @@ int main() {
             }
             check(buttonFound, "UI interactive mode finds the button under the mouse");
             check(hoverChanges, "UI interactive mode highlights the hovered button");
+            // Interactive scroll bars: a thumb placed at 0.6 by its own value is found under the mouse, and the ratio read back from its
+            // drawn position is 0.6 (the layout and its inverse agree); the drawing moved.
+            {
+                bool thumbRoundTrip = false, thumbMoved = false;
+                if (ui.showBranch("InGame/HUD/ChatWindow")) {
+                    frames(editor, device, 2);
+                    const tr::XmlNode* bar = nullptr;
+                    for (const auto& d : ui.drawnWidgets()) {
+                        const tr::XmlNode* n = ui.canvas_.node(d.path);
+                        if (n && n->tag == "ScrollBar" && n->hasAttribute("maxRange")) { bar = n; break; }
+                    }
+                    if (bar) {
+                        std::map<const tr::XmlNode*, float> values{{bar, 0.6f}};
+                        UiCanvas::Options plain, moved;
+                        moved.scrollValues = &values;
+                        std::vector<uint8_t> a, b;
+                        ui.canvas_.render(ui.branch_, plain, a);
+                        ui.canvas_.render(ui.branch_, moved, b);
+                        thumbMoved = a != b;
+                        const tr::XmlNode* thumb = nullptr;
+                        for (const tr::XmlNode& c : bar->children) if (c.tag == "Thumb") thumb = &c;
+                        UiCanvas::Rect r{0, 0, 0, 0};
+                        if (thumb && ui.canvas_.drawnRect(thumb, r)) {
+                            const float back = ui.canvas_.thumbRatioAt(*bar, r.x0, r.y0);
+                            thumbRoundTrip = ui.canvas_.thumbAt(r.x0 + 1, r.y0 + 1) == thumb && ui.canvas_.parentOf(thumb) == bar && std::fabs(back - 0.6f) < 0.05f;
+                        }
+                    }
+                }
+                check(thumbMoved, "UI interactive scroll bar: a thumb value moves the thumb");
+                check(thumbRoundTrip, "UI interactive scroll bar: the thumb under the mouse and its ratio read back");
+            }
 
             // Editing a COPY of the layout file: valid edits are written, invalid values refused, saving refused while the file has a
             // new error, and what is saved reads back.
