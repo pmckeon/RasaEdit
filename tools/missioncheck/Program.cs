@@ -37,6 +37,19 @@ namespace Harness
                 Console.WriteLine($"server check: {selected.Count} enabled, {report.Diagnostics.Count} diagnostics, readiness {(report.BlocksReadiness ? "BLOCKED" : "ok")}");
                 foreach (var d in report.Diagnostics)
                     Console.WriteLine($"  mission {d.MissionId} {d.ContentRevision} o{N(d.ObjectiveId)} t{N(d.TransitionId)} g{N(d.TriggerId)} a{N(d.ActionId)} s{N(d.ScenarioId)} p{N(d.StepId)} {d.Code}: {d.Message}");
+                // The rest of start-up: MissionContentCatalog.Load runs the above again, then the scene bindings and experiences
+                // (MissionSceneValidation, the script registry and SceneRuntime) and the requirement / item checks.
+                try
+                {
+                    new MissionContentCatalog(new Factory(unit), new Dictionary<uint, Rasa.Structures.Mission>(),
+                        new Dictionary<uint, MissionRewardDefinition>()).Load();
+                    Console.WriteLine("catalog check: ok");
+                }
+                catch (Exception e)
+                {
+                    Console.WriteLine("catalog check: START-UP FAILS: " + e.GetType().Name + ": " + e.Message);
+                    return 1;
+                }
                 return 0;
             }
             catch (Exception e)
@@ -47,6 +60,14 @@ namespace Harness
         }
 
         private static string N(uint? v) => v.HasValue ? v.Value.ToString() : "-1";
+
+        private sealed class Factory : Rasa.Repositories.UnitOfWork.IGameUnitOfWorkFactory
+        {
+            private readonly Unit _unit;
+            public Factory(Unit unit) { _unit = unit; }
+            public Rasa.Repositories.Char.ICharUnitOfWork CreateChar() => throw new NotSupportedException();
+            public IWorldUnitOfWork CreateWorld() => _unit;
+        }
 
         // As Rasa.Test's RepositoryBackedWorldUnitOfWork (BootcampStartupValidationTests).
         private sealed class Unit : IWorldUnitOfWork
@@ -61,6 +82,7 @@ namespace Harness
                 OrdinaryLoot = new OrdinaryLootRepository(context);
                 NpcPackages = new NpcPackageRepository(context);
                 Teleporters = new TeleporterRepository(context);
+                Spawnpools = new SpawnpoolRepository(context);
             }
             public IActionRepository Actions { get; }
             public IEquipmentRepository Equipment { get; }

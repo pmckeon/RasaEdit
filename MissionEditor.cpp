@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <set>
 
@@ -199,6 +200,24 @@ void MissionEditor::load(const WorldDatabase& database) {
     }
     tables_ = std::move(tables);
     references_ = MissionReferences::load(database);
+    placeholderTextId_ = -1;
+    teleporters_.clear();
+    if (database.hasTable("teleporter")) {
+        const DbTable tp = database.loadTable("teleporter");
+        const int id = tp.column("id"), description = tp.column("description"), map = tp.column("map_context_id");
+        for (const auto& r : tp.rows) {
+            if (id < 0) break;
+            std::string label = description >= 0 && !r[size_t(description)].t.empty() ? r[size_t(description)].t : std::string("(no description)");
+            if (map >= 0) {
+                const int64_t m = r[size_t(map)].asInt();
+                std::string mapName = std::to_string(m);
+                for (const MapInfo& info : database.maps())
+                    if (info.mapContextId == m) mapName = info.name;
+                label += "  (" + mapName + ")";
+            }
+            teleporters_.emplace_back(r[size_t(id)].asInt(), label);
+        }
+    }
     savedValidation_ = validateTables(false);
     validation_ = savedValidation_;
     validationDirty_ = false;
@@ -255,6 +274,7 @@ const MissionValidationResult& MissionEditor::validation() {
 
 void MissionEditor::clear() {
     tables_.clear();
+    teleporters_.clear();
     selectedMission_ = -1;
 }
 
@@ -343,6 +363,13 @@ std::vector<DbValue> MissionEditor::newRow(const Table& t, const DbTable& parent
     set("enabled", DbValue::integer(1));
     set("quantity", DbValue::integer(1));
     set("comment", DbValue::text("new"));
+    if (placeholderTextId_ > 0) {                         // ID_DEFAULT_TEXT until a text is chosen
+        if (std::strcmp(t.spec->table, "mission_content_definition") == 0) set("client_name_text_id", DbValue::integer(placeholderTextId_));
+        if (std::strcmp(t.spec->table, "mission_objective_definition") == 0) {
+            set("client_name_text_id", DbValue::integer(placeholderTextId_));
+            set("client_body_text_id", DbValue::integer(placeholderTextId_));
+        }
+    }
     if (t.spec->kindColumn) {
         for (const FieldSpec& f : t.spec->fields)
             if (std::strcmp(f.column, t.spec->kindColumn) == 0 && f.values && !f.values->empty()) set(t.spec->kindColumn, DbValue::integer(f.values->front().first));
@@ -395,6 +422,22 @@ std::string MissionEditor::missionLabel(EditorContext& ctx, const std::vector<Db
 }
 
 // Columns that name another row of the same mission (Rasa.NET's mission content keys) or a mission.
+namespace {
+// A dropdown over (id, label) pairs worked out by the caller.
+LookupSource pairsSource(std::shared_ptr<std::vector<std::pair<int64_t, std::string>>> choices) {
+    LookupSource source;
+    source.name = [choices](int64_t id) {
+        for (const auto& c : *choices)
+            if (c.first == id) return c.second;
+        return std::string();
+    };
+    source.fill = [choices](LookupList& out) {
+        for (const auto& c : *choices) out.push_back(LookupChoice{c.first, c.second});
+    };
+    return source;
+}
+}  // namespace
+
 MissionEditor::MissionReference MissionEditor::missionReference(const char* column) {
     static const struct { const char* column; MissionReference ref; } kRefs[] = {
         {"target_objective_id", {"mission_objective_definition", "objective_id", "objective"}},
@@ -454,6 +497,283 @@ std::vector<std::pair<int64_t, std::string>> MissionEditor::referenceChoices(Edi
         out.emplace_back(id, label);
     }
     return out;
+}
+
+std::vector<std::pair<int64_t, std::string>> MissionEditor::playerFlagChoices() const {
+    // flag -> its uses ("set by 1390 (Persist the reported Milpas outcome)", "read by 1992 (...)")
+    std::map<int64_t, std::vector<std::string>> uses;
+    uses[0x80000001ll].push_back("server flag: Bootcamp complete");
+    static const struct { const char* table; const char* verb; } kTables[] = {
+        {"mission_prerequisite", "required by"}, {"mission_trigger", "read by"}, {"mission_action", "set by"}};
+    for (const auto& k : kTables) {
+        const Table* t = const_cast<MissionEditor*>(this)->table(k.table);
+        if (!t) continue;
+        const DbTable& d = t->edited;
+        const int flag = d.column("player_flag_id"), mission = d.column("mission_id"), comment = d.column("comment"), kind = d.column("kind");
+        if (flag < 0 || mission < 0) continue;
+        for (const auto& r : d.rows) {
+            if (r[size_t(flag)].isNull()) continue;
+            // mission_action kind 8 sets the flag; kind 9 (ambient conversation) names one it reads.
+            const bool reads = std::strcmp(k.table, "mission_action") == 0 && kind >= 0 && r[size_t(kind)].asInt() == 9;
+            std::string use = std::string(reads ? "read by" : k.verb) + " " + std::to_string(r[size_t(mission)].asInt());
+            if (comment >= 0 && !r[size_t(comment)].t.empty()) use += " (" + r[size_t(comment)].t + ")";
+            std::vector<std::string>& list = uses[r[size_t(flag)].asInt()];
+            if (std::find(list.begin(), list.end(), use) == list.end()) list.push_back(use);
+        }
+    }
+    std::vector<std::pair<int64_t, std::string>> out;
+    for (const auto& [id, list] : uses) {
+        std::string label;
+        for (size_t i = 0; i < list.size() && i < 3; ++i) label += (i ? "; " : "") + list[i];
+        if (list.size() > 3) label += "; +" + std::to_string(list.size() - 3) + " more";
+        out.emplace_back(id, label);
+    }
+    return out;
+}
+
+namespace {
+int64_t findPlaceholderTextId(tr::GameData& data) {
+    std::set<int64_t> referenced;
+    try {
+        if (const tr::py::Object* t = data.global("generated.client.missionconversation", "lookup"))
+            for (const auto& e : t->entries) referenced.insert(tr::py::asInt(tr::py::item(e.second.get(), 0), -1));
+        if (const tr::py::Object* t = data.global("generated.client.objectiveconversation", "lookup"))
+            for (const auto& e : t->entries) referenced.insert(tr::py::asInt(tr::py::item(e.second.get(), 0), -1));
+        if (const tr::py::Object* t = data.global("generated.client.missionobjective", "lookup"))
+            for (const auto& e : t->entries) {
+                const tr::py::Object* texts = tr::py::item(e.second.get(), 0);
+                for (size_t k = 0; k < tr::py::length(texts); ++k)
+                    if (!tr::py::isNone(tr::py::item(texts, k))) referenced.insert(tr::py::asInt(tr::py::item(texts, k)));
+            }
+        std::vector<const tr::py::Object*> lookups;
+        const std::string prefix = "generated.client.language.", suffix = ".missiontextlanguage";
+        for (const std::string& m : data.moduleNames())
+            if (m.compare(0, prefix.size(), prefix) == 0 && m.size() > suffix.size() && m.compare(m.size() - suffix.size(), suffix.size(), suffix) == 0)
+                if (const tr::py::Object* l = data.global(m, "lookup")) lookups.push_back(l);
+        const tr::py::Object* english = data.global("generated.client.language.english.missiontextlanguage", "lookup");
+        if (!english) return 0;
+        std::set<int64_t> ids;
+        for (const auto& e : english->entries) ids.insert(tr::py::asInt(tr::py::item(e.first.get(), 0)));
+        for (int64_t id : ids) {
+            if (referenced.count(id)) continue;
+            bool empty = true;
+            for (const tr::py::Object* l : lookups)
+                for (int64_t gender : {1, 2})
+                    if (const tr::py::Object* v = tr::py::dictGetTuple(l, {id, gender}); v && !tr::py::asString(tr::py::item(v, 0)).empty()) empty = false;
+            if (empty) return id;
+        }
+    } catch (const std::exception&) {
+    }
+    return 0;
+}
+}  // namespace
+
+std::optional<int64_t> MissionEditor::clientTextId(EditorContext& ctx, const DbTable& table, const std::vector<DbValue>& row,
+                                                   const char* column) const {
+    if (!ctx.gameData) return std::nullopt;
+    const auto value = [&](const char* c) {
+        const int i = table.column(c);
+        return i < 0 ? int64_t(-1) : row[size_t(i)].asInt();
+    };
+    const int64_t mission = value("mission_id");
+    try {
+        if (table.name == "mission_content_definition" && std::strcmp(column, "client_name_text_id") == 0) {
+            const tr::py::Object* t = tr::py::dictGetTuple(ctx.gameData->global("generated.client.missionconversation", "lookup"), {mission, 1});
+            if (t) return tr::py::asInt(tr::py::item(t, 0));
+        }
+        if (table.name == "mission_objective_definition") {
+            static const char* kColumns[] = {"client_name_text_id", "client_body_text_id", "client_counter_0_text_id", "client_counter_1_text_id",
+                                             "client_counter_2_text_id"};
+            const tr::py::Object* t = tr::py::dictGetTuple(ctx.gameData->global("generated.client.missionobjective", "lookup"), {mission, value("objective_id")});
+            const tr::py::Object* texts = tr::py::item(t, 0);
+            for (size_t k = 0; k < 5; ++k)
+                if (std::strcmp(column, kColumns[k]) == 0 && tr::py::item(texts, k) && !tr::py::isNone(tr::py::item(texts, k)))
+                    return tr::py::asInt(tr::py::item(texts, k));
+        }
+    } catch (const std::exception&) {
+    }
+    return std::nullopt;
+}
+
+namespace {
+std::string oneLine(std::string text, size_t limit = 120) {
+    for (char& c : text)
+        if (c == '\n' || c == '\r') c = ' ';
+    if (text.size() > limit) text = text.substr(0, limit) + "...";
+    return text;
+}
+}  // namespace
+
+bool MissionEditor::missionTextField(EditorContext& ctx, const char* label, int64_t& value, std::optional<int64_t> client) {
+    bool changed = false;
+    // The placeholder stops being one once its text is filled in (in the Text workspace): work it out again.
+    if (placeholderTextId_ > 0 && ctx.gameData && !ctx.gameData->missionText(int32_t(placeholderTextId_)).empty()) placeholderTextId_ = -1;
+    const bool placeholder = placeholderTextId_ > 0 && value == placeholderTextId_;
+    const std::string current = value == 0 ? std::string("(none)") : "#" + std::to_string(value) + "  " + oneLine(ctx.gameData ? ctx.gameData->missionText(int32_t(value)) : "");
+    ImGui::TextUnformatted(label);
+    ImGui::SameLine();
+    const bool browse = ImGui::SmallButton("Browse...");
+    ImGui::SetItemTooltip("Search and pick a text of the client's missiontextlanguage");
+    ImGui::SameLine();
+    if (placeholder) {
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "ID_DEFAULT_TEXT (placeholder - choose a text)");
+        ImGui::SetItemTooltip("Mission text #%lld: empty in every language and named by no client mission table, the default of new missions "
+                              "and objectives until a text is chosen.", static_cast<long long>(value));
+    } else ImGui::TextDisabled("%s", current.c_str());
+    if (browse) {
+        ImGui::OpenPopup("Mission text browser");
+        textBrowseFilter_[0] = 0;
+        textBrowsePick_ = value;
+        textBrowseAll_.clear();
+        textBrowseShownFor_ = "\x01";
+        if (ctx.gameData) {
+            const tr::py::Object* lookup = ctx.gameData->global("generated.client.language.english.missiontextlanguage", "lookup");
+            if (lookup)
+                for (const auto& e : lookup->entries)
+                    if (tr::py::asInt(tr::py::item(e.first.get(), 1)) == 1)
+                        textBrowseAll_.emplace_back(tr::py::asInt(tr::py::item(e.first.get(), 0)), tr::py::asString(tr::py::item(e.second.get(), 0)));
+            std::sort(textBrowseAll_.begin(), textBrowseAll_.end());
+        }
+    }
+    // What the player sees: the client's own reference for this mission / objective.
+    if (client) {
+        ImGui::Indent();
+        if (*client == value) ImGui::TextDisabled("In game: %s", oneLine(ctx.gameData->missionText(int32_t(*client)), 200).c_str());
+        else {
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "In game: #%lld %s", static_cast<long long>(*client),
+                               oneLine(ctx.gameData->missionText(int32_t(*client)), 160).c_str());
+            ImGui::SetItemTooltip("The client shows its own text for this mission, not the id stored here (the server never sends text ids).");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Use the client's")) {
+                value = *client;
+                changed = true;
+            }
+        }
+        ImGui::Unindent();
+    } else if (value != 0) {
+        ImGui::Indent();
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "In game: no text - the client has none for this mission / objective id");
+        ImGui::SetItemTooltip("The client looks texts up by mission and objective id (missionconversation / missionobjective in game.zip).");
+        ImGui::Unindent();
+    }
+    ImGui::SetNextWindowSize(ImVec2(ImGui::GetFontSize() * 48, ImGui::GetFontSize() * 34), ImGuiCond_Appearing);
+    if (ImGui::BeginPopupModal("Mission text browser", nullptr)) {
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+        ImGui::InputTextWithHint("##find", "Search the text or an id", textBrowseFilter_, sizeof textBrowseFilter_);
+        if (textBrowseShownFor_ != textBrowseFilter_) {
+            textBrowseShownFor_ = textBrowseFilter_;
+            std::string f = textBrowseFilter_;
+            for (char& c : f) c = char(std::tolower(static_cast<unsigned char>(c)));
+            textBrowseShown_.clear();
+            for (const auto& e : textBrowseAll_) {
+                bool keep = f.empty() || std::to_string(e.first) == f;
+                if (!keep) {
+                    std::string t = e.second;
+                    for (char& c : t) c = char(std::tolower(static_cast<unsigned char>(c)));
+                    keep = t.find(f) != std::string::npos;
+                }
+                if (keep) textBrowseShown_.push_back(e);
+            }
+        }
+        ImGui::TextDisabled("%zu of %zu texts", textBrowseShown_.size(), textBrowseAll_.size());
+        const float previewHeight = ImGui::GetTextLineHeightWithSpacing() * 7;
+        if (ImGui::BeginChild("list", ImVec2(0, -previewHeight - ImGui::GetFrameHeightWithSpacing()), ImGuiChildFlags_Borders)) {
+            ImGuiListClipper clipper;
+            clipper.Begin(int(textBrowseShown_.size()));
+            while (clipper.Step())
+                for (int k = clipper.DisplayStart; k < clipper.DisplayEnd; ++k) {
+                    const auto& e = textBrowseShown_[size_t(k)];
+                    const std::string line = std::to_string(e.first) + "  " + oneLine(e.second);
+                    ImGui::PushID(k);
+                    if (ImGui::Selectable(line.c_str(), e.first == textBrowsePick_, ImGuiSelectableFlags_AllowDoubleClick)) {
+                        textBrowsePick_ = e.first;
+                        if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                            value = e.first;
+                            changed = true;
+                            ImGui::CloseCurrentPopup();
+                        }
+                    }
+                    ImGui::PopID();
+                }
+        }
+        ImGui::EndChild();
+        if (ImGui::BeginChild("preview", ImVec2(0, previewHeight), ImGuiChildFlags_Borders)) {
+            if (textBrowsePick_ > 0 && ctx.gameData) ImGui::TextWrapped("%s", ctx.gameData->missionText(int32_t(textBrowsePick_)).c_str());
+        }
+        ImGui::EndChild();
+        if (ImGui::Button("Select") && textBrowsePick_ >= 0) {
+            value = textBrowsePick_;
+            changed = true;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("None")) {
+            value = 0;
+            changed = true;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Open in Text") && textBrowsePick_ > 0) {
+            ctx.showTextModule = "generated.client.language.english.missiontextlanguage";
+            ctx.showTextId = textBrowsePick_;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    return changed;
+}
+
+// The client's texts of a mission (every text type) or an objective (its conversation lines), read-only, with "Open in Text".
+void MissionEditor::drawClientTexts(EditorContext& ctx, const DbTable& table, const std::vector<DbValue>& row) {
+    if (!ctx.gameData) return;
+    const auto value = [&](const char* c) {
+        const int i = table.column(c);
+        return i < 0 ? int64_t(-1) : row[size_t(i)].asInt();
+    };
+    const int64_t mission = value("mission_id");
+    std::vector<std::pair<std::string, int64_t>> texts;            // label, text id
+    try {
+        if (table.name == "mission_content_definition") {
+            static const char* kTypes[] = {"", "Name", "Log", "Opening (offer)", "Finishing", "Reward", "Reminder"};
+            const tr::py::Object* t = ctx.gameData->global("generated.client.missionconversation", "lookup");
+            for (int type = 1; type <= 6; ++type)
+                if (const tr::py::Object* e = tr::py::dictGetTuple(t, {mission, type})) texts.emplace_back(kTypes[type], tr::py::asInt(tr::py::item(e, 0)));
+        } else if (table.name == "mission_objective_definition") {
+            const int64_t objective = value("objective_id");
+            static const char* kKinds[] = {"", "completion", "reminder", "choice body", "choice 1", "choice 2", "choice 3"};
+            const tr::py::Object* t = ctx.gameData->global("generated.client.objectiveconversation", "lookup");
+            for (const auto& e : t ? t->entries : decltype(t->entries){}) {
+                const tr::py::Object* k = e.first.get();
+                if (tr::py::asInt(tr::py::item(k, 0)) != mission || tr::py::asInt(tr::py::item(k, 1)) != objective) continue;
+                const int64_t kind = tr::py::asInt(tr::py::item(k, 4));
+                texts.emplace_back("Conversation, package " + std::to_string(tr::py::asInt(tr::py::item(k, 2))) + ", flag " +
+                                       std::to_string(tr::py::asInt(tr::py::item(k, 3))) + ", " + (kind >= 1 && kind <= 6 ? kKinds[kind] : "?"),
+                                   tr::py::asInt(tr::py::item(e.second.get(), 0)));
+            }
+        } else return;
+    } catch (const std::exception&) {
+        return;
+    }
+    const char* header = table.name == "mission_content_definition" ? "Client texts (game.zip)" : "Client conversation texts (game.zip)";
+    if (!ImGui::TreeNode(header)) return;
+    if (texts.empty()) ImGui::TextDisabled("The client has none for this id.");
+    for (size_t k = 0; k < texts.size(); ++k) {
+        ImGui::PushID(int(k));
+        ImGui::TextDisabled("%s  #%lld", texts[k].first.c_str(), static_cast<long long>(texts[k].second));
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Open in Text")) {
+            ctx.showTextModule = "generated.client.language.english.missiontextlanguage";
+            ctx.showTextId = texts[k].second;
+        }
+        ImGui::Indent();
+        ImGui::TextWrapped("%s", ctx.gameData->missionText(int32_t(texts[k].second)).c_str());
+        ImGui::Unindent();
+        ImGui::PopID();
+    }
+    ImGui::TreePop();
 }
 
 bool MissionEditor::drawRowFields(EditorContext& ctx, const WorldDatabase& database, Table& t, std::vector<DbValue>& row, bool writable) {
@@ -543,28 +863,22 @@ bool MissionEditor::drawRowFields(EditorContext& ctx, const WorldDatabase& datab
             }
             default: {
                 int64_t i = v.asInt();
+                if (f.kind == FieldKind::MissionText) {
+                    if (missionTextField(ctx, f.label, i, clientTextId(ctx, d, row, f.column))) { v = DbValue::integer(i); changed = true; }
+                    break;
+                }
                 // A value that names something is picked by name (Lookups.h): another row of this mission (objective, reward, spawn
                 // group, scenario, area, indicator, spawn, or a mission), a database row, or an entry of the client's data.
                 LookupSource source;
                 bool named = true;
                 if (const MissionReference ref = missionReference(f.column); ref.table) {
-                    auto choices = std::make_shared<std::vector<std::pair<int64_t, std::string>>>(referenceChoices(ctx, d, row, ref));
-                    source.name = [choices](int64_t id) {
-                        for (const auto& c : *choices)
-                            if (c.first == id) return c.second;
-                        return std::string();
-                    };
-                    source.fill = [choices](LookupList& out) {
-                        for (const auto& c : *choices) out.push_back(LookupChoice{c.first, c.second});
-                    };
+                    source = pairsSource(std::make_shared<std::vector<std::pair<int64_t, std::string>>>(referenceChoices(ctx, d, row, ref)));
                 } else if (f.kind == FieldKind::Creature) {
                     source = lookup::creature(ctx, database);
                 } else if (f.kind == FieldKind::ItemTemplate) {
                     source = lookup::itemTemplate(ctx, database);
                 } else if (f.kind == FieldKind::EntityClass) {
                     source = lookup::entityClass(ctx);
-                } else if (f.kind == FieldKind::MissionText) {
-                    source = lookup::missionText(ctx, "(none)");
                 } else if (f.kind == FieldKind::MapContext) {
                     source = lookup::map(database);
                 } else if (std::strcmp(f.column, "npc_package_id") == 0) {
@@ -582,6 +896,32 @@ bool MissionEditor::drawRowFields(EditorContext& ctx, const WorldDatabase& datab
                     source = lookup::missionCategory(ctx, "(none)");
                 } else if (std::strcmp(f.column, "required_mission_state") == 0) {
                     source = lookup::values(kMissionState);
+                } else if (std::strcmp(f.column, "ability_id") == 0) {
+                    source = lookup::constants(ctx, "generated.client.actiondata");        // action ids (WEAPON_ATTACK = 1, as the action table)
+                } else if (std::strcmp(f.column, "player_flag_id") == 0) {
+                    source = pairsSource(std::make_shared<std::vector<std::pair<int64_t, std::string>>>(playerFlagChoices()));
+                    source.allowOther = true;                                                // a new flag is a new number
+                } else if (std::strcmp(f.column, "subject_id") == 0) {
+                    // MissionProgressEvent (Rasa.Missions/Runtime): the subject by event kind.
+                    const int ek = d.column("event_kind");
+                    const int64_t eventKind = ek >= 0 && !row[size_t(ek)].isNull() ? row[size_t(ek)].asInt() : -1;
+                    const auto local = [&](const char* column) {
+                        return pairsSource(std::make_shared<std::vector<std::pair<int64_t, std::string>>>(
+                            referenceChoices(ctx, d, row, missionReference(column))));
+                    };
+                    switch (eventKind) {
+                        case 0: source = pairsSource(std::make_shared<std::vector<std::pair<int64_t, std::string>>>(teleporters_)); break;  // teleporter id
+                        case 1: source = lookup::constants(ctx, "generated.client.logosstone"); break;   // logos id
+                        case 2: source = lookup::creature(ctx, database); break;                         // creature row
+                        case 3: source = local("required_mission_id"); break;                            // the completed mission
+                        case 4: case 5: case 6: case 8: case 13: case 15:                                // item / interaction / object / creature class
+                            source = lookup::entityClass(ctx); break;
+                        case 7: source = local("area_id"); break;                                        // this mission's area
+                        case 9: source = lookup::constants(ctx, "generated.client.actiondata"); break;   // action id
+                        case 11: case 12: source = local("related_objective_id"); break;                 // this mission's objective
+                        case 14: source = lookup::constants(ctx, "generated.client.constant.creatureflag"); break;
+                        default: named = false; break;                                                   // scenario event ids are plain numbers
+                    }
                 } else {
                     named = false;
                 }
@@ -598,6 +938,7 @@ bool MissionEditor::drawRowFields(EditorContext& ctx, const WorldDatabase& datab
         ImGui::PopID();
     }
     if (!editable) ImGui::EndDisabled();
+    drawClientTexts(ctx, d, row);
     if (changed) validationDirty_ = true;
     return changed;
 }
@@ -715,6 +1056,7 @@ void MissionEditor::draw(EditorContext& ctx, WorldDatabase& database, int32_t ma
     DbTable& missions = root.edited;
     const int idColumn = missions.column("mission_id"), revisionColumn = missions.column("content_revision");
     const int giverColumn = missions.column("giver_id"), receiverColumn = missions.column("receiver_id");
+    if (placeholderTextId_ < 0 && ctx.gameData) placeholderTextId_ = findPlaceholderTextId(*ctx.gameData);
     if (writable) {
         if (ImGui::Button("New mission")) {
             std::vector<DbValue> row = newRow(root, missions, nullptr);

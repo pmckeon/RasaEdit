@@ -51,6 +51,27 @@ int main(int argc, char* argv[])
         style.Colors[ImGuiCol_WindowBg].w = 1.0f;
     }
 
+    // ImGui's default font, with system fonts merged in for the client's Korean, Japanese and Chinese text (the Text workspace):
+    // the first existing file of each script, probed by path (no platform API). ImGui 1.92 rasterises glyphs on demand.
+    io.Fonts->AddFontDefault();
+    {
+        const char* scripts[][6] = {
+            {"C:/Windows/Fonts/malgun.ttf", "/System/Library/Fonts/AppleSDGothicNeo.ttc", "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+             "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", nullptr, nullptr},
+            {"C:/Windows/Fonts/msgothic.ttc", "C:/Windows/Fonts/YuGothM.ttc", "/System/Library/Fonts/Hiragino Sans GB.ttc", nullptr, nullptr, nullptr},
+            {"C:/Windows/Fonts/msyh.ttc", "C:/Windows/Fonts/simsun.ttc", "/System/Library/Fonts/PingFang.ttc", nullptr, nullptr, nullptr}};
+        for (const auto& candidates : scripts)
+            for (const char* path : candidates) {
+                if (!path) break;
+                if (SDL_GetPathInfo(path, nullptr)) {
+                    ImFontConfig merge;
+                    merge.MergeMode = true;
+                    io.Fonts->AddFontFromFileTTF(path, 0.0f, &merge);
+                    break;
+                }
+            }
+    }
+
     ImGui_ImplSDL3_InitForSDLGPU(window);
     ImGui_ImplSDLGPU3_InitInfo initInfo = {};
     initInfo.Device = gpuDevice;

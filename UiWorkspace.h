@@ -42,6 +42,11 @@ public:
     void syncWithDocument();                // after an edit / undo: canvas, selection, validation
     // Writes an attribute of the selected element after checking it (refused: status line); a default value is left out.
     void commitAttribute(const std::string& cls, const std::string& name, const std::string& value);
+    // A textId: the id and its text (generated.client.uielement.bystring[id] -> uielementlanguage, the Text workspace's module), a
+    // searchable browser (id or text) to pick another, and "Open in Text". As the mission texts: picked, not typed or edited here.
+    // true with `picked` set when one was chosen ("" = none).
+    bool textIdField(const std::string& value, std::string& picked);
+    void openTextIdInText(const std::string& id);
     void addChild(const std::string& kind);  // a new element of that kind as the selection's last child
     void select(const std::vector<int32_t>& path, bool drawBranch, bool revealInTree);
     void runEdit(const std::function<void()>& edit);   // one document edit; failures go to the status line
@@ -142,6 +147,13 @@ private:
     std::vector<uischema::Issue> issues_;
     std::multiset<std::string> originalErrors_;     // error messages the file had when it was opened (they do not block saving)
     std::map<std::string, std::string> editBuffers_;   // attribute text fields being edited
+    char textBrowseFilter_[128] = "";                   // the textId browser
+    struct TextIdChoice {
+        std::string id, text, lowerId, lowerText;
+    };
+    std::vector<TextIdChoice> textBrowseAll_;
+    std::vector<size_t> textBrowseShown_;
+    std::string textBrowseShownFor_, textBrowsePick_;
     std::vector<int32_t> editBuffersFor_;
     std::map<std::string, std::array<float, 4>> colourBuffers_;     // colour pickers in use (by attribute prefix)
     bool editBuffersTemplates_ = false;

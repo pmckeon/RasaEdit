@@ -5,6 +5,7 @@
 #include "WorldDatabase.h"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -44,19 +45,37 @@ public:
     // the row's spawn group; every mission for required_mission_id. (id, label)
     std::vector<std::pair<int64_t, std::string>> referenceChoices(EditorContext& ctx, const DbTable& table, const std::vector<DbValue>& row,
                                                                   const MissionReference& ref);
+    // Player flags (player_flag_id): no table or client module names them - Rasa.NET's mission flags are authored numbers below
+    // 0x80000000 (CharacterFlagIds.IsMissionFlag), its own server flags above (BootcampComplete 0x80000001). The choices are the flags
+    // the edited mission content sets or reads, each labelled by its uses, plus the server flag. (id, label)
+    std::vector<std::pair<int64_t, std::string>> playerFlagChoices() const;
 
-private:
+    // A table as edited, and a new row of it with its defaults (public for the smoke test: MSVC mangles access into the name).
     struct Table {
         const TableSpec* spec = nullptr;
         DbTable saved;
         DbTable edited;
     };
     Table* table(const char* name);
+    std::vector<DbValue> newRow(const Table& t, const DbTable& parentTable, const std::vector<DbValue>* parentRow) const;
+
+private:
     std::string missionLabel(EditorContext& ctx, const std::vector<DbValue>& row) const;
+    // Mission text as the client shows it. The server never sends text ids: the client looks a mission's texts up by mission id
+    // (generated.client.missionconversation[(mission, type)], missionobjective[(mission, objective)], objectiveconversation[(mission,
+    // objective, package, flag, kind)]) in missiontextlanguage. The database's client_*_text_id columns are copies the server only
+    // checks, so a field shows the client's text, warns when the column names another, and picks ids from a searchable browser.
+    std::optional<int64_t> clientTextId(EditorContext& ctx, const DbTable& table, const std::vector<DbValue>& row, const char* column) const;
+    bool missionTextField(EditorContext& ctx, const char* label, int64_t& value, std::optional<int64_t> client);
+    void drawClientTexts(EditorContext& ctx, const DbTable& table, const std::vector<DbValue>& row);
+    // The mission text placeholder, shown as ID_DEFAULT_TEXT (as the UI's ID_DEFAULT_TEXT: an id the client has, with no text): the
+    // lowest missiontextlanguage id that is empty in every language that has it (both genders) and that no client mission table
+    // (missionconversation / missionobjective / objectiveconversation) names - 17240 in the shipped data. New missions get it as their
+    // name text, new objectives as name and body text, until another is chosen. -1 = not worked out yet, 0 = none found.
+    int64_t placeholderTextId() const { return placeholderTextId_; }
     void drawChildren(EditorContext& ctx, const WorldDatabase& database, const TableSpec& parent, const std::vector<DbValue>& parentRow, int depth,
                       bool writable);
     bool drawRowFields(EditorContext& ctx, const WorldDatabase& database, Table& t, std::vector<DbValue>& row, bool writable);
-    std::vector<DbValue> newRow(const Table& t, const DbTable& parentTable, const std::vector<DbValue>* parentRow) const;
     void removeWithChildren(const char* tableName, const std::vector<DbValue>& row);
     bool rowUnder(const Table& child, const std::vector<DbValue>& row, const DbTable& parentTable, const std::vector<DbValue>& parentRow) const;
 
@@ -66,11 +85,17 @@ private:
 
     std::vector<Table> tables_;                       // parents before children
     MissionReferences references_;
+    std::vector<std::pair<int64_t, std::string>> teleporters_;   // teleporter rows (id, "description  (map)"): waypoint subjects
     MissionValidationResult validation_, savedValidation_;
     bool validationDirty_ = true;
     int64_t selectedMission_ = -1;
     std::string selectedRevision_;
     char filter_[64] = "";
+    int64_t placeholderTextId_ = -1;
+    char textBrowseFilter_[128] = "";                    // the mission text browser (one popup at a time)
+    std::vector<std::pair<int64_t, std::string>> textBrowseAll_, textBrowseShown_;
+    int64_t textBrowsePick_ = -1;
+    std::string textBrowseShownFor_;
     bool mapOnly_ = false;
     // Edits that change row vectors are queued and applied after drawing.
     struct PendingRemove {

@@ -786,8 +786,12 @@ void UiWorkspace::drawElementPanel() {
         ImGui::Text("Text:");
         ImGui::SameLine();
         if (!ctx_.gameData || !ctx_.gameData->uiTextExists(n->attribute("textId"))) ImGui::TextDisabled("(unknown text id)");
-        else if (s.empty()) ImGui::TextDisabled("(empty text)");
-        else ImGui::TextWrapped("%s", s.c_str());
+        else {
+            if (s.empty()) ImGui::TextDisabled("(empty text)");
+            else ImGui::TextWrapped("%s", s.c_str());
+            if (ImGui::SmallButton("Open in Text##textId")) openTextIdInText(n->attribute("textId"));
+            ImGui::SetItemTooltip("Show %s in the Text workspace (uielementlanguage), where the client's text is edited", n->attribute("textId").c_str());
+        }
     }
     if (n->hasAttribute("fontId")) {
         const tr::UiFont* font = ui()->font(n->attribute("fontId"));
@@ -1358,6 +1362,9 @@ void UiWorkspace::drawAttributeEditor(const tr::XmlNode& n, const std::string& c
                     if (ImGui::Selectable(option.c_str(), option == value)) commitAttribute(cls, a.name, option);
                 ImGui::EndCombo();
             }
+        } else if (a.type == uischema::Type::TextId) {
+            std::string picked;
+            if (textIdField(value, picked)) commitAttribute(cls, a.name, picked);
         } else if (!choices.empty() || a.type == uischema::Type::TextureDef || a.type == uischema::Type::Font ||
                    a.type == uischema::Type::WidgetAnim || a.type == uischema::Type::BitmapAnim) {
             if (ImGui::BeginCombo("##v", value.empty() ? "(none)" : value.c_str(), ImGuiComboFlags_HeightLarge)) {
@@ -1907,4 +1914,115 @@ void UiWorkspace::drawToolboxPanel() {
         ImGui::PopID();
     }
     ImGui::End();
+}
+
+// ------------------------------------------------------------------------------------------
+// Text ids: picked from the client's UI text, shown with their text
+// ------------------------------------------------------------------------------------------
+void UiWorkspace::openTextIdInText(const std::string& id) {
+    if (!ctx_.gameData) return;
+    try {
+        const tr::py::Object* index = tr::py::dictGet(ctx_.gameData->global("generated.client.uielement", "bystring"), id);
+        if (!index) return;
+        ctx_.showTextModule = "generated.client.language.english.uielementlanguage";
+        ctx_.showTextId = tr::py::asInt(index);
+    } catch (const std::exception&) {
+    }
+}
+
+bool UiWorkspace::textIdField(const std::string& value, std::string& picked) {
+    bool changed = false;
+    const auto oneLine = [](std::string t, size_t limit) {
+        for (char& c : t)
+            if (c == '\n' || c == '\r') c = ' ';
+        if (t.size() > limit) t = t.substr(0, limit) + "...";
+        return t;
+    };
+    std::string text;
+    const bool known = !value.empty() && ctx_.gameData && ctx_.gameData->uiTextExists(value, 1, &text);
+    const std::string label = value.empty() ? std::string("(none)") : value + (known ? "  " + oneLine(text, 60) : "  (unknown)");
+    if (ImGui::Button((label + "###textIdButton").c_str(), ImVec2(-FLT_MIN, 0))) {
+        ImGui::OpenPopup("UI text browser");
+        textBrowseFilter_[0] = 0;
+        textBrowsePick_ = value;
+        textBrowseShownFor_ = "\x01";
+        textBrowseAll_.clear();
+        if (ctx_.gameData) {
+            try {
+                if (const tr::py::Object* names = ctx_.gameData->global("generated.client.uielement", "bystring"))
+                    for (const auto& e : names->entries) {
+                        TextIdChoice c;
+                        c.id = tr::py::asString(e.first.get());
+                        c.text = ctx_.gameData->uiText(c.id);
+                        c.lowerId = c.id;
+                        c.lowerText = c.text;
+                        for (char& ch : c.lowerId) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+                        for (char& ch : c.lowerText) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+                        textBrowseAll_.push_back(std::move(c));
+                    }
+            } catch (const std::exception&) {
+            }
+            std::sort(textBrowseAll_.begin(), textBrowseAll_.end(), [](const TextIdChoice& a, const TextIdChoice& b) { return a.id < b.id; });
+        }
+    }
+    if (known) ImGui::SetItemTooltip("%s", text.c_str());
+    ImGui::SetNextWindowSize(ImVec2(ImGui::GetFontSize() * 48, ImGui::GetFontSize() * 34), ImGuiCond_Appearing);
+    if (ImGui::BeginPopupModal("UI text browser", nullptr)) {
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+        ImGui::InputTextWithHint("##find", "Search the id (ID_...) or the text", textBrowseFilter_, sizeof textBrowseFilter_);
+        if (textBrowseShownFor_ != textBrowseFilter_) {
+            textBrowseShownFor_ = textBrowseFilter_;
+            std::string f = textBrowseFilter_;
+            for (char& c : f) c = char(std::tolower(static_cast<unsigned char>(c)));
+            textBrowseShown_.clear();
+            for (size_t k = 0; k < textBrowseAll_.size(); ++k)
+                if (f.empty() || textBrowseAll_[k].lowerId.find(f) != std::string::npos || textBrowseAll_[k].lowerText.find(f) != std::string::npos)
+                    textBrowseShown_.push_back(k);
+        }
+        ImGui::TextDisabled("%zu of %zu UI texts", textBrowseShown_.size(), textBrowseAll_.size());
+        const float previewHeight = ImGui::GetTextLineHeightWithSpacing() * 6;
+        if (ImGui::BeginChild("list", ImVec2(0, -previewHeight - ImGui::GetFrameHeightWithSpacing()), ImGuiChildFlags_Borders)) {
+            ImGuiListClipper clipper;
+            clipper.Begin(int(textBrowseShown_.size()));
+            while (clipper.Step())
+                for (int r = clipper.DisplayStart; r < clipper.DisplayEnd; ++r) {
+                    const TextIdChoice& c = textBrowseAll_[textBrowseShown_[size_t(r)]];
+                    ImGui::PushID(r);
+                    if (ImGui::Selectable((c.id + "  " + oneLine(c.text, 100)).c_str(), c.id == textBrowsePick_, ImGuiSelectableFlags_AllowDoubleClick)) {
+                        textBrowsePick_ = c.id;
+                        if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                            picked = c.id;
+                            changed = true;
+                            ImGui::CloseCurrentPopup();
+                        }
+                    }
+                    ImGui::PopID();
+                }
+        }
+        ImGui::EndChild();
+        if (ImGui::BeginChild("preview", ImVec2(0, previewHeight), ImGuiChildFlags_Borders) && !textBrowsePick_.empty() && ctx_.gameData)
+            ImGui::TextWrapped("%s", ctx_.gameData->uiText(textBrowsePick_).c_str());
+        ImGui::EndChild();
+        if (ImGui::Button("Select") && !textBrowsePick_.empty()) {
+            picked = textBrowsePick_;
+            changed = true;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("None")) {
+            picked.clear();
+            changed = true;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Open in Text") && !textBrowsePick_.empty()) {
+            openTextIdInText(textBrowsePick_);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    return changed;
 }

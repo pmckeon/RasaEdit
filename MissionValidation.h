@@ -8,10 +8,15 @@
 //   - a diagnostic on a mission: the server leaves that mission out (MissionDefinitionCatalog skips missions with diagnostics);
 //     on a required mission (requirement 1) it also never reports ready (Server.LogMissionValidationAndCheckReadiness), and
 //     required missions that need an inactive one are reported too ("required-chain-inactive").
+//   - the catalog's scene phase (MissionContentCatalog.Load after the validator): each enabled revision's mission_scene_binding
+//     document (MissionSceneValidation.Validate / ValidateDialogueActions / ValidateSharing, script registry, public spawns, credit,
+//     mission items and their drops, dialogue topics, object conversations, SceneRuntime on every sequence), the enabled
+//     mission_experience_binding rows, radio offers, shared actors, actor gameplay policies, and every operational mission's
+//     requirements and item operations - all start-up errors (the server throws).
 // The diagnostic codes and texts are the server's. Only enabled rows are checked (the server reads one enabled revision per
-// mission). NOT ported: the scene-binding document checks the catalog runs afterwards (MissionSceneValidation, scene items,
-// credit, public spawns - mission_scene_binding is read-only in the editor) and MissionSceneValidation.ValidateProgressMetadata;
-// which scene scripts the server's registry resolves is approximated (a binding whose script key and state version agree).
+// mission). Not ported: a schema check of the scene documents (members the codec would not map - they are read-only here), the
+// built-in recovered mission definitions (MissionDefinitionCatalog.CreateRecoveredInactiveDefinitions), and the GetTypedScenarioIds
+// test for scripted scenarios still accepts any binding whose script key and state version agree with its row.
 
 #include "WorldDatabase.h"
 
@@ -39,6 +44,16 @@ struct MissionReferences {
     std::map<int64_t, int64_t> creatureClasses;      // creature: id -> class_id
     std::set<int64_t> mapContextIds;                 // map_info.map_context_id
     std::set<int64_t> creatureFlagIds;               // creature_class_flag.flag_id (every flag some class carries)
+    std::set<std::pair<int64_t, int64_t>> npcPackageRows;   // npc_package: (id = creature id, package_id)
+    std::set<int64_t> spawnPoolIds;                  // spawnpool.id (scene public spawns)
+    std::set<int64_t> itemTemplateIds;               // itemtemplate.id
+    std::map<int64_t, int64_t> itemClassStackSizes;  // itemclass: id -> stack_size
+    struct Experience {                              // enabled mission_experience_binding rows (read-only in the editor)
+        std::string key;
+        int64_t mapContextId = 0;
+        std::string bindings;
+    };
+    std::vector<Experience> experiences;
     static MissionReferences load(const WorldDatabase& database);   // throws std::runtime_error
 };
 

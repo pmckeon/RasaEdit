@@ -402,6 +402,62 @@ int main(int argc, char** argv) {
             std::printf("pkg scan: %zu packages, %zu failed; %zu accessories, %zu particle attaches, %zu lights\n", packages, failed,
                         accessories, particles, lights);
         }
+        // RASA_TEXTWRITETEST=<folder>: every language module written as Python source (tr::moduleSource) and read back
+        // (tr::evaluateSource) must give the same values; the sources are left in the folder (for a check with Python itself). Then
+        // game.zip is rewritten with english missiontextlanguage as source (its .pyo removed, one text changed): the copy must hold
+        // every other entry byte for byte and give the changed module.
+        if (const char* folder = envValue("RASA_TEXTWRITETEST")) {
+            size_t modules = 0, same = 0, entries = 0;
+            for (const std::string& name : data.moduleNames()) {
+                if (name.find(".language.") == std::string::npos) continue;
+                ++modules;
+                const tr::py::Object& globals = data.module(name);
+                const std::string source = tr::py::moduleSource(globals);
+                const tr::py::Ref back = tr::evaluateSource(tr::Bytes(source.begin(), source.end()), name);
+                bool equal = tr::py::moduleSource(*back) == source;
+                for (const auto& g : globals.entries) {
+                    const std::string key = tr::py::asString(g.first.get());
+                    if (key.compare(0, 2, "__") == 0) continue;
+                    const tr::py::Object* other = tr::py::dictGet(back.get(), key);
+                    equal = equal && other && tr::py::sourceLiteral(*other) == tr::py::sourceLiteral(*g.second);
+                }
+                same += equal ? 1 : 0;
+                if (const tr::py::Object* lookup = tr::py::dictGet(&globals, "lookup")) entries += tr::py::length(lookup);
+                if (!equal) std::printf("text write test: %s differs after the round trip\n", name.c_str());
+                std::ofstream(std::string(folder) + "/" + name + ".py", std::ios::binary) << source;
+            }
+            std::printf("text write test: %zu language modules, %zu read back equal, %zu entries\n", modules, same, entries);
+            try {
+                const std::string module = "generated.client.language.english.missiontextlanguage";
+                const std::string entry = data.moduleEntryName(module);
+                tr::py::Ref edited = tr::py::deepCopy(std::shared_ptr<tr::py::Object>(&const_cast<tr::py::Object&>(data.module(module)), [](tr::py::Object*) {}));
+                tr::py::Object* lookup = const_cast<tr::py::Object*>(tr::py::dictGet(edited.get(), "lookup"));
+                const tr::py::Ref key = tr::py::makeTuple({tr::py::makeInt(1), tr::py::makeInt(1)});
+                tr::py::dictPut(*lookup, key, tr::py::makeList({tr::py::makeText("Edited \xe2\x80\x99text\xc3\xa9 \xe6\xbc\xa2")}));
+                const std::string source = tr::py::moduleSource(*edited);
+                const std::string zipPath = std::string(folder) + "/game_test.zip";
+                tr::ZipArchive original(data.path());
+                const std::string sourceEntry = entry.substr(0, entry.size() - 4) + ".py";
+                tr::writeZip(original, zipPath, {{sourceEntry, tr::Bytes(source.begin(), source.end())}}, {entry});
+                tr::ZipArchive copy(zipPath);
+                size_t identical = 0, compared = 0;
+                for (const tr::ZipEntry& e : copy.entries()) {
+                    if (e.name == sourceEntry) continue;
+                    for (const tr::ZipEntry& o : original.entries())
+                        if (o.name == e.name) {
+                            ++compared;
+                            identical += copy.readStored(e) == original.readStored(o) && copy.read(e) == original.read(o) ? 1 : 0;
+                        }
+                }
+                tr::GameData reread(zipPath);
+                const tr::py::Object* text = tr::py::item(tr::py::dictGetTuple(reread.global(module, "lookup"), {1, 1}), 0);
+                std::printf("text write test: zip %zu -> %zu entries, %zu of %zu others identical, module from %s, text 1/1 \"%s\", %zu entries\n",
+                            original.entries().size(), copy.entries().size(), identical, compared, reread.moduleEntryName(module).c_str(),
+                            tr::py::asString(text).c_str(), tr::py::length(reread.global(module, "lookup")));
+            } catch (const std::exception& e) {
+                std::printf("text write test: FAILED: %s\n", e.what());
+            }
+        }
         // RASA_GLMTEST=<out.glm>: write an archive of a few game files (a texture, a model, an animation, a text file, an empty file),
         // open it with GlmArchive and compare every entry; then rewrite one shipped archive's every entry and compare again.
         if (const char* out = envValue("RASA_GLMTEST")) {

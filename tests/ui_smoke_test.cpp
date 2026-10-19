@@ -653,6 +653,47 @@ int main() {
                     break;
                 }
                 check(tried && listed, "reference picker lists the action's target objective");
+                // The catalog's scene phase: a scripted assignment made shareable (the Solis escort, 1407, whose public encounter
+                // does not allow party joining) stops the server; the save is refused; put back.
+                std::vector<DbValue>* escort = nullptr;
+                for (auto& d : definitions->rows)
+                    if (d[size_t(definitions->column("mission_id"))].asInt() == 1407 && d[size_t(definitions->column("enabled"))].asInt() == 1) escort = &d;
+                if (escort) {
+                    const DbValue before = (*escort)[size_t(definitions->column("shareable"))];
+                    (*escort)[size_t(definitions->column("shareable"))] = DbValue::integer(1);
+                    server.missions_.validationDirty_ = true;
+                    bool reported = false;
+                    for (const MissionDiagnostic& d : server.missions_.validation().diagnostics)
+                        reported = reported || (d.startup && d.missionId == 1407 && d.message.find("scripted assignments must be nonshareable") != std::string::npos);
+                    std::string message;
+                    const bool refused = !server.missions_.save(*server.database_, message);
+                    check(reported && refused, "shareable scripted assignment: scene check reported, save refused");
+                    (*escort)[size_t(definitions->column("shareable"))] = before;
+                    server.missions_.validationDirty_ = true;
+                }
+                check(!server.missions_.changed() && server.missions_.validation().diagnostics.empty(), "mission content back as saved after the scene check");
+                // Player flags are picked from the flags the content uses, labelled by their uses, plus the server flag.
+                bool milpas = false, bootcamp = false;
+                for (const auto& f : server.missions_.playerFlagChoices()) {
+                    milpas = milpas || (f.first == 530002 && f.second.find("set by 1390") != std::string::npos);
+                    bootcamp = bootcamp || (f.first == 0x80000001ll && f.second.find("Bootcamp complete") != std::string::npos);
+                }
+                check(milpas && bootcamp, "player flag choices: the content's flags with their uses and the server flag");
+                // New missions and objectives start with the mission text placeholder (ID_DEFAULT_TEXT): an id empty in every language
+                // and named by no client mission table - 17240 in the shipped game.zip.
+                const int64_t placeholder = server.missions_.placeholderTextId();
+                bool placed = false;
+                if (auto* missionTable = server.missions_.table("mission_content_definition"))
+                    if (auto* objectiveTable = server.missions_.table("mission_objective_definition")) {
+                        const auto mission = server.missions_.newRow(*missionTable, missionTable->edited, nullptr);
+                        const auto objective = server.missions_.newRow(*objectiveTable, missionTable->edited, &missionTable->edited.rows.front());
+                        const auto at = [](const DbTable& t, const std::vector<DbValue>& r, const char* c) { return r[size_t(t.column(c))].asInt(); };
+                        placed = at(missionTable->edited, mission, "client_name_text_id") == placeholder &&
+                                 at(objectiveTable->edited, objective, "client_name_text_id") == placeholder &&
+                                 at(objectiveTable->edited, objective, "client_body_text_id") == placeholder;
+                    }
+                check(placeholder == 17240 && ctx.gameData->missionText(17240).empty() && placed,
+                      "new missions and objectives start with the ID_DEFAULT_TEXT placeholder text");
             }
         }
 
@@ -1278,6 +1319,75 @@ int main() {
                     ui.revertChanges();
                     check(ui.document()->text() == start, "UI definitions: changes reverted");
                 }
+            }
+        }
+
+        // Text workspace: the client's language modules; an edit of a mission text (both genders), its undo / redo, a search, a save
+        // to a COPY of game.zip (the game's own file is only read) read back as source, and "Open in Text" from another workspace.
+        {
+            editor.setActive(editor.text_.get());
+            TextWorkspace& text = *editor.text_;
+            frames(editor, device, 2);
+            const auto& languages = text.languages();
+            check(std::find(languages.begin(), languages.end(), "english") != languages.end() &&
+                      std::find(languages.begin(), languages.end(), "korean") != languages.end(),
+                  "text: the languages of the client");
+            text.setLanguage("english");
+            int missionText = -1;
+            for (size_t k = 0; k < text.modules().size(); ++k)
+                if (text.modules()[k].label == "missiontext") missionText = int(k);
+            check(missionText >= 0 && text.modules()[size_t(missionText)].gendered && text.modules()[size_t(missionText)].ids > 10000,
+                  "text: missiontext is a gendered module of the language");
+            if (missionText >= 0) {
+                const std::string module = text.modules()[size_t(missionText)].module;
+                text.setModule(missionText);
+                text.setFilter("#737");
+                check(text.rowCount() == 1, "text: an id search finds the entry");
+                const std::string original = text.text(module, 737, 1, 0);
+                const std::string edited = "Smoke test mission name \xe2\x80\x99";
+                text.setText(module, 737, 0, 0, edited);
+                check(text.text(module, 737, 1, 0) == edited && text.text(module, 737, 2, 0) == edited && text.hasUnsavedChanges(),
+                      "text: an edit sets both genders");
+                text.undo();
+                check(text.text(module, 737, 1, 0) == original && text.text(module, 737, 2, 0) == text.text(module, 737, 2, 0), "text: undo restores it");
+                text.redo();
+                text.setFilter("smoke test mission");
+                check(text.rowCount() == 1, "text: a text search finds the edited entry");
+                frames(editor, device, 2);
+                namespace fs = std::filesystem;
+                const fs::path real = ctx.gameData->path();
+                const auto realTime = fs::last_write_time(real);
+                const auto realSize = fs::file_size(real);
+                const std::string copy = (fs::temp_directory_path() / "rasaedit_smoke_game.zip").string();
+                text.setSavePathForTests(copy);
+                const bool saved = text.saveChanges();
+                text.setSavePathForTests("");
+                bool readBack = false;
+                if (saved) {
+                    tr::GameData reread(copy);
+                    readBack = reread.missionText(737, 1) == edited && reread.missionText(737, 2) == edited &&
+                               reread.moduleEntryName(module).size() > 3 &&
+                               reread.moduleEntryName(module).compare(reread.moduleEntryName(module).size() - 3, 3, ".py") == 0;
+                }
+                check(saved && readBack && !text.hasUnsavedChanges(), "text: saved to a copy of game.zip, read back as source");
+                check(fs::last_write_time(real) == realTime && fs::file_size(real) == realSize, "text: the game's own game.zip untouched");
+                text.revertChanges();
+                check(text.text(module, 737, 1, 0) == original, "text: reverted");
+                // "Open in Text" from the Missions panel.
+                editor.setActive(editor.server_.get());
+                ctx.showTextModule = module;
+                ctx.showTextId = 21164;
+                frames(editor, device, 2);
+                check(ctx.showTextModule.empty() && text.rowCount() > 0, "text: Open in Text switches to the Text workspace");
+                // A UI widget's textId opens its uielementlanguage entry (uielement.bystring index).
+                editor.ui_->openTextIdInText("ID_LOGOUT");
+                const tr::py::Object* index = tr::py::dictGet(ctx.gameData->global("generated.client.uielement", "bystring"), "ID_LOGOUT");
+                const bool requested = ctx.showTextModule == "generated.client.language.english.uielementlanguage" && index &&
+                                       ctx.showTextId == tr::py::asInt(index);
+                frames(editor, device, 2);
+                check(requested && text.text(ctx.showTextModule.empty() ? "generated.client.language.english.uielementlanguage" : "",
+                                             tr::py::asInt(index), 1, 0) == ctx.gameData->uiText("ID_LOGOUT"),
+                      "text: a UI textId opens its entry in the Text workspace");
             }
         }
 

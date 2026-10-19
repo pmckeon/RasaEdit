@@ -20,7 +20,7 @@
 class ServerWorkspace : public Workspace, public ViewportEditHooks {
 public:
     explicit ServerWorkspace(EditorContext& ctx);
-    const char* name() const override { return "Server"; }
+    const char* name() const override { return "World database"; }
     const char* dockspaceName() const override { return "ServerDockSpace"; }
     void buildDefaultLayout(ImGuiID dockspace) override;
     void beginFrame() override;

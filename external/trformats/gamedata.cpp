@@ -9,6 +9,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
+#include <set>
 
 namespace tr {
 
@@ -146,6 +148,162 @@ double asFloat(const Object* o, double fallback) {
 }
 
 std::string asString(const Object* o, const std::string& fallback) { return isString(o) ? o->text : fallback; }
+
+Ref makeInt(int64_t value) {
+    Ref o = make(Kind::Int);
+    o->integer = value;
+    return o;
+}
+Ref makeText(std::string utf8) { return makeString(std::move(utf8), true); }
+Ref makeTuple(std::vector<Ref> items) {
+    Ref o = make(Kind::Tuple);
+    o->items = std::move(items);
+    return o;
+}
+Ref makeList(std::vector<Ref> items) {
+    Ref o = make(Kind::List);
+    o->items = std::move(items);
+    return o;
+}
+Ref makeDict() { return make(Kind::Dict); }
+
+void dictPut(Object& dict, const Ref& key, const Ref& value) { dictSet(dict, key, value); }
+Ref dictGetRef(const Object& dict, const Object& key) { return dictFindRef(dict, key); }
+
+bool dictRemove(Object& dict, const Object& key) {
+    const size_t position = dictPosition(dict, key);
+    if (position == SIZE_MAX) return false;
+    std::vector<std::pair<Ref, Ref>> entries = std::move(dict.entries);
+    entries.erase(entries.begin() + std::ptrdiff_t(position));
+    dict.entries.clear();
+    dict.index.reset();
+    for (const auto& e : entries) dictSet(dict, e.first, e.second);
+    return true;
+}
+
+Ref deepCopy(const Ref& o) {
+    if (!o) return o;
+    if (o->kind == Kind::Tuple || o->kind == Kind::List || o->kind == Kind::Set) {
+        Ref c = make(o->kind);
+        for (const Ref& item : o->items) c->items.push_back(deepCopy(item));
+        return c;
+    }
+    if (o->kind == Kind::Dict) {
+        Ref c = make(Kind::Dict);
+        for (const auto& e : o->entries) dictSet(*c, deepCopy(e.first), deepCopy(e.second));
+        return c;
+    }
+    return o;
+}
+
+namespace {
+// Next code point of UTF-8 text (an invalid byte is taken as that Latin-1 character).
+uint32_t nextCodePoint(const std::string& s, size_t& p) {
+    const unsigned char c = static_cast<unsigned char>(s[p]);
+    const auto continuation = [&](size_t k) { return p + k < s.size() && (static_cast<unsigned char>(s[p + k]) & 0xC0) == 0x80; };
+    if (c >= 0xF0 && continuation(1) && continuation(2) && continuation(3)) {
+        const uint32_t v = (uint32_t(c & 0x07) << 18) | (uint32_t(s[p + 1] & 0x3F) << 12) | (uint32_t(s[p + 2] & 0x3F) << 6) | uint32_t(s[p + 3] & 0x3F);
+        p += 4;
+        return v;
+    }
+    if (c >= 0xE0 && continuation(1) && continuation(2)) {
+        const uint32_t v = (uint32_t(c & 0x0F) << 12) | (uint32_t(s[p + 1] & 0x3F) << 6) | uint32_t(s[p + 2] & 0x3F);
+        p += 3;
+        return v;
+    }
+    if (c >= 0xC0 && continuation(1)) {
+        const uint32_t v = (uint32_t(c & 0x1F) << 6) | uint32_t(s[p + 1] & 0x3F);
+        p += 2;
+        return v;
+    }
+    ++p;
+    return c;
+}
+
+void appendStringLiteral(std::string& out, const Object& o) {
+    char buffer[16];
+    if (o.isUnicode) out += 'u';
+    out += '\'';
+    for (size_t p = 0; p < o.text.size();) {
+        const uint32_t c = o.isUnicode ? nextCodePoint(o.text, p) : static_cast<unsigned char>(o.text[p++]);
+        if (c == '\\') out += "\\\\";
+        else if (c == '\'') out += "\\'";
+        else if (c == '\n') out += "\\n";
+        else if (c == '\r') out += "\\r";
+        else if (c == '\t') out += "\\t";
+        else if (c >= 0x20 && c < 0x7F) out += char(c);
+        else {
+            if (c < 0x100) std::snprintf(buffer, sizeof buffer, "\\x%02x", unsigned(c));
+            else if (c < 0x10000) std::snprintf(buffer, sizeof buffer, "\\u%04x", unsigned(c));
+            else std::snprintf(buffer, sizeof buffer, "\\U%08x", unsigned(c));
+            out += buffer;
+        }
+    }
+    out += '\'';
+}
+
+void appendLiteral(std::string& out, const Object& o) {
+    switch (o.kind) {
+        case Kind::None: out += "None"; return;
+        case Kind::Bool: out += o.boolean ? "True" : "False"; return;
+        case Kind::Int: out += std::to_string(o.integer); return;
+        case Kind::Float: {
+            char buffer[40];
+            std::snprintf(buffer, sizeof buffer, "%.17g", o.real);
+            std::string text = buffer;
+            if (text.find_first_of(".eEn") == std::string::npos) text += ".0";
+            out += text;
+            return;
+        }
+        case Kind::String: appendStringLiteral(out, o); return;
+        case Kind::Tuple:
+        case Kind::List: {
+            out += o.kind == Kind::Tuple ? '(' : '[';
+            for (size_t k = 0; k < o.items.size(); ++k) {
+                if (k) out += ", ";
+                appendLiteral(out, *o.items[k]);
+            }
+            if (o.kind == Kind::Tuple && o.items.size() == 1) out += ',';
+            out += o.kind == Kind::Tuple ? ')' : ']';
+            return;
+        }
+        case Kind::Dict: {
+            out += '{';
+            for (size_t k = 0; k < o.entries.size(); ++k) {
+                if (k) out += ", ";
+                appendLiteral(out, *o.entries[k].first);
+                out += ": ";
+                appendLiteral(out, *o.entries[k].second);
+            }
+            out += '}';
+            return;
+        }
+        default: throw FormatError("sourceLiteral: no literal for " + repr(&o, 2));
+    }
+}
+}  // namespace
+
+std::string sourceLiteral(const Object& o) {
+    std::string out;
+    appendLiteral(out, o);
+    return out;
+}
+
+std::string moduleSource(const Object& globals) {
+    std::string out;
+    for (const auto& g : globals.entries) {
+        const std::string name = asString(g.first.get());
+        if (name.empty() || name.compare(0, 2, "__") == 0) continue;
+        out += name + " = ";
+        const Object& value = *g.second;
+        if (value.kind == Kind::Dict && !value.entries.empty()) {
+            out += "{\n";
+            for (const auto& e : value.entries) out += "    " + sourceLiteral(*e.first) + ": " + sourceLiteral(*e.second) + ",\n";
+            out += "}\n";
+        } else out += sourceLiteral(value) + "\n";
+    }
+    return out;
+}
 
 size_t length(const Object* o) {
     if (o == nullptr) return 0;
@@ -866,14 +1024,15 @@ uint16_t le16(const uint8_t* p) { return uint16_t(p[0] | (p[1] << 8)); }
 uint32_t le32(const uint8_t* p) { return uint32_t(p[0]) | (uint32_t(p[1]) << 8) | (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24); }
 }
 
-ZipArchive::ZipArchive(const std::string& path) : path_(path), file_(path, std::ios::binary) {
-    if (!file_) throw FormatError("cannot open " + path);
-    file_.seekg(0, std::ios::end);
-    const uint64_t size = uint64_t(file_.tellg());
+ZipArchive::ZipArchive(const std::string& path) : path_(path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) throw FormatError("cannot open " + path);
+    file.seekg(0, std::ios::end);
+    const uint64_t size = uint64_t(file.tellg());
     const uint64_t tail = std::min<uint64_t>(size, 65557);
     Bytes end(tail);
-    file_.seekg(std::streamoff(size - tail));
-    file_.read(reinterpret_cast<char*>(end.data()), std::streamsize(tail));
+    file.seekg(std::streamoff(size - tail));
+    file.read(reinterpret_cast<char*>(end.data()), std::streamsize(tail));
     size_t eocd = SIZE_MAX;
     for (size_t k = tail >= 22 ? tail - 22 + 1 : 0; k-- > 0;)
         if (le32(end.data() + k) == 0x06054b50) { eocd = k; break; }
@@ -883,18 +1042,24 @@ ZipArchive::ZipArchive(const std::string& path) : path_(path), file_(path, std::
     const uint32_t cdOffset = le32(end.data() + eocd + 16);
     if (uint64_t(cdOffset) + cdSize > size) throw FormatError(path + ": bad central directory");
     Bytes cd(cdSize);
-    file_.seekg(std::streamoff(cdOffset));
-    file_.read(reinterpret_cast<char*>(cd.data()), std::streamsize(cdSize));
+    file.seekg(std::streamoff(cdOffset));
+    file.read(reinterpret_cast<char*>(cd.data()), std::streamsize(cdSize));
     size_t p = 0;
     for (uint16_t k = 0; k < count; ++k) {
         if (p + 46 > cd.size() || le32(cd.data() + p) != 0x02014b50) throw FormatError(path + ": bad central directory entry");
         ZipEntry e;
+        e.versionMadeBy = le16(cd.data() + p + 4);
+        e.versionNeeded = le16(cd.data() + p + 6);
         e.method = le16(cd.data() + p + 10);
+        e.modTime = le16(cd.data() + p + 12);
+        e.modDate = le16(cd.data() + p + 14);
+        e.crc = le32(cd.data() + p + 16);
         e.compressedSize = le32(cd.data() + p + 20);
         e.size = le32(cd.data() + p + 24);
         const uint16_t nameLength = le16(cd.data() + p + 28);
         const uint16_t extraLength = le16(cd.data() + p + 30);
         const uint16_t commentLength = le16(cd.data() + p + 32);
+        e.externalAttributes = le32(cd.data() + p + 38);
         e.localHeaderOffset = le32(cd.data() + p + 42);
         if (p + 46 + nameLength > cd.size()) throw FormatError(path + ": bad entry name");
         e.name.assign(reinterpret_cast<const char*>(cd.data() + p + 46), nameLength);
@@ -904,20 +1069,24 @@ ZipArchive::ZipArchive(const std::string& path) : path_(path), file_(path, std::
     }
 }
 
-Bytes ZipArchive::read(const ZipEntry& entry) const {
+Bytes ZipArchive::readStored(const ZipEntry& entry) const {
     Bytes stored(entry.compressedSize);
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        uint8_t header[30];
-        file_.clear();
-        file_.seekg(std::streamoff(entry.localHeaderOffset));
-        if (!file_.read(reinterpret_cast<char*>(header), 30) || le32(header) != 0x04034b50)
-            throw FormatError(path_ + ": bad local header for " + entry.name);
-        const uint64_t dataOffset = uint64_t(entry.localHeaderOffset) + 30 + le16(header + 26) + le16(header + 28);
-        file_.seekg(std::streamoff(dataOffset));
-        if (entry.compressedSize && !file_.read(reinterpret_cast<char*>(stored.data()), std::streamsize(entry.compressedSize)))
-            throw FormatError(path_ + ": cannot read " + entry.name);
-    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::ifstream file(path_, std::ios::binary);
+    if (!file) throw FormatError("cannot open " + path_);
+    uint8_t header[30];
+    file.seekg(std::streamoff(entry.localHeaderOffset));
+    if (!file.read(reinterpret_cast<char*>(header), 30) || le32(header) != 0x04034b50)
+        throw FormatError(path_ + ": bad local header for " + entry.name);
+    const uint64_t dataOffset = uint64_t(entry.localHeaderOffset) + 30 + le16(header + 26) + le16(header + 28);
+    file.seekg(std::streamoff(dataOffset));
+    if (entry.compressedSize && !file.read(reinterpret_cast<char*>(stored.data()), std::streamsize(entry.compressedSize)))
+        throw FormatError(path_ + ": cannot read " + entry.name);
+    return stored;
+}
+
+Bytes ZipArchive::read(const ZipEntry& entry) const {
+    Bytes stored = readStored(entry);
     if (entry.method == 0) return stored;
     if (entry.method != 8) throw FormatError(entry.name + ": unsupported zip method " + std::to_string(entry.method));
     Bytes out(entry.size);
@@ -933,12 +1102,141 @@ Bytes ZipArchive::read(const ZipEntry& entry) const {
     return out;
 }
 
+namespace {
+void put16(Bytes& out, uint32_t v) {
+    out.push_back(uint8_t(v));
+    out.push_back(uint8_t(v >> 8));
+}
+void put32(Bytes& out, uint32_t v) {
+    put16(out, v & 0xFFFF);
+    put16(out, v >> 16);
+}
+}  // namespace
+
+void writeZip(const ZipArchive& source, const std::string& destination, const std::map<std::string, Bytes>& replace,
+              const std::vector<std::string>& remove) {
+    struct Written {
+        ZipEntry entry;
+        uint32_t offset = 0;
+    };
+    std::vector<Written> written;
+    std::ofstream out(destination, std::ios::binary | std::ios::trunc);
+    if (!out) throw FormatError("cannot write " + destination);
+    uint64_t offset = 0;
+    const auto write = [&](const Bytes& b) {
+        out.write(reinterpret_cast<const char*>(b.data()), std::streamsize(b.size()));
+        offset += b.size();
+    };
+    // Now as a DOS time and date, for new and replaced entries.
+    std::time_t now = std::time(nullptr);
+    std::tm local{};
+#ifdef _WIN32
+    localtime_s(&local, &now);
+#else
+    localtime_r(&now, &local);
+#endif
+    const uint16_t dosTime = uint16_t((local.tm_hour << 11) | (local.tm_min << 5) | (local.tm_sec / 2));
+    const uint16_t dosDate = uint16_t(((local.tm_year - 80) << 9) | ((local.tm_mon + 1) << 5) | local.tm_mday);
+    const auto emit = [&](ZipEntry e, const Bytes& stored) {
+        if (offset > 0xFFFFFFFFull) throw FormatError(destination + ": archive too large");
+        Bytes header;
+        put32(header, 0x04034b50);
+        put16(header, e.versionNeeded);
+        put16(header, 0);                                   // flags: no data descriptor, no encryption
+        put16(header, e.method);
+        put16(header, e.modTime);
+        put16(header, e.modDate);
+        put32(header, e.crc);
+        put32(header, e.compressedSize);
+        put32(header, e.size);
+        put16(header, uint32_t(e.name.size()));
+        put16(header, 0);
+        header.insert(header.end(), e.name.begin(), e.name.end());
+        written.push_back(Written{e, uint32_t(offset)});
+        write(header);
+        write(stored);
+    };
+    const auto deflated = [&](const std::string& name, const Bytes& raw, ZipEntry e) {
+        e.name = name;
+        e.size = uint32_t(raw.size());
+        e.crc = uint32_t(crc32(0L, raw.data(), uInt(raw.size())));
+        e.modTime = dosTime;
+        e.modDate = dosDate;
+        e.versionNeeded = 20;
+        Bytes stored(compressBound(uLong(raw.size())) + 64);
+        z_stream zs{};
+        if (deflateInit2(&zs, Z_BEST_COMPRESSION, Z_DEFLATED, -MAX_WBITS, 8, Z_DEFAULT_STRATEGY) != Z_OK) throw FormatError("zlib init failed");
+        zs.next_in = const_cast<Bytef*>(raw.data());
+        zs.avail_in = uInt(raw.size());
+        zs.next_out = stored.data();
+        zs.avail_out = uInt(stored.size());
+        const int rc = deflate(&zs, Z_FINISH);
+        const uLong produced = zs.total_out;
+        deflateEnd(&zs);
+        if (rc != Z_STREAM_END) throw FormatError(name + ": deflate error " + std::to_string(rc));
+        stored.resize(produced);
+        e.method = 8;
+        e.compressedSize = uint32_t(stored.size());
+        emit(e, stored);
+    };
+    std::set<std::string> done;
+    for (const ZipEntry& e : source.entries()) {
+        if (std::find(remove.begin(), remove.end(), e.name) != remove.end()) continue;
+        const auto r = replace.find(e.name);
+        if (r != replace.end()) deflated(e.name, r->second, e);
+        else emit(e, source.readStored(e));
+        done.insert(e.name);
+    }
+    for (const auto& r : replace)
+        if (!done.count(r.first)) deflated(r.first, r.second, ZipEntry{});
+    const uint64_t directoryOffset = offset;
+    Bytes directory;
+    for (const Written& w : written) {
+        const ZipEntry& e = w.entry;
+        put32(directory, 0x02014b50);
+        put16(directory, e.versionMadeBy);
+        put16(directory, e.versionNeeded);
+        put16(directory, 0);
+        put16(directory, e.method);
+        put16(directory, e.modTime);
+        put16(directory, e.modDate);
+        put32(directory, e.crc);
+        put32(directory, e.compressedSize);
+        put32(directory, e.size);
+        put16(directory, uint32_t(e.name.size()));
+        put16(directory, 0);                                // extra
+        put16(directory, 0);                                // comment
+        put16(directory, 0);                                // disk
+        put16(directory, 0);                                // internal attributes
+        put32(directory, e.externalAttributes);
+        put32(directory, w.offset);
+        directory.insert(directory.end(), e.name.begin(), e.name.end());
+    }
+    write(directory);
+    if (written.size() > 0xFFFF || offset > 0xFFFFFFFFull) throw FormatError(destination + ": archive too large");
+    Bytes end;
+    put32(end, 0x06054b50);
+    put16(end, 0);
+    put16(end, 0);
+    put16(end, uint32_t(written.size()));
+    put16(end, uint32_t(written.size()));
+    put32(end, uint32_t(directory.size()));
+    put32(end, uint32_t(directoryOffset));
+    put16(end, 0);
+    write(end);
+    out.close();
+    if (!out) throw FormatError("cannot write " + destination);
+}
+
 // ------------------------------------------------------------------------------------------
 // GameData
 // ------------------------------------------------------------------------------------------
-GameData::GameData(const std::string& gameZipPath) : zip_(gameZipPath) {
+GameData::GameData(const std::string& gameZipPath) : zip_(std::make_unique<ZipArchive>(gameZipPath)) { indexModules(); }
+
+void GameData::indexModules() {
+    moduleEntries_.clear();
     // Compiled modules (.pyo / .pyc) first; a module shipped only as source (.py) is evaluated by evaluateSource.
-    const auto& entries = zip_.entries();
+    const auto& entries = zip_->entries();
     for (int pass = 0; pass < 2; ++pass)
         for (size_t k = 0; k < entries.size(); ++k) {
             const std::string name = toLowerAscii(entries[k].name);
@@ -970,10 +1268,26 @@ const py::Object& GameData::module(const std::string& module) {
     if (cached != cache_.end()) return *cached->second;
     const auto it = moduleEntries_.find(key);
     if (it == moduleEntries_.end()) throw FormatError("game data has no module " + module);
-    const ZipEntry& entry = zip_.entries()[it->second];
+    const ZipEntry& entry = zip_->entries()[it->second];
     const bool source = entry.name.size() > 3 && toLowerAscii(entry.name.substr(entry.name.size() - 3)) == ".py";
-    py::Ref globals = source ? evaluateSource(zip_.read(entry), module) : evaluateModule(zip_.read(entry), module);
+    py::Ref globals = source ? evaluateSource(zip_->read(entry), module) : evaluateModule(zip_->read(entry), module);
     return *cache_.emplace(key, globals).first->second;
+}
+
+std::string GameData::moduleEntryName(const std::string& module) const {
+    const auto it = moduleEntries_.find(toLowerAscii(module));
+    return it == moduleEntries_.end() ? std::string() : zip_->entries()[it->second].name;
+}
+
+void GameData::reloadArchive(const std::map<std::string, py::Ref>& updated) {
+    std::lock_guard<std::mutex> lock(cacheMutex_);
+    zip_ = std::make_unique<ZipArchive>(zip_->path());
+    indexModules();
+    for (const auto& u : updated) {
+        py::Ref& slot = cache_[toLowerAscii(u.first)];
+        if (slot) retired_.push_back(slot);
+        slot = u.second;
+    }
 }
 
 const py::Object* GameData::global(const std::string& module, const std::string& variable) {

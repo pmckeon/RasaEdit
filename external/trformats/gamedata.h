@@ -15,6 +15,7 @@
 
 #include <fstream>
 #include <initializer_list>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -81,6 +82,23 @@ const Object* dictGetTuple(const Object* dict, std::initializer_list<int64_t> ke
 const Object* attribute(const Object* object, const std::string& name);   // instance, then its class
 std::string repr(const Object* o, size_t maxItems = 8);    // Python-like text, for debugging
 
+// Building and changing objects (the editor's text workspace edits language modules this way).
+Ref makeInt(int64_t value);
+Ref makeText(std::string utf8);                            // a unicode string
+Ref makeTuple(std::vector<Ref> items);
+Ref makeList(std::vector<Ref> items);
+Ref makeDict();
+void dictPut(Object& dict, const Ref& key, const Ref& value);   // insert, or replace the value of an equal key
+bool dictRemove(Object& dict, const Object& key);               // false when absent (the index is rebuilt)
+Ref dictGetRef(const Object& dict, const Object& key);           // the stored value (owning), nullptr when absent
+Ref deepCopy(const Ref& o);                                // tuples, lists and dicts copied; other objects shared
+// A Python 2.4 source literal of o (None / bool / int / float / str / unicode / tuple / list / dict). Unicode strings are written
+// u'...' with every non-ASCII character as \uXXXX (\UXXXXXXXX past the BMP): Python reads source without a coding
+// declaration as Latin-1, so raw UTF-8 bytes would come out as mojibake in game (see evaluateSource).
+std::string sourceLiteral(const Object& o);
+// A module's source: one `name = literal` line per global, a dict written one entry per line.
+std::string moduleSource(const Object& globals);
+
 }  // namespace py
 
 // Evaluate one compiled module; returns its globals (a Dict keyed by variable name).
@@ -100,6 +118,10 @@ struct ZipEntry {
     uint32_t compressedSize = 0;
     uint32_t size = 0;
     uint32_t localHeaderOffset = 0;
+    uint32_t crc = 0;
+    uint16_t modTime = 0, modDate = 0;   // DOS time and date
+    uint16_t versionMadeBy = 20, versionNeeded = 20;
+    uint32_t externalAttributes = 0;
 };
 
 class ZipArchive {
@@ -107,14 +129,22 @@ public:
     explicit ZipArchive(const std::string& path);
     ZipArchive(const ZipArchive&) = delete;
     ZipArchive& operator=(const ZipArchive&) = delete;
+    const std::string& path() const { return path_; }
     const std::vector<ZipEntry>& entries() const { return entries_; }
-    Bytes read(const ZipEntry& entry) const;
+    Bytes read(const ZipEntry& entry) const;          // uncompressed
+    Bytes readStored(const ZipEntry& entry) const;    // as stored (compressed for deflate entries)
 private:
+    // The file is opened for each read and closed again, so the archive can be replaced on disk while a reader exists.
     std::string path_;
-    mutable std::ifstream file_;
     mutable std::mutex mutex_;
     std::vector<ZipEntry> entries_;
 };
+
+// Writes a copy of `source` to `destination` with `replace` (zip path -> new contents; a name the archive lacks is added at the
+// end, deflated) and without `remove`. Untouched entries are copied byte for byte (stored data, CRC, times); each local header
+// is written fresh (no data descriptor). Throws FormatError.
+void writeZip(const ZipArchive& source, const std::string& destination, const std::map<std::string, Bytes>& replace,
+              const std::vector<std::string>& remove);
 
 // Radar (mini-map) placement for one game context and region, from
 // generated.client.gamecontextuiradarinfo: lookup[(contextId, regionId)] = [(extentX, extentZ, offsetX, offsetZ)].
@@ -179,6 +209,12 @@ struct AccessoryAttachment {
 class GameData {
 public:
     explicit GameData(const std::string& gameZipPath);       // e.g. AssetLibrary::gameDataPath()
+    const std::string& path() const { return zip_->path(); }
+    // The zip entry a module comes from ("generated/client/language/english/missiontextlanguage.pyo"), "" if none.
+    std::string moduleEntryName(const std::string& module) const;
+    // After game.zip was rewritten: re-read its directory, and take `updated` (module -> globals) as those modules' contents.
+    // Other evaluated modules stay cached; replaced globals are kept alive, so objects handed out earlier stay valid.
+    void reloadArchive(const std::map<std::string, py::Ref>& updated);
 
     // Modules are named by dotted path from "generated", e.g. "generated.client.entityclass".
     std::vector<std::string> moduleNames() const;
@@ -327,7 +363,9 @@ public:
     std::vector<int32_t> skeletonMeshes(int32_t skeletonId);
 
 private:
-    ZipArchive zip_;
+    void indexModules();
+    std::unique_ptr<ZipArchive> zip_;
+    std::vector<py::Ref> retired_;                             // replaced module globals (still referenced from outside)
     std::unordered_map<std::string, size_t> moduleEntries_;   // dotted name -> zip entry
     std::unordered_map<std::string, py::Ref> cache_;
     std::mutex cacheMutex_;

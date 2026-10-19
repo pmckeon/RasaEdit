@@ -40,7 +40,7 @@ public:
     void contentChanged() override;
     void deleteSelected() override;
     bool& snapToGround() override { return snapToGround_; }
-    const char* name() const override { return "Client"; }
+    const char* name() const override { return "Map"; }
     const char* dockspaceName() const override { return "ClientDockSpace"; }
     void buildDefaultLayout(ImGuiID dockspace) override;
     void drawPanels() override;

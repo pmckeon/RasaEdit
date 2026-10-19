@@ -58,7 +58,7 @@ add_executable (RasaEdit
     "Avatar.cpp" "Avatar.h"
     "UiCanvas.cpp" "UiCanvas.h"
     "UiSchema.cpp" "UiSchema.h"
-    "UiWorkspace.cpp" "UiWorkspace.h"
+    "UiWorkspace.cpp" "UiWorkspace.h" "TextWorkspace.cpp" "TextWorkspace.h"
     "UiDefinitions.cpp"
 )
 
@@ -94,7 +94,7 @@ if (RASAEDIT_BUILD_TESTS)
 
     # Whole-editor smoke test: real ImGui frames and both workspaces, headless.
     add_executable(ui_smoke_test tests/ui_smoke_test.cpp Editor.cpp EditorContext.cpp ClientWorkspace.cpp ClientPvs.cpp ServerWorkspace.cpp MissionEditor.cpp Lookups.cpp ModelExchange.cpp ModelImport.cpp BlenderPanel.cpp AssetsWorkspace.cpp ModelAnimations.cpp MissionValidation.cpp Json.cpp LootEditor.cpp ModuleEditor.cpp RecipeEditor.cpp Panels.cpp AssetPreview.cpp SoundPlayer.cpp
-                   Renderer.cpp SceneView.cpp PvsBuilder.cpp ParticleSim.cpp GpuTexture.cpp WorldDatabase.cpp DbConnection.cpp Avatar.cpp TerrainOverview.cpp RadarMap.cpp UiCanvas.cpp UiSchema.cpp UiWorkspace.cpp UiDefinitions.cpp)
+                   Renderer.cpp SceneView.cpp PvsBuilder.cpp ParticleSim.cpp GpuTexture.cpp WorldDatabase.cpp DbConnection.cpp Avatar.cpp TerrainOverview.cpp RadarMap.cpp UiCanvas.cpp UiSchema.cpp UiWorkspace.cpp UiDefinitions.cpp TextWorkspace.cpp)
     target_include_directories(ui_smoke_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(ui_smoke_test PRIVATE SDL3::SDL3 SDL3_mixer::SDL3_mixer imgui::imgui Freetype::Freetype trformats ${RASAEDIT_SQLITE})
     set_property(TARGET ui_smoke_test PROPERTY CXX_STANDARD 20)

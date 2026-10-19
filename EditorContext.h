@@ -65,6 +65,9 @@ public:
     void setStatus(const std::string& text, bool isError);
     // An asset to show in the Assets workspace (the editor switches to it next frame; "" = none).
     std::string showAssetRequest;
+    // "Open in Text" from another workspace: the language module (dotted) and the entry's id to show in the Text workspace.
+    std::string showTextModule;
+    int64_t showTextId = -1;
     const ClassInfo& classInfo(int32_t classId);
 
     // Loading. Call between frames (they replace GPU textures and the scene). false on failure (status set).
