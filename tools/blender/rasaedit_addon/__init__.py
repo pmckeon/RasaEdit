@@ -23,7 +23,7 @@ every glTF export; RasaEdit writes the .mkr).
 bl_info = {
     "name": "RasaEdit Tabula Rasa models",
     "author": "RasaEdit",
-    "version": (0, 2, 1),
+    "version": (0, 2, 2),
     "blender": (4, 2, 0),
     "location": "File > Import / Export > Tabula Rasa model (RasaEdit); 3D view sidebar > RasaEdit",
     "description": "Import and export Tabula Rasa models exchanged with RasaEdit (glTF)",
@@ -293,7 +293,8 @@ def check_scene(scene):
             data = rasa_data(o, "rasaCollision") or rasa_data(o.data, "rasaCollision") or {}
             if data.get("kind") in ("box", "sphere"):
                 warnings.append("%s: a %s collision volume - the game's player walks on and bumps into walkable surfaces only, so a map "
-                                "object with this collision can be walked through (use a convex hull or a copy)" % (o.name, data.get("kind")))
+                                "object with this collision can be walked through (Convert to walkable surface, unless it is a scripted "
+                                "object such as a door)" % (o.name, data.get("kind")))
             if data.get("kind") == "box" and box_turned_in_bone_frame(o, data.get("bone") or (o.parent_bone if o.parent_type == 'BONE' else "")):
                 warnings.append("%s: a rotated collision box comes back as the larger axis-aligned box around it" % o.name)
             continue
@@ -479,6 +480,7 @@ class RASAEDIT_PT_panel(bpy.types.Panel):
         row = layout.row(align=True)
         row.operator(collision.RASAEDIT_OT_make_collision.bl_idname, text="Make collision")
         row.operator(collision.RASAEDIT_OT_mark_collision.bl_idname, text="Mark as collision")
+        layout.operator(collision.RASAEDIT_OT_convert_collision.bl_idname, text="Convert to walkable surface")
         layout.operator(markers.RASAEDIT_OT_add_marker.bl_idname, text="Add animation marker")
         data = schema.load(context)
         layout.label(text="Schema: %s" % (schema.loaded_path() if data else "not found"), icon='CHECKMARK' if data else 'ERROR')

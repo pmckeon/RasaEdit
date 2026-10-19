@@ -25,6 +25,7 @@ void ClientWorkspace::buildDefaultLayout(ImGuiID dockspace) {
     ImGui::DockBuilderDockWindow("Entities###Client.Entities", bottom);
     ImGui::DockBuilderDockWindow("Lights###Client.Lights", bottom);
     ImGui::DockBuilderDockWindow("Sounds###Client.Sounds", bottom);
+    ImGui::DockBuilderDockWindow("Collision###Client.Collision", bottom);
     ImGui::DockBuilderDockWindow("PVS###Client.Pvs", right);
     ImGui::DockBuilderDockWindow("Map###Client.Map", right);
     ImGui::DockBuilderDockWindow("Entity###Client.Entity", right);
@@ -45,6 +46,9 @@ void ClientWorkspace::onMapLoaded() {
     cleanUndoDepth_ = 0;
     cleanReachable_ = true;
     fitBounds_.clear();
+    collisionProblems_.clear();
+    collisionChecked_ = false;
+    collisionEntitiesWith_ = 0;
     saved_ = snapshot();
     pvsBuilder_.reset();
     pvsQueue_.clear();
@@ -508,6 +512,7 @@ void ClientWorkspace::drawPanels() {
     drawSoundsPanel();
     pvsStep();
     drawPvsPanel();
+    drawCollisionPanel();
     drawEntityPanel();
     OverviewLayers layers;
     layers.selection = &selection_;
@@ -1199,6 +1204,7 @@ void ClientWorkspace::drawEntityPanel() {
     if (e.hasBounds)
         ImGui::TextDisabled("Local bounds (%.1f %.1f %.1f) - (%.1f %.1f %.1f)", e.bounds.min.x, e.bounds.min.y, e.bounds.min.z,
                             e.bounds.max.x, e.bounds.max.y, e.bounds.max.z);
+    drawEntityCollision(index);
     if (!e.particles.empty()) {
         ImGui::SeparatorText("Particles");
         for (const tr::MapParticle& p : e.particles)

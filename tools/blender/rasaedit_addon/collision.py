@@ -1,11 +1,14 @@
-"""Stage 3: collision tools. A model's collision is one volume per bone (CLAUDE.md "Collision"): a walkable surface (any mesh), a box or
-a sphere, in the bone's frame. RasaEdit's import reads meshes marked rasaCollision {bone, kind}: one box / sphere on a bone stays one
-(fitted as the axis-aligned bounds in the bone's frame - a rotated box grows), anything else on a bone is merged into one surface;
-without a bone it takes the bone the mesh is parented to, else bone 0.
+"""Collision tools. A model's collision is one volume per bone (CLAUDE.md "Collision"): a walkable surface (any mesh), a box or a
+sphere, in the bone's frame. The game's player walks on and is blocked by WALKABLE SURFACES only (traced in tabula_rasa.exe and
+verified in game 2026-10-19, CLAUDE.md "What the client collides with"); box / sphere volumes serve scripted bodies such as doors, and
+a map object with only those can be walked through. RasaEdit's import reads meshes marked rasaCollision {bone, kind}: one box /
+sphere on a bone stays one (fitted as the axis-aligned bounds in the bone's frame), anything else on a bone is merged into one
+surface; without a bone it takes the bone the mesh is parented to, else bone 0. RasaEdit gives each bone with a surface its WSName.
 
-Make collision (sidebar > RasaEdit, or Object > RasaEdit): from the selected meshes, as a convex hull, a copy, a simplified copy, a box
-or a sphere - boxes and spheres fitted in the chosen bone's rest frame, so RasaEdit gets them exactly. Mark as collision: an existing
-mesh. Both put the mesh into the Collision collection (excluded from the view by the import; RasaEdit exports it anyway)."""
+Make collision (sidebar > RasaEdit): from the selected meshes - a convex hull, a copy, a simplified copy, or a box- / sphere-shaped
+surface (fitted in the chosen bone's rest frame); every shape is a walkable surface. Mark as collision: an existing mesh, as a surface
+(box / sphere volumes only for scripted objects). Convert to walkable surface: box / sphere volumes (e.g. from an imported door) become
+surfaces of the same shape. All put the mesh into the Collision collection (excluded from the view by the import; RasaEdit exports it)."""
 
 import json
 
@@ -91,8 +94,8 @@ class RASAEDIT_OT_make_collision(bpy.types.Operator):
         ('HULL', "Convex hull", "The smallest convex shape around the selection (a walkable surface)"),
         ('COPY', "Copy", "The selection's own triangles (a walkable surface)"),
         ('SIMPLE', "Simplified copy", "The selection's triangles, reduced (a walkable surface)"),
-        ('BOX', "Box", "A box volume (BVBX). The player does NOT collide with it on a map object - only scripted bodies such as doors use boxes"),
-        ('SPHERE', "Sphere", "A sphere volume (BVSP). The player does NOT collide with it on a map object")])
+        ('BOX', "Box", "A box-shaped walkable surface around the selection, in the bone's frame"),
+        ('SPHERE', "Sphere", "A sphere-shaped walkable surface around the selection (16 x 8 segments)")])
     ratio: FloatProperty(name="Keep", default=0.25, min=0.01, max=1.0, subtype='FACTOR', description="Share of triangles a simplified copy keeps")
     bone: EnumProperty(name="Bone", items=bone_items)
 
@@ -119,17 +122,17 @@ class RASAEDIT_OT_make_collision(bpy.types.Operator):
             lo = mathutils.Vector((min(p.x for p in local), min(p.y for p in local), min(p.z for p in local)))
             hi = mathutils.Vector((max(p.x for p in local), max(p.y for p in local), max(p.z for p in local)))
             centre = (lo + hi) / 2
+            # Both shapes are walkable surfaces (the kind the game collides with), only shaped as a box / sphere.
             if self.shape == 'BOX':
-                kind = "box"
                 bmesh.ops.create_cube(bm, size=1.0)
                 for v in bm.verts:
                     v.co = centre + mathutils.Vector((v.co.x * (hi.x - lo.x), v.co.y * (hi.y - lo.y), v.co.z * (hi.z - lo.z)))
             else:
-                kind = "sphere"
                 radius = max((p - centre).length for p in local)
                 bmesh.ops.create_uvsphere(bm, u_segments=16, v_segments=8, radius=max(radius, 1e-4))
                 for v in bm.verts:
                     v.co += centre
+            bmesh.ops.triangulate(bm, faces=bm.faces)
             matrix = frame
         else:
             verts = [bm.verts.new(p) for p in points]
@@ -170,10 +173,11 @@ class RASAEDIT_OT_mark_collision(bpy.types.Operator):
     bl_label = "Mark as collision"
     bl_options = {'REGISTER', 'UNDO'}
 
-    kind: EnumProperty(name="Kind", items=[
-        ('surface', "Walkable surface", "The mesh as it is"),
-        ('box', "Box", "RasaEdit fits the axis-aligned box around it in the bone's frame (not collided with on a map object)"),
-        ('sphere', "Sphere", "RasaEdit fits the sphere around it (not collided with on a map object)")])
+    kind: EnumProperty(name="Kind", default='surface', items=[
+        ('surface', "Walkable surface", "The mesh as it is - what the player walks on and bumps into"),
+        ('box', "Box volume (scripted objects only)", "RasaEdit fits the axis-aligned box around it in the bone's frame. The player does NOT "
+                "collide with it on a map object - only scripted bodies such as doors use box volumes"),
+        ('sphere', "Sphere volume (scripted objects only)", "RasaEdit fits the sphere around it. The player does NOT collide with it on a map object")])
     bone: EnumProperty(name="Bone", items=bone_items)
 
     @classmethod
@@ -187,6 +191,38 @@ class RASAEDIT_OT_mark_collision(bpy.types.Operator):
         for o in [o for o in context.selected_objects if o.type == 'MESH']:
             bone = self.bone or (o.parent_bone if o.parent_type == 'BONE' else "")
             mark(o, bone, self.kind, context.scene)
+        return {'FINISHED'}
+
+
+class RASAEDIT_OT_convert_collision(bpy.types.Operator):
+    """Make box / sphere collision volumes walkable surfaces of the same shape (the only collision the player meets on a map object)"""
+    bl_idname = "rasaedit.convert_collision"
+    bl_label = "Convert to walkable surface"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        from . import is_collision
+        chosen = [o for o in context.selected_objects if o.type == 'MESH' and is_collision(o)]
+        candidates = chosen or [o for o in context.scene.objects if o.type == 'MESH' and is_collision(o)]
+        converted = []
+        for o in candidates:
+            holder = o if "rasaCollision" in o.keys() else o.data if "rasaCollision" in o.data.keys() else None
+            d = panels.rasa_json(o, "rasaCollision") or panels.rasa_json(o.data, "rasaCollision") or {}
+            if d.get("kind") not in ("box", "sphere"):
+                continue
+            d["kind"] = "surface"
+            (holder if holder is not None else o)["rasaCollision"] = json.dumps(d)
+            if o.data.polygons and any(len(p.vertices) > 3 for p in o.data.polygons):
+                bm = bmesh.new()
+                bm.from_mesh(o.data)
+                bmesh.ops.triangulate(bm, faces=bm.faces)
+                bm.to_mesh(o.data)
+                bm.free()
+            converted.append(o.name)
+        if converted:
+            self.report({'INFO'}, "Converted to walkable surfaces: %s" % ", ".join(converted))
+        else:
+            self.report({'INFO'}, "No box / sphere collision volumes %s" % ("selected" if chosen else "in the scene"))
         return {'FINISHED'}
 
 
@@ -208,7 +244,7 @@ def collision_notes(scene):
     return notes
 
 
-classes = (RASAEDIT_OT_make_collision, RASAEDIT_OT_mark_collision)
+classes = (RASAEDIT_OT_make_collision, RASAEDIT_OT_mark_collision, RASAEDIT_OT_convert_collision)
 
 
 def register():

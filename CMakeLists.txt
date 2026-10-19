@@ -58,6 +58,7 @@ add_executable (RasaEdit
     "SceneView.cpp" "SceneView.h"
     "PvsBuilder.cpp" "PvsBuilder.h"
     "ClientPvs.cpp"
+    "ClientCollision.cpp" "Collision.cpp" "Collision.h"
     "ParticleSim.cpp" "ParticleSim.h"
     "GpuMath.h" "MarkerColours.h" "ShaderBytecode.h"
     "WorldDatabase.cpp" "WorldDatabase.h"
@@ -104,7 +105,7 @@ if (RASAEDIT_BUILD_TESTS)
     target_link_libraries(viewport_test PRIVATE SDL3::SDL3 Freetype::Freetype trformats ${RASAEDIT_SQLITE})
 
     # Whole-editor smoke test: real ImGui frames and both workspaces, headless.
-    add_executable(ui_smoke_test tests/ui_smoke_test.cpp Editor.cpp EditorContext.cpp ClientWorkspace.cpp ClientPvs.cpp ServerWorkspace.cpp MissionEditor.cpp Lookups.cpp ModelExchange.cpp ModelImport.cpp BlenderPanel.cpp AssetsWorkspace.cpp ModelAnimations.cpp MissionValidation.cpp Json.cpp LootEditor.cpp ModuleEditor.cpp RecipeEditor.cpp Panels.cpp AssetPreview.cpp SoundPlayer.cpp
+    add_executable(ui_smoke_test tests/ui_smoke_test.cpp Editor.cpp EditorContext.cpp ClientWorkspace.cpp ClientPvs.cpp ClientCollision.cpp Collision.cpp ServerWorkspace.cpp MissionEditor.cpp Lookups.cpp ModelExchange.cpp ModelImport.cpp BlenderPanel.cpp AssetsWorkspace.cpp ModelAnimations.cpp MissionValidation.cpp Json.cpp LootEditor.cpp ModuleEditor.cpp RecipeEditor.cpp Panels.cpp AssetPreview.cpp SoundPlayer.cpp
                    Renderer.cpp SceneView.cpp PvsBuilder.cpp ParticleSim.cpp GpuTexture.cpp WorldDatabase.cpp DbConnection.cpp Avatar.cpp TerrainOverview.cpp RadarMap.cpp UiCanvas.cpp UiSchema.cpp UiWorkspace.cpp UiDefinitions.cpp TextWorkspace.cpp)
     target_include_directories(ui_smoke_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(ui_smoke_test PRIVATE SDL3::SDL3 SDL3_mixer::SDL3_mixer imgui::imgui Freetype::Freetype trformats ${RASAEDIT_SQLITE})

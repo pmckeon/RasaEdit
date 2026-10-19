@@ -2936,9 +2936,27 @@ void SceneView::updateClutterCells() {
 // ------------------------------------------------------------------------------------------
 // Frame
 // ------------------------------------------------------------------------------------------
+// A point in a bone's bind frame -> model space through the skeleton's bind chain (PSKE: child = parent x T x R x S), the frame
+// the client places a bone's walkable surface in: WalkableSurfaceManager::AddWalkableSurface (FUN_00925d70) updates the skeleton from
+// its bind values (FUN_005a10b0) and takes the bone's world matrix (FUN_005a1330) - not the stored inverse bind, which is identity on
+// e.g. arch_hum_tent_generic_01_v02 whose "collision" bone sits 4 m along z (found 2026-10-19: the collision drew 4 m off).
+static tr::Vec3 boneBindPoint(const tr::GeoFile& file, size_t bone, tr::Vec3 p) {
+    for (size_t guard = 0; bone < file.bones.size() && guard < 256; ++guard) {
+        const tr::GeoFileBone& b = file.bones[bone];
+        p = tr::Vec3{p.x * b.scale.x, p.y * b.scale.y, p.z * b.scale.z};
+        const tr::Quat& q = b.rotation;
+        const tr::Vec3 t{2 * (q.y * p.z - q.z * p.y), 2 * (q.z * p.x - q.x * p.z), 2 * (q.x * p.y - q.y * p.x)};
+        p = tr::Vec3{p.x + q.w * t.x + (q.y * t.z - q.z * t.y) + b.translation.x, p.y + q.w * t.y + (q.z * t.x - q.x * t.z) + b.translation.y,
+                     p.z + q.w * t.z + (q.x * t.y - q.y * t.x) + b.translation.z};
+        if (b.parent < 0 || size_t(b.parent) >= file.bones.size() || size_t(b.parent) == bone) break;
+        bone = size_t(b.parent);
+    }
+    return p;
+}
+
 // A model's collision as the client uses it (tabula_rasa.exe WalkableSurfaceManager::AddWalkableSurfaces, FUN_00925590: every bone
 // volume of type 5 = BVWS, provided the bone's property group - the group whose id is the bone index - names a WSName), in model space:
-// the volume's coordinates are in the bone's bind frame, i.e. the inverse of the bone's stored inverse bind matrix. Built once per
+// the volume's coordinates are in the bone's bind frame (boneBindPoint). Built once per
 // model, at most buildBudget a frame (each reads the .geo again).
 const SceneView::CollisionMesh* SceneView::collisionFor(const Model* model, size_t& buildBudget) {
     auto it = collisionMeshes_.find(model);
@@ -2974,19 +2992,7 @@ const SceneView::CollisionMesh* SceneView::collisionFor(const Model* model, size
         for (const tr::GeoPropertyGroup& g : file.properties)
             if (g.id == int32_t(b))
                 for (const tr::GeoParameter& p : g.pairs) named = named || p.key == "WSName";
-        // Bone frame = inverse of the stored inverse bind (row vectors: v' = v.x X + v.y Y + v.z Z + T).
-        const float* m = bone.inverseBind;
-        const float a = m[0], bb = m[1], cc = m[2], d = m[4], e = m[5], f = m[6], g = m[8], h = m[9], i = m[10];
-        const float det = a * (e * i - f * h) - bb * (d * i - f * g) + cc * (d * h - e * g);
-        if (std::fabs(det) < 1e-12f) continue;
-        const float k = 1.0f / det;
-        const float r[9] = {(e * i - f * h) * k, (cc * h - bb * i) * k, (bb * f - cc * e) * k, (f * g - d * i) * k, (a * i - cc * g) * k,
-                            (cc * d - a * f) * k, (d * h - e * g) * k, (bb * g - a * h) * k, (a * e - bb * d) * k};
-        const float tx = -(m[12] * r[0] + m[13] * r[3] + m[14] * r[6]), ty = -(m[12] * r[1] + m[13] * r[4] + m[14] * r[7]),
-                    tz = -(m[12] * r[2] + m[13] * r[5] + m[14] * r[8]);
-        auto place = [&](const tr::Vec3& v) {
-            return tr::Vec3{v.x * r[0] + v.y * r[3] + v.z * r[6] + tx, v.x * r[1] + v.y * r[4] + v.z * r[7] + ty, v.x * r[2] + v.y * r[5] + v.z * r[8] + tz};
-        };
+        auto place = [&](const tr::Vec3& v) { return boneBindPoint(file, b, v); };
         std::vector<tr::GeoBoneVolume> volumes;
         try { volumes = tr::readBoneVolumes(bone.boundingVolume); } catch (const std::exception&) { continue; }
         for (const tr::GeoBoneVolume& v : volumes) {

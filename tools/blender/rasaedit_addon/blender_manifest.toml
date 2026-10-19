@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "rasaedit_addon"
-version = "0.2.1"
+version = "0.2.2"
 name = "RasaEdit Tabula Rasa models"
 tagline = "Import and export Tabula Rasa models exchanged with RasaEdit (glTF)"
 maintainer = "RasaEdit"

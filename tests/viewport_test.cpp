@@ -2295,7 +2295,7 @@ int main(int argc, char** argv) {
         // preview of a collision layer. Lines: "T <status> x y z x y z x y z" per walkable-surface triangle (status ok = BVWS on a bone
         // with WSName, dropped = no WSName on that bone or the entity's map flag bit 1), "B x y z ... (8 corners)" per box volume, "S x
         // y z r" per sphere volume, "A x y z ... (8 corners)" per generated ABV (shape and extents as stored, drawn as a box of those
-        // half extents - meaning NOT traced). Volume coordinates are in the bone's bind frame: bone = inverse(stored inverse bind).
+        // half extents - meaning NOT traced). Volume coordinates are in the bone's bind frame: the skeleton's bind chain (as the client).
         if (const char* spec = envValue("RASA_COLLDUMP")) {
             std::string outPath = spec;
             float radius = 40.0f;
@@ -2315,26 +2315,6 @@ int main(int argc, char** argv) {
             auto toWorld = [&](const Placed& p, const tr::Vec3& v) {
                 const tr::Vec3 r = rotate(p.rot, tr::Vec3{v.x * p.scale, v.y * p.scale, v.z * p.scale});
                 return tr::Vec3{r.x + p.pos.x, r.y + p.pos.y, r.z + p.pos.z};
-            };
-            // Bone world (mesh space) = inverse of the stored inverse bind (row vectors: v' = v.x X + v.y Y + v.z Z + T).
-            auto boneFrame = [](const float* m) {
-                // m: 16 floats row-major; rows 0..2 = X, Y, Z axes, row 3 = T. Invert the 3x3 and the translation.
-                const float a = m[0], b = m[1], c = m[2], d = m[4], e = m[5], f = m[6], g = m[8], h = m[9], i = m[10];
-                const float det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
-                std::array<float, 12> inv{};
-                const float k = det != 0 ? 1.0f / det : 0.0f;
-                inv[0] = (e * i - f * h) * k; inv[1] = (c * h - b * i) * k; inv[2] = (b * f - c * e) * k;
-                inv[3] = (f * g - d * i) * k; inv[4] = (a * i - c * g) * k; inv[5] = (c * d - a * f) * k;
-                inv[6] = (d * h - e * g) * k; inv[7] = (b * g - a * h) * k; inv[8] = (a * e - b * d) * k;
-                const float tx = m[12], ty = m[13], tz = m[14];
-                inv[9] = -(tx * inv[0] + ty * inv[3] + tz * inv[6]);
-                inv[10] = -(tx * inv[1] + ty * inv[4] + tz * inv[7]);
-                inv[11] = -(tx * inv[2] + ty * inv[5] + tz * inv[8]);
-                return inv;
-            };
-            auto apply = [](const std::array<float, 12>& m, const tr::Vec3& v) {
-                return tr::Vec3{v.x * m[0] + v.y * m[3] + v.z * m[6] + m[9], v.x * m[1] + v.y * m[4] + v.z * m[7] + m[10],
-                                v.x * m[2] + v.y * m[5] + v.z * m[8] + m[11]};
             };
             std::map<std::string, std::shared_ptr<tr::GeoFile>> cache;
             size_t ok = 0, dropped = 0, boxes = 0, spheres = 0, entities = 0;
@@ -2366,7 +2346,18 @@ int main(int argc, char** argv) {
                     for (const tr::GeoPropertyGroup& g : file->properties)
                         if (g.id == int32_t(b))
                             for (const tr::GeoParameter& p : g.pairs) named = named || p.key == "WSName";
-                    const std::array<float, 12> frame = boneFrame(bone.inverseBind);
+                    const size_t boneIndex = b;
+                    auto chain = [&](tr::Vec3 p) {
+                        for (size_t at = boneIndex, guard = 0; at < file->bones.size() && guard < 256; ++guard) {
+                            const tr::GeoFileBone& fb = file->bones[at];
+                            p = tr::Vec3{p.x * fb.scale.x, p.y * fb.scale.y, p.z * fb.scale.z};
+                            p = rotate(fb.rotation, p);
+                            p = tr::Vec3{p.x + fb.translation.x, p.y + fb.translation.y, p.z + fb.translation.z};
+                            if (fb.parent < 0 || size_t(fb.parent) == at) break;
+                            at = size_t(fb.parent);
+                        }
+                        return p;
+                    };
                     std::vector<tr::GeoBoneVolume> volumes;
                     try { volumes = tr::readBoneVolumes(bone.boundingVolume); } catch (const std::exception&) {}
                     for (const tr::GeoBoneVolume& v : volumes) {
@@ -2376,7 +2367,7 @@ int main(int argc, char** argv) {
                             for (size_t t = 0; t + 2 < v.indices.size(); t += 3) {
                                 std::fprintf(out, "T %s", good ? "ok" : "dropped");
                                 for (int k = 0; k < 3; ++k) {
-                                    const tr::Vec3 w = toWorld(placed, apply(frame, v.vertices[v.indices[t + k]]));
+                                    const tr::Vec3 w = toWorld(placed, chain(v.vertices[v.indices[t + k]]));
                                     std::fprintf(out, " %.3f %.3f %.3f", w.x, w.y, w.z);
                                 }
                                 std::fprintf(out, "\n");
@@ -2387,13 +2378,13 @@ int main(int argc, char** argv) {
                             for (int c = 0; c < 8; ++c) {
                                 const tr::Vec3 local{v.centre.x + (c & 1 ? 1 : -1) * v.halfExtents.x, v.centre.y + (c & 2 ? 1 : -1) * v.halfExtents.y,
                                                      v.centre.z + (c & 4 ? 1 : -1) * v.halfExtents.z};
-                                const tr::Vec3 w = toWorld(placed, apply(frame, local));
+                                const tr::Vec3 w = toWorld(placed, chain(local));
                                 std::fprintf(out, " %.3f %.3f %.3f", w.x, w.y, w.z);
                             }
                             std::fprintf(out, "\n");
                             ++boxes;
                         } else if (v.kind == tr::fourcc("BVSP")) {
-                            const tr::Vec3 w = toWorld(placed, apply(frame, v.centre));
+                            const tr::Vec3 w = toWorld(placed, chain(v.centre));
                             std::fprintf(out, "S %.3f %.3f %.3f %.3f\n", w.x, w.y, w.z, v.sphereRadius * e.scale);
                             ++spheres;
                         }

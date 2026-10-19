@@ -1,10 +1,12 @@
 #pragma once
 
+#include "Collision.h"
 #include "Panels.h"
 #include "PvsBuilder.h"
 #include "SoundPlayer.h"
 #include "Workspace.h"
 
+#include <map>
 #include <memory>
 #include <vector>
 
@@ -14,6 +16,8 @@
 // files the client reads directly (tabula_rasa.cfg Maps = "data/maps/|.map"), so no patch archive is needed.
 class ClientWorkspace : public Workspace, public ViewportEditHooks {
 public:
+    // The Collision panel's check of every map entity (public: ui_smoke_test calls it).
+    void checkCollision();
     // Writes a file in place, keeping the first original as <file>.rasaedit-original (also used by the UI workspace).
     static bool writeFileWithBackup(const std::string& path, const tr::Bytes& data, std::string& error);
     explicit ClientWorkspace(EditorContext& ctx) : Workspace(ctx) {}
@@ -98,6 +102,20 @@ private:
     // the last rebuild / clear); an entity that moved, changed or went away can uncover what it hid, so every row that sees a leaf
     // its old box overlaps is affected (and, optionally, rows seeing its new box, which could only get tighter).
     void drawPvsPanel();
+
+    // Collision checks (ClientCollision.cpp, Collision.h): the entity panel's verdict and the Collision panel's problem list.
+    void drawCollisionPanel();
+    void drawEntityCollision(size_t index);
+    const ModelCollision& collisionOf(const std::string& mesh);
+    std::map<std::string, ModelCollision> collisionCache_;       // per model, read once (cleared by "Check again")
+    struct CollisionProblem {
+        size_t entity = 0;
+        std::string mesh;
+        std::string problem;
+    };
+    std::vector<CollisionProblem> collisionProblems_;
+    size_t collisionEntitiesWith_ = 0;
+    bool collisionChecked_ = false;
     std::vector<tr::MapEntity> pvsBaseline_;
     std::unique_ptr<PvsBuilder> pvsBuilder_;
     std::vector<uint32_t> pvsQueue_;                 // rows still to rebuild

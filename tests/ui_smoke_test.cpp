@@ -756,6 +756,33 @@ int main() {
             check(true, "Blender exchange: (the panel is checked in the Assets workspace)");
         }
 
+        // Collision checks (Collision.h, the Collision panel): the shipped map has no problems; each problem kind is recognised.
+        {
+            ClientWorkspace& client = *editor.client_;
+            client.collisionCache_.clear();
+            client.checkCollision();
+            check(client.collisionEntitiesWith_ > 0 && client.collisionProblems_.empty(),
+                  "collision: the shipped map's entities have collision and no problems");
+            ModelCollision named;
+            named.read = true;
+            named.usedTriangles = 12;
+            ModelCollision unnamed = named;
+            unnamed.usedTriangles = 0;
+            unnamed.droppedTriangles = 12;
+            unnamed.unnamedBones = {"collision"};
+            ModelCollision boxOnly;
+            boxOnly.read = true;
+            boxOnly.boxes = 1;
+            ModelCollision none;
+            none.read = true;
+            check(collisionProblem(named, 0).empty() && !collisionProblem(named, 0x2).empty() && !collisionProblem(unnamed, 0).empty() &&
+                      !collisionProblem(boxOnly, 0).empty() && collisionProblem(none, 0).empty(),
+                  "collision: dropped surfaces, flag bit 1 and box-only volumes are problems; plain or no collision is not");
+            client.selection_ = Selection{SelectionKind::MapEntity, 0};
+            frames(editor, device, 2);                   // the Collision panel and the entity panel's section draw
+            check(true, "collision: panel and entity section draw");
+        }
+
         // Map editing: move, rotate, duplicate, delete, undo; save into a COPY of the map folder (never the game's) and read back.
         {
             ClientWorkspace& client = *editor.client_;
