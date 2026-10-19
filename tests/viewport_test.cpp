@@ -1958,6 +1958,53 @@ int main(int argc, char** argv) {
         // RASA_PVSTEST=<rows>: the PVS builder (PvsBuilder.h) against the shipped .vis - every leaf scouted for camera points (a leaf the
         // game found none for has no row data), then <rows> computed rows (spread over the leaves with shipped data, or the leaves in
         // RASA_PVSLEAVES=a,b,...) compared bit for bit with the shipped ones.
+        // RASA_INGAMEPVS=x,z,r: rebuilds the .vis rows of the leaves within r metres of (x, z) (heights 100..160) as the PVS panel's
+        // "Rebuild" with "Merge into the existing rows" (built row OR the stored one; leaves without a camera point keep their row) and
+        // writes the map folder's .vis IN THE GAME FOLDER (first change keeps .rasaedit-original) - an in-game check of a rebuilt .vis.
+        if (const char* pvsSpec = envValue("RASA_INGAMEPVS")) {
+            namespace fs = std::filesystem;
+            float x = 0, z = 0, r = 10;
+            std::sscanf(pvsSpec, "%f,%f,%f", &x, &z, &r);
+            PvsBuilder builder(device, scene, map, map.vis);
+            tr::Bounds box;
+            box.min = tr::Vec3{x - r, 100.0f, z - r};
+            box.max = tr::Vec3{x + r, 160.0f, z + r};
+            tr::VisFile vis = map.vis;
+            size_t rebuilt = 0, added = 0, noCamera = 0;
+            const std::vector<uint32_t> leaves = builder.leavesOverlapping(box);
+            for (uint32_t leaf : leaves) {
+                std::vector<uint32_t> row = builder.computeRow(leaf);
+                if (row.empty()) {
+                    ++noCamera;
+                    continue;
+                }
+                const bool had = leaf < vis.rows.size() && tr::pvsHasData(vis.rows[leaf]);
+                for (size_t w = 0; w < row.size(); ++w) {
+                    const uint32_t old = had && w < vis.rows[leaf].words.size() ? vis.rows[leaf].words[w] : 0;
+                    for (uint32_t bits = row[w] & ~old; bits; bits &= bits - 1) ++added;
+                    row[w] |= old;
+                }
+                tr::setPvsRow(vis, leaf, row, uint64_t(std::time(nullptr)));
+                ++rebuilt;
+            }
+            const tr::Bytes out = tr::writeVis(vis);
+            const tr::VisFile back = tr::readVis(out);
+            size_t same = 0;
+            for (uint32_t leaf : leaves)
+                same += leaf < back.rows.size() && back.rows[leaf].words == vis.rows[leaf].words;
+            const fs::path path = fs::u8path(map.folder) / (map.name + ".vis");
+            fs::path backup = path;
+            backup += ".rasaedit-original";
+            std::error_code ec;
+            if (!fs::exists(backup, ec)) fs::copy_file(path, backup, ec);
+            fs::path temp = path;
+            temp += ".tmp";
+            std::ofstream(temp, std::ios::binary).write(reinterpret_cast<const char*>(out.data()), std::streamsize(out.size()));
+            fs::rename(temp, path);
+            std::printf("in-game pvs: %zu leaves in the box, %zu rows rebuilt and merged (%zu bits added), %zu without a camera point kept; "
+                        "%zu of %zu rows read back equal; wrote %s\n", leaves.size(), rebuilt, added, noCamera, same, leaves.size(), path.string().c_str());
+            return 0;
+        }
         if (const char* pvsTest = envValue("RASA_PVSTEST")) {
             PvsBuilder builder(device, scene, map, map.vis);
             if (const char* th = envValue("RASA_PVSTHRESHOLD")) builder.pixelThreshold = uint32_t(std::atoi(th));
@@ -2092,6 +2139,230 @@ int main(int argc, char** argv) {
             const bool s = scene.surfacePoint(origin, direction, origin.y - 10.0f, surface);
             std::printf("view centre: ground %s (%.2f %.2f %.2f), surface %s (%.2f %.2f %.2f)\n", g ? "hit" : "none", ground.x, ground.y, ground.z,
                         s ? "hit" : "none", surface.x, surface.y, surface.z);
+        }
+        // RASA_INGAMEPREP=x,z: writes the editor's unverified outputs INTO THE GAME FOLDER for an in-game check near (x, z), each file
+        // through the editor's own code and keeping <file>.rasaedit-original on its first change: lights.xml - a copy of a point light
+        // made red (range 10, intensity 4) with an added IntensityModifier blinking it once a second; audioemitters.xml - a new emitter
+        // playing an alarm audio set; the .map - a copy of an obelisk entity (new id) 6 m east; game.zip - the English region name
+        // "Luna Cavern" changed to "Luna Cavern RASAEDIT TEST" (uielementlanguage written as source, its compiled copies removed).
+        if (const char* prep = envValue("RASA_INGAMEPREP")) {
+            namespace fs = std::filesystem;
+            float px = 0, pz = 0;
+            std::sscanf(prep, "%f,%f", &px, &pz);
+            auto ground = [&](float x, float z) { return scene.surfaceHeightBelow(x, z, 200.0f, 125.0f); };
+            auto writeBackedUp = [](const fs::path& path, const tr::Bytes& bytes) {
+                fs::path backup = path;
+                backup += ".rasaedit-original";
+                std::error_code ec;
+                if (!fs::exists(backup, ec)) fs::copy_file(path, backup, ec);
+                if (ec) throw std::runtime_error("cannot back up " + path.string() + ": " + ec.message());
+                fs::path temp = path;
+                temp += ".tmp";
+                std::ofstream(temp, std::ios::binary).write(reinterpret_cast<const char*>(bytes.data()), std::streamsize(bytes.size()));
+                fs::rename(temp, path);
+            };
+            const fs::path folder = fs::u8path(map.folder);
+            try {
+                // Lights: copy the first point light that has no modifiers, red, at the spot, blinking.
+                tr::LightsDocument lights(map.lightsXml);
+                uint64_t largestId = 0;
+                for (size_t l = 0; l < lights.count(); ++l) largestId = std::max<uint64_t>(largestId, std::strtoull(lights.property(l, "ID").c_str(), nullptr, 10));
+                size_t source = SIZE_MAX;
+                for (size_t l = 0; l < lights.count() && source == SIZE_MAX; ++l)
+                    if (lights.property(l, "LightType") == "Point" && lights.modTracks(l).empty() && lights.property(l, "ID") != "0") source = l;
+                if (source == SIZE_MAX) throw std::runtime_error("no point light without modifiers to copy");
+                const size_t light = lights.duplicate(source, largestId + 1, "RasaEdit test light");
+                const float lightPos[3] = {px - 2.0f, ground(px - 2.0f, pz + 1.0f) + 2.5f, pz + 1.0f};
+                lights.setProperty(light, "Position", tr::LightsDocument::formatVector(lightPos, 3));
+                const std::string colour = lights.property(light, "Color");
+                const size_t parts = size_t(std::count(colour.begin(), colour.end(), ',')) + 1;
+                const float red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+                lights.setProperty(light, "Color", tr::LightsDocument::formatVector(red, parts));
+                lights.setProperty(light, "Range", tr::LightsDocument::formatNumber(10.0f));
+                lights.setProperty(light, "Intensity", tr::LightsDocument::formatNumber(4.0f));
+                lights.setProperty(light, "Enabled", "true");
+                tr::LightModTrack blink;
+                blink.className = "IntensityModifier";
+                blink.properties = {{"Enabled", "true", "bool"}, {"Intensity1", tr::LightsDocument::formatNumber(0.0f), "float"},
+                                    {"Intensity2", tr::LightsDocument::formatNumber(4.0f), "float"}};
+                blink.keys = {{"0", "0"}, {"0.5", "1"}, {"1", "0"}};
+                const bool tracked = lights.addModTrack(light, blink);
+                const tr::Bytes lightsOut = lights.bytes();
+                const auto readBack = tr::readLights(lightsOut);
+                writeBackedUp(folder / "lights.xml", lightsOut);
+                std::printf("in-game prep: lights.xml - light %zu (copy of %zu, ID %llu) red at %.2f %.2f %.2f, blink track %s; %zu lights read back\n",
+                            light, source, (unsigned long long)(largestId + 1), lightPos[0], lightPos[1], lightPos[2], tracked ? "added" : "NOT added",
+                            readBack.size());
+
+                // Sound emitter: an alarm audio set (the first whose name says alarm), 8 / 25 m.
+                int64_t alarm = -1;
+                std::string alarmName;
+                if (const tr::py::Object* sets = data.global("generated.client.audiosetdata", "audioSet"))
+                    for (const auto& e : sets->entries) {
+                        const std::string name = tr::py::asString(tr::py::item(e.second.get(), 0));
+                        std::string lowered = name;
+                        for (char& c : lowered) c = char(std::tolower(static_cast<unsigned char>(c)));
+                        if (lowered.find("alarm") != std::string::npos) {
+                            alarm = tr::py::asInt(e.first.get());
+                            alarmName = name;
+                            break;
+                        }
+                    }
+                if (alarm < 0) throw std::runtime_error("no alarm audio set");
+                tr::LightsDocument emitters = tr::audioEmittersDocument(map.audioEmittersXml);
+                uint64_t largestUid = 0;
+                for (size_t k = 0; k < emitters.count(); ++k) largestUid = std::max<uint64_t>(largestUid, std::strtoull(emitters.property(k, "UID").c_str(), nullptr, 10));
+                const float soundPos[3] = {px, ground(px, pz) + 1.0f, pz};
+                const size_t emitter = emitters.addElement("AudioEmitterProperties", {{"Name", "RasaEdit test alarm", "string"},
+                                                           {"UID", std::to_string(largestUid + 1), "string"},
+                                                           {"AudioSetID", std::to_string(alarm), "uint"},
+                                                           {"Position", tr::LightsDocument::formatVector(soundPos, 3), "string"},
+                                                           {"MinDistance", tr::LightsDocument::formatNumber(8.0f), "float"},
+                                                           {"MaxDistance", tr::LightsDocument::formatNumber(25.0f), "float"},
+                                                           {"Volume", tr::LightsDocument::formatNumber(1.0f), "float"},
+                                                           {"FadeInTime", tr::LightsDocument::formatNumber(0.0f), "float"},
+                                                           {"FadeOutTime", tr::LightsDocument::formatNumber(0.0f), "float"},
+                                                           {"MinDelay", tr::LightsDocument::formatNumber(0.0f), "float"},
+                                                           {"MaxDelay", tr::LightsDocument::formatNumber(0.0f), "float"}});
+                if (emitter == size_t(-1)) throw std::runtime_error("audioemitters.xml has no section");
+                const tr::Bytes emittersOut = emitters.bytes();
+                const size_t emittersBack = tr::readAudioEmitters(emittersOut).size();
+                writeBackedUp(folder / "audioemitters.xml", emittersOut);
+                std::printf("in-game prep: audioemitters.xml - emitter %zu UID %llu audio set %lld \"%s\" at %.2f %.2f %.2f; %zu emitters read back\n", emitter,
+                            (unsigned long long)(largestUid + 1), (long long)alarm, alarmName.c_str(), soundPos[0], soundPos[1], soundPos[2], emittersBack);
+
+                // Map entity: a copy of an obelisk 6 m east of the spot.
+                tr::MapFile edited = map.map;
+                uint64_t largestEntity = 0;
+                const tr::MapEntity* obelisk = nullptr;
+                for (const tr::MapEntity& e : edited.entities) {
+                    largestEntity = std::max(largestEntity, e.entityId);
+                    if (!obelisk && data.classMeshName(e.classId) == "arch_forean_eloh_obelisk_v03.geo") obelisk = &e;
+                }
+                if (!obelisk) throw std::runtime_error("no obelisk on this map");
+                tr::MapEntity copy = *obelisk;
+                copy.entityId = largestEntity + 1;
+                copy.location = tr::Vec3{px + 6.0f, ground(px + 6.0f, pz), pz};
+                edited.entities.push_back(copy);
+                const tr::Bytes mapOut = tr::writeMap(edited);
+                const size_t entitiesBack = tr::readMap(mapOut).entities.size();
+                writeBackedUp(folder / (map.name + ".map"), mapOut);
+                std::printf("in-game prep: %s.map - obelisk copy, entity id %llu at %.2f %.2f %.2f; %zu entities read back (was %zu)\n", map.name.c_str(),
+                            (unsigned long long)copy.entityId, copy.location.x, copy.location.y, copy.location.z, entitiesBack, map.map.entities.size());
+
+                // Text: the region name, through the Text workspace's save (source module, compiled copies removed).
+                const std::string module = "generated.client.language.english.uielementlanguage";
+                const std::string entry = data.moduleEntryName(module);
+                tr::py::Ref editedModule = tr::py::deepCopy(std::shared_ptr<tr::py::Object>(&const_cast<tr::py::Object&>(data.module(module)), [](tr::py::Object*) {}));
+                tr::py::Object* lookup = const_cast<tr::py::Object*>(tr::py::dictGet(editedModule.get(), "lookup"));
+                size_t changed = 0;
+                for (auto& e : lookup->entries) {
+                    tr::py::Object* value = e.second.get();
+                    if (value && tr::py::asString(tr::py::item(value, 0)) == "Luna Cavern") {
+                        e.second = tr::py::makeList({tr::py::makeText("Luna Cavern RASAEDIT TEST")});
+                        ++changed;
+                    }
+                }
+                if (!changed) throw std::runtime_error("no \"Luna Cavern\" text in " + module);
+                const std::string sourceText = tr::py::moduleSource(*editedModule);
+                const std::string base = entry.substr(0, entry.rfind('.'));
+                tr::ZipArchive zip(data.path());
+                std::vector<std::string> remove;
+                for (const tr::ZipEntry& z : zip.entries())
+                    if (z.name == base + ".pyo" || z.name == base + ".pyc") remove.push_back(z.name);
+                const fs::path zipPath = fs::u8path(data.path());
+                fs::path backup = zipPath;
+                backup += ".rasaedit-original";
+                std::error_code ec;
+                if (!fs::exists(backup, ec)) fs::copy_file(zipPath, backup, ec);
+                fs::path temp = zipPath;
+                temp += ".rasaedit-new";
+                tr::writeZip(zip, temp.string(), {{base + ".py", tr::Bytes(sourceText.begin(), sourceText.end())}}, remove);
+                tr::GameData check(temp.string());
+                const tr::py::Object* checkLookup = check.global(module, "lookup");
+                size_t found = 0;
+                for (const auto& e : checkLookup->entries) found += tr::py::asString(tr::py::item(e.second.get(), 0)) == "Luna Cavern RASAEDIT TEST";
+                fs::rename(temp, zipPath, ec);
+                if (ec) throw std::runtime_error("cannot replace game.zip: " + ec.message());
+                std::printf("in-game prep: game.zip - %zu \"Luna Cavern\" text(s) changed in %s (was %s), %zu read back; compiled copies removed: %zu\n",
+                            changed, (base + ".py").c_str(), entry.c_str(), found, remove.size());
+            } catch (const std::exception& e) {
+                std::printf("in-game prep FAILED: %s\n", e.what());
+            }
+            return 0;
+        }
+        // RASA_INGAMEREVERT=1: removes RASA_INGAMEPREP's test light, emitter (by name) and entity (the largest id) from the map folder's
+        // files in the game folder (written without new backups).
+        if (envValue("RASA_INGAMEREVERT")) {
+            namespace fs = std::filesystem;
+            auto writeFile = [](const fs::path& path, const tr::Bytes& bytes) {
+                fs::path temp = path;
+                temp += ".tmp";
+                std::ofstream(temp, std::ios::binary).write(reinterpret_cast<const char*>(bytes.data()), std::streamsize(bytes.size()));
+                fs::rename(temp, path);
+            };
+            const fs::path folder = fs::u8path(map.folder);
+            tr::LightsDocument lights(map.lightsXml);
+            for (size_t l = lights.count(); l-- > 0;)
+                if (lights.property(l, "Name") == "RasaEdit test light") lights.remove(l), std::printf("in-game revert: light %zu removed\n", l);
+            writeFile(folder / "lights.xml", lights.bytes());
+            tr::LightsDocument emitters = tr::audioEmittersDocument(map.audioEmittersXml);
+            for (size_t k = emitters.count(); k-- > 0;)
+                if (emitters.property(k, "Name") == "RasaEdit test alarm") emitters.remove(k), std::printf("in-game revert: emitter %zu removed\n", k);
+            writeFile(folder / "audioemitters.xml", emitters.bytes());
+            tr::MapFile edited = map.map;
+            size_t newest = 0;
+            for (size_t k = 1; k < edited.entities.size(); ++k)
+                if (edited.entities[k].entityId > edited.entities[newest].entityId) newest = k;
+            std::printf("in-game revert: entity %llu (%s) removed\n", (unsigned long long)edited.entities[newest].entityId,
+                        data.classMeshName(edited.entities[newest].classId).c_str());
+            edited.entities.erase(edited.entities.begin() + std::ptrdiff_t(newest));
+            writeFile(folder / (map.name + ".map"), tr::writeMap(edited));
+            return 0;
+        }
+        // RASA_INGAMEFIX=<floor y>: puts RASA_INGAMEPREP's test light / emitter / entity (found by name, name, the largest entity id) on
+        // the first surface below <floor y> + 3 m (in a cave the surface below 200 m is the ceiling).
+        if (const char* fix = envValue("RASA_INGAMEFIX")) {
+            namespace fs = std::filesystem;
+            const float from = float(std::atof(fix)) + 3.0f;
+            auto ground = [&](float x, float z) { return scene.surfaceHeightBelow(x, z, from, from - 3.0f); };
+            auto writeFile = [](const fs::path& path, const tr::Bytes& bytes) {
+                fs::path temp = path;
+                temp += ".tmp";
+                std::ofstream(temp, std::ios::binary).write(reinterpret_cast<const char*>(bytes.data()), std::streamsize(bytes.size()));
+                fs::rename(temp, path);
+            };
+            const fs::path folder = fs::u8path(map.folder);
+            tr::LightsDocument lights(map.lightsXml);
+            for (size_t l = 0; l < lights.count(); ++l)
+                if (lights.property(l, "Name") == "RasaEdit test light") {
+                    float p[3] = {0, 0, 0};
+                    std::sscanf(lights.property(l, "Position").c_str(), "%f, %f, %f", &p[0], &p[1], &p[2]);
+                    p[1] = ground(p[0], p[2]) + 2.5f;
+                    lights.setProperty(l, "Position", tr::LightsDocument::formatVector(p, 3));
+                    std::printf("in-game fix: light at %.2f %.2f %.2f\n", p[0], p[1], p[2]);
+                }
+            writeFile(folder / "lights.xml", lights.bytes());
+            tr::LightsDocument emitters = tr::audioEmittersDocument(map.audioEmittersXml);
+            for (size_t k = 0; k < emitters.count(); ++k)
+                if (emitters.property(k, "Name") == "RasaEdit test alarm") {
+                    float p[3] = {0, 0, 0};
+                    std::sscanf(emitters.property(k, "Position").c_str(), "%f, %f, %f", &p[0], &p[1], &p[2]);
+                    p[1] = ground(p[0], p[2]) + 1.0f;
+                    emitters.setProperty(k, "Position", tr::LightsDocument::formatVector(p, 3));
+                    std::printf("in-game fix: emitter at %.2f %.2f %.2f\n", p[0], p[1], p[2]);
+                }
+            writeFile(folder / "audioemitters.xml", emitters.bytes());
+            tr::MapFile edited = map.map;
+            tr::MapEntity* newest = nullptr;
+            for (tr::MapEntity& e : edited.entities)
+                if (!newest || e.entityId > newest->entityId) newest = &e;
+            if (const char* xz = envValue("RASA_INGAMEFIXXZ")) std::sscanf(xz, "%f,%f", &newest->location.x, &newest->location.z);
+            newest->location.y = ground(newest->location.x, newest->location.z);
+            writeFile(folder / (map.name + ".map"), tr::writeMap(edited));
+            std::printf("in-game fix: entity %llu (%s) at %.2f %.2f %.2f\n", (unsigned long long)newest->entityId, data.classMeshName(newest->classId).c_str(),
+                        newest->location.x, newest->location.y, newest->location.z);
+            return 0;
         }
         // RASA_SNAPAT=x,y,z[;x,y,z...]: what Snap to ground gives there (first surface below y + 2 m) and the raw terrain height.
         if (const char* spec = envValue("RASA_SNAPAT")) {

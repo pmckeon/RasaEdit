@@ -141,7 +141,7 @@ private:
 };
 
 // Writes a copy of `source` to `destination` with `replace` (zip path -> new contents; a name the archive lacks is added at the
-// end, deflated) and without `remove`. Untouched entries are copied byte for byte (stored data, CRC, times); each local header
+// end) and without `remove`; new and replaced entries are stored uncompressed (the game's Python has no zlib). Untouched entries are copied byte for byte (stored data, CRC, times); each local header
 // is written fresh (no data descriptor). Throws FormatError.
 void writeZip(const ZipArchive& source, const std::string& destination, const std::map<std::string, Bytes>& replace,
               const std::vector<std::string>& remove);

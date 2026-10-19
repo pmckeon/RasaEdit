@@ -1156,39 +1156,30 @@ void writeZip(const ZipArchive& source, const std::string& destination, const st
         write(header);
         write(stored);
     };
-    const auto deflated = [&](const std::string& name, const Bytes& raw, ZipEntry e) {
+    // New and replaced entries are STORED (method 0): the client's Python has no zlib - zipimport fails with "can't decompress data;
+    // zlib not available" on a deflated module (seen in game 2026-10-19: the English uielementlanguage written deflated left the menus
+    // without text) - and every shipped game.zip / trpython.zip entry is stored.
+    const auto storedEntry = [&](const std::string& name, const Bytes& raw, ZipEntry e) {
         e.name = name;
         e.size = uint32_t(raw.size());
         e.crc = uint32_t(crc32(0L, raw.data(), uInt(raw.size())));
         e.modTime = dosTime;
         e.modDate = dosDate;
-        e.versionNeeded = 20;
-        Bytes stored(compressBound(uLong(raw.size())) + 64);
-        z_stream zs{};
-        if (deflateInit2(&zs, Z_BEST_COMPRESSION, Z_DEFLATED, -MAX_WBITS, 8, Z_DEFAULT_STRATEGY) != Z_OK) throw FormatError("zlib init failed");
-        zs.next_in = const_cast<Bytef*>(raw.data());
-        zs.avail_in = uInt(raw.size());
-        zs.next_out = stored.data();
-        zs.avail_out = uInt(stored.size());
-        const int rc = deflate(&zs, Z_FINISH);
-        const uLong produced = zs.total_out;
-        deflateEnd(&zs);
-        if (rc != Z_STREAM_END) throw FormatError(name + ": deflate error " + std::to_string(rc));
-        stored.resize(produced);
-        e.method = 8;
-        e.compressedSize = uint32_t(stored.size());
-        emit(e, stored);
+        e.versionNeeded = 10;
+        e.method = 0;
+        e.compressedSize = e.size;
+        emit(e, raw);
     };
     std::set<std::string> done;
     for (const ZipEntry& e : source.entries()) {
         if (std::find(remove.begin(), remove.end(), e.name) != remove.end()) continue;
         const auto r = replace.find(e.name);
-        if (r != replace.end()) deflated(e.name, r->second, e);
+        if (r != replace.end()) storedEntry(e.name, r->second, e);
         else emit(e, source.readStored(e));
         done.insert(e.name);
     }
     for (const auto& r : replace)
-        if (!done.count(r.first)) deflated(r.first, r.second, ZipEntry{});
+        if (!done.count(r.first)) storedEntry(r.first, r.second, ZipEntry{});
     const uint64_t directoryOffset = offset;
     Bytes directory;
     for (const Written& w : written) {
