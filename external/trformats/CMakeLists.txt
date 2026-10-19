@@ -6,6 +6,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # zlib: on Windows e.g. `vcpkg install zlib` and pass -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake
 find_package(ZLIB REQUIRED)
+# zlib 1.3.2's own CMake package (which another dependency's config may load first) defines only ZLIB::ZLIBSTATIC for a static
+# build - vcpkg's Linux triplet is static - while CMake's FindZLIB and the shared build define ZLIB::ZLIB.
+if(NOT TARGET ZLIB::ZLIB AND TARGET ZLIB::ZLIBSTATIC)
+    add_library(ZLIB::ZLIB INTERFACE IMPORTED)
+    target_link_libraries(ZLIB::ZLIB INTERFACE ZLIB::ZLIBSTATIC)
+endif()
 
 add_library(trformats trformats.cpp trformats.h geofile.cpp geofile.h image.cpp image.h assetlibrary.cpp assetlibrary.h gamedata.cpp gamedata.h dds.cpp dds.h sky.cpp sky.h particles.cpp particles.h xml.cpp xml.h ui.cpp ui.h)
 target_include_directories(trformats PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
