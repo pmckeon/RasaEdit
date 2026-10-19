@@ -1,4 +1,5 @@
 #include "SceneView.h"
+#include "geofile.h"
 #include "GpuTexture.h"
 #include "dds.h"
 #include "MarkerColours.h"
@@ -1197,6 +1198,8 @@ SceneView::~SceneView() {
     renderer_->destroyMesh(unitBoxLines_);
     renderer_->destroyMesh(unitCircle_);
     renderer_->destroyMesh(unitSquare_);
+    for (auto& c : collisionMeshes_)
+        for (GpuMesh* m : {&c.second.used, &c.second.usedEdges, &c.second.dropped, &c.second.droppedEdges, &c.second.ignored}) renderer_->destroyMesh(*m);
     renderer_->destroyMesh(arrow_);
     renderer_->destroyMesh(pole_);
     for (auto& m : models_)
@@ -2933,6 +2936,126 @@ void SceneView::updateClutterCells() {
 // ------------------------------------------------------------------------------------------
 // Frame
 // ------------------------------------------------------------------------------------------
+// A model's collision as the client uses it (tabula_rasa.exe WalkableSurfaceManager::AddWalkableSurfaces, FUN_00925590: every bone
+// volume of type 5 = BVWS, provided the bone's property group - the group whose id is the bone index - names a WSName), in model space:
+// the volume's coordinates are in the bone's bind frame, i.e. the inverse of the bone's stored inverse bind matrix. Built once per
+// model, at most buildBudget a frame (each reads the .geo again).
+const SceneView::CollisionMesh* SceneView::collisionFor(const Model* model, size_t& buildBudget) {
+    auto it = collisionMeshes_.find(model);
+    if (it != collisionMeshes_.end()) return &it->second;
+    if (buildBudget == 0 || !model->loaded) return nullptr;
+    --buildBudget;
+    CollisionMesh& c = collisionMeshes_[model];
+    c.built = true;
+    std::string name;
+    for (const auto& m : models_)
+        if (&m.second == model) name = m.first;
+    name = name.substr(0, name.find_first_of("|%"));
+    tr::GeoFile file;
+    try {
+        file = tr::readGeoFile(assets_.read(name));
+    } catch (const std::exception&) {
+        return &c;
+    }
+    struct Built {
+        std::vector<MeshVertex> vertices;
+        std::vector<uint32_t> triangles, edges;
+    } used, dropped, ignored;
+    auto vertex = [](const tr::Vec3& p, const tr::Vec3& n) {
+        MeshVertex v;
+        v.positionX = p.x; v.positionY = p.y; v.positionZ = p.z;
+        v.normalX = n.x; v.normalY = n.y; v.normalZ = n.z;
+        return v;
+    };
+    for (size_t b = 0; b < file.bones.size(); ++b) {
+        const tr::GeoFileBone& bone = file.bones[b];
+        if (bone.boundingVolume.empty()) continue;
+        bool named = false;
+        for (const tr::GeoPropertyGroup& g : file.properties)
+            if (g.id == int32_t(b))
+                for (const tr::GeoParameter& p : g.pairs) named = named || p.key == "WSName";
+        // Bone frame = inverse of the stored inverse bind (row vectors: v' = v.x X + v.y Y + v.z Z + T).
+        const float* m = bone.inverseBind;
+        const float a = m[0], bb = m[1], cc = m[2], d = m[4], e = m[5], f = m[6], g = m[8], h = m[9], i = m[10];
+        const float det = a * (e * i - f * h) - bb * (d * i - f * g) + cc * (d * h - e * g);
+        if (std::fabs(det) < 1e-12f) continue;
+        const float k = 1.0f / det;
+        const float r[9] = {(e * i - f * h) * k, (cc * h - bb * i) * k, (bb * f - cc * e) * k, (f * g - d * i) * k, (a * i - cc * g) * k,
+                            (cc * d - a * f) * k, (d * h - e * g) * k, (bb * g - a * h) * k, (a * e - bb * d) * k};
+        const float tx = -(m[12] * r[0] + m[13] * r[3] + m[14] * r[6]), ty = -(m[12] * r[1] + m[13] * r[4] + m[14] * r[7]),
+                    tz = -(m[12] * r[2] + m[13] * r[5] + m[14] * r[8]);
+        auto place = [&](const tr::Vec3& v) {
+            return tr::Vec3{v.x * r[0] + v.y * r[3] + v.z * r[6] + tx, v.x * r[1] + v.y * r[4] + v.z * r[7] + ty, v.x * r[2] + v.y * r[5] + v.z * r[8] + tz};
+        };
+        std::vector<tr::GeoBoneVolume> volumes;
+        try { volumes = tr::readBoneVolumes(bone.boundingVolume); } catch (const std::exception&) { continue; }
+        for (const tr::GeoBoneVolume& v : volumes) {
+            if (v.kind == tr::fourcc("BVWS")) {
+                Built& out = named ? used : dropped;
+                std::vector<tr::Vec3> points;
+                for (const tr::Vec3& p : v.vertices) points.push_back(place(p));
+                // Vertex normals (area-weighted face normals; (b - a) x (c - a) faces outward on the shipped surfaces) for the 3 cm push.
+                std::vector<tr::Vec3> normals(points.size(), tr::Vec3{0, 0, 0});
+                for (size_t t = 0; t + 2 < v.indices.size(); t += 3) {
+                    const tr::Vec3 &p0 = points[v.indices[t]], &p1 = points[v.indices[t + 1]], &p2 = points[v.indices[t + 2]];
+                    const tr::Vec3 e1{p1.x - p0.x, p1.y - p0.y, p1.z - p0.z}, e2{p2.x - p0.x, p2.y - p0.y, p2.z - p0.z};
+                    const tr::Vec3 n{e1.y * e2.z - e1.z * e2.y, e1.z * e2.x - e1.x * e2.z, e1.x * e2.y - e1.y * e2.x};
+                    for (int q = 0; q < 3; ++q) {
+                        tr::Vec3& acc = normals[v.indices[t + q]];
+                        acc = tr::Vec3{acc.x + n.x, acc.y + n.y, acc.z + n.z};
+                    }
+                }
+                const uint32_t first = uint32_t(out.vertices.size());
+                for (size_t q = 0; q < points.size(); ++q) {
+                    tr::Vec3 n = normals[q];
+                    const float len = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+                    n = len > 0 ? tr::Vec3{n.x / len, n.y / len, n.z / len} : tr::Vec3{0, 1, 0};
+                    out.vertices.push_back(vertex(tr::Vec3{points[q].x + n.x * 0.03f, points[q].y + n.y * 0.03f, points[q].z + n.z * 0.03f}, n));
+                }
+                std::set<std::pair<uint32_t, uint32_t>> seen;
+                for (size_t t = 0; t + 2 < v.indices.size(); t += 3) {
+                    for (int q = 0; q < 3; ++q) {
+                        out.triangles.push_back(first + v.indices[t + q]);
+                        uint32_t i0 = v.indices[t + q], i1 = v.indices[t + (q + 1) % 3];
+                        if (i0 > i1) std::swap(i0, i1);
+                        if (seen.insert({i0, i1}).second) out.edges.insert(out.edges.end(), {first + i0, first + i1});
+                    }
+                }
+            } else if (v.kind == tr::fourcc("BVBX") || v.kind == tr::fourcc("BVSP")) {
+                const uint32_t first = uint32_t(ignored.vertices.size());
+                if (v.kind == tr::fourcc("BVBX")) {
+                    for (int corner = 0; corner < 8; ++corner)
+                        ignored.vertices.push_back(vertex(place(tr::Vec3{v.centre.x + (corner & 1 ? 1 : -1) * v.halfExtents.x,
+                                                                          v.centre.y + (corner & 2 ? 1 : -1) * v.halfExtents.y,
+                                                                          v.centre.z + (corner & 4 ? 1 : -1) * v.halfExtents.z}), tr::Vec3{0, 1, 0}));
+                    for (uint32_t c0 = 0; c0 < 8; ++c0)
+                        for (uint32_t bit : {1u, 2u, 4u})
+                            if (!(c0 & bit)) ignored.edges.insert(ignored.edges.end(), {first + c0, first + (c0 | bit)});
+                } else {
+                    // Three rings in the bone frame's planes.
+                    for (int plane = 0; plane < 3; ++plane)
+                        for (uint32_t s = 0; s < 32; ++s) {
+                            const float ang = 6.2831853f * float(s) / 32.0f, ca = std::cos(ang) * v.sphereRadius, sa = std::sin(ang) * v.sphereRadius;
+                            const tr::Vec3 o = plane == 0 ? tr::Vec3{ca, sa, 0} : plane == 1 ? tr::Vec3{ca, 0, sa} : tr::Vec3{0, ca, sa};
+                            ignored.vertices.push_back(vertex(place(tr::Vec3{v.centre.x + o.x, v.centre.y + o.y, v.centre.z + o.z}), tr::Vec3{0, 1, 0}));
+                            ignored.edges.insert(ignored.edges.end(), {first + uint32_t(plane) * 32 + s, first + uint32_t(plane) * 32 + (s + 1) % 32});
+                        }
+                }
+            }
+        }
+    }
+    if (!used.triangles.empty()) {
+        c.used = renderer_->createMesh(used.vertices, used.triangles, false);
+        c.usedEdges = renderer_->createMesh(used.vertices, used.edges, true);
+    }
+    if (!dropped.triangles.empty()) {
+        c.dropped = renderer_->createMesh(dropped.vertices, dropped.triangles, false);
+        c.droppedEdges = renderer_->createMesh(dropped.vertices, dropped.edges, true);
+    }
+    if (!ignored.edges.empty()) c.ignored = renderer_->createMesh(ignored.vertices, ignored.edges, true);
+    return &c;
+}
+
 void SceneView::queueDraws(const Selection& selection) {
     ++frameNumber_;
     auto sectionStart = std::chrono::steady_clock::now();
@@ -3511,6 +3634,32 @@ void SceneView::queueDraws(const Selection& selection) {
                 frame.row2.w = p.z;
                 renderer_->draw(unitBoxLines_, multiply(frame, boxMatrix(tr::Bounds{tr::Vec3{-half.x, -half.y, -half.z}, half})), colour, false);
             }
+        }
+    }
+
+    // Collision (showCollision): map entities' walkable surfaces in the game's placement - cyan fill (additive, no depth writes) and
+    // edges, red for surfaces the game drops, grey outlines for box / sphere volumes; brighter on the selected entity. A few models'
+    // meshes are built a frame.
+    if (showCollision) {
+        renderer_->clearSkin();
+        size_t buildBudget = collisionBuildsPerFrame;
+        for (size_t k = 0; k < placements_.size(); ++k) {
+            const Placement& p = placements_[k];
+            if (!p.model) continue;
+            const tr::Vec3 d = subtract(p.centre, camera_.position);
+            const bool selected = selection.kind == SelectionKind::MapEntity && selection.index == k;
+            if (!selected && (dot(d, d) > maxDistance2 || !visible(p.centre, p.radius))) continue;
+            const CollisionMesh* c = collisionFor(p.model, buildBudget);
+            if (!c) continue;
+            const bool flagged = k < map_.map.entities.size() && (map_.map.entities[k].flags & 0x2) != 0;
+            const Vec4f& usedColour = flagged ? markerColour::collisionDropped : markerColour::collision;
+            const float fill = selected ? 0.35f : 0.12f;
+            auto scaled = [&](const Vec4f& colour) { return Vec4f{colour.x * fill, colour.y * fill, colour.z * fill, 1}; };
+            renderer_->drawAdditive(c->used, p.world, scaled(usedColour), nullptr, false, nullptr, 0, true);
+            renderer_->draw(c->usedEdges, p.world, selected ? highlight : usedColour, false);
+            renderer_->drawAdditive(c->dropped, p.world, scaled(markerColour::collisionDropped), nullptr, false, nullptr, 0, true);
+            renderer_->draw(c->droppedEdges, p.world, selected ? highlight : markerColour::collisionDropped, false);
+            renderer_->draw(c->ignored, p.world, selected ? highlight : markerColour::collisionIgnored, false);
         }
     }
 

@@ -187,6 +187,12 @@ public:
     bool showTerrain = true;
     bool showEntities = true;
     bool showPlaceholders = true;
+    // The collision the client uses for map entities (CLAUDE.md "What the client collides with"): each model's walkable surfaces
+    // (BVWS on a bone whose property group names a WSName) placed as the game places them - cyan fill and edges; surfaces the game
+    // drops (no WSName on the bone, or the entity's .map flag bit 1) red; box / sphere volumes, which map objects do not collide with,
+    // grey outlines. Depth-tested; off by default.
+    bool showCollision = false;
+    size_t collisionBuildsPerFrame = 4;     // models whose collision meshes are built a frame (each reads its .geo)
     bool showSoundMarkers = false;          // the map's audioemitters.xml emitters as small boxes (selectable); the selected one shows its distances
     bool showLightMarkers = false;          // the map's lights.xml lights as small boxes (selectable); the selected one shows its reach
     bool showEffects = true;
@@ -752,6 +758,16 @@ private:
     std::vector<MeshVertex> particleScratch_;
     std::deque<std::string> pending_;
     std::vector<Placement> placements_;
+    // Collision meshes per model (collisionFor), in model space: vertices pushed 3 cm out along the surface normal so the overlay
+    // does not fight the model's own faces.
+    struct CollisionMesh {
+        bool built = false;
+        GpuMesh used, usedEdges;          // walkable surfaces on a bone with WSName
+        GpuMesh dropped, droppedEdges;    // walkable surfaces on a bone without one
+        GpuMesh ignored;                  // box / sphere volumes (outlines)
+    };
+    std::unordered_map<const Model*, CollisionMesh> collisionMeshes_;
+    const CollisionMesh* collisionFor(const Model* model, size_t& buildBudget);
     size_t modelsLoaded_ = 0;
     size_t modelsFailed_ = 0;
     size_t drawnEntities_ = 0;

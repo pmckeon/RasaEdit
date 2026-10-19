@@ -39,6 +39,7 @@ struct ViewSettings {
     bool showPlaceholders = true;
     bool lightMarkers = false;   // the map's lights as selectable boxes (Client workspace)
     bool soundMarkers = false;   // the map's sound emitters as selectable boxes (Client workspace)
+    bool collision = false;      // map entities' collision as the game uses it (SceneView::showCollision)
     float drawDistance = 1200.0f;
     float flySpeed = 20.0f;      // metres per second
     bool skyLighting = true;     // light from the map region's .sky (the time of day and sky choice are per map, in SceneView)

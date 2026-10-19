@@ -30,6 +30,9 @@ inline const Vec4f regionUnderground{0.5f, 0.55f, 0.7f, 1};    // regions (under
 inline const Vec4f placeholder{0.3f, 0.9f, 1.0f, 1};           // map entity boxes: no model, or an effect
 inline const Vec4f light{1.0f, 1.0f, 1.0f, 1};                 // map lights (lights.xml), Light markers toggle
 inline const Vec4f sound{1.0f, 0.6f, 0.9f, 1};                 // map sound emitters (audioemitters.xml), Sound markers toggle
+inline const Vec4f collision{0.0f, 0.85f, 1.0f, 1};            // collision the game uses (walkable surfaces), Collision toggle
+inline const Vec4f collisionDropped{1.0f, 0.2f, 0.2f, 1};      // a walkable surface the game drops (no WSName / map flag)
+inline const Vec4f collisionIgnored{0.6f, 0.6f, 0.6f, 1};      // box / sphere volumes: not collided with on map objects
 inline const Vec4f entityModel{0.92f, 0.92f, 0.92f, 0.8f};     // overview: map entity with a model
 inline const Vec4f entityNoMesh{0.47f, 0.63f, 1.0f, 0.86f};    // overview: map entity whose class has no mesh
 inline const Vec4f entityUnknown{1.0f, 0.31f, 0.27f, 1};       // overview: map entity of an unknown class

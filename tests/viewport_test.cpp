@@ -2291,6 +2291,120 @@ int main(int argc, char** argv) {
             }
             return 0;
         }
+        // RASA_COLLDUMP=<out.txt>,<radius>: the collision of the map entities within <radius> m of the eye, in world space, for a
+        // preview of a collision layer. Lines: "T <status> x y z x y z x y z" per walkable-surface triangle (status ok = BVWS on a bone
+        // with WSName, dropped = no WSName on that bone or the entity's map flag bit 1), "B x y z ... (8 corners)" per box volume, "S x
+        // y z r" per sphere volume, "A x y z ... (8 corners)" per generated ABV (shape and extents as stored, drawn as a box of those
+        // half extents - meaning NOT traced). Volume coordinates are in the bone's bind frame: bone = inverse(stored inverse bind).
+        if (const char* spec = envValue("RASA_COLLDUMP")) {
+            std::string outPath = spec;
+            float radius = 40.0f;
+            if (const size_t comma = outPath.rfind(','); comma != std::string::npos) {
+                radius = float(std::atof(outPath.c_str() + comma + 1));
+                outPath.resize(comma);
+            }
+            const tr::Vec3 eye{float(std::atof(argv[7])), float(std::atof(argv[8])), float(std::atof(argv[9]))};
+            FILE* out = std::fopen(outPath.c_str(), "w");
+            struct Placed { tr::Vec3 pos; tr::Quat rot; float scale; };
+            auto rotate = [](const tr::Quat& q, const tr::Vec3& v) {
+                const tr::Vec3 u{q.x, q.y, q.z};
+                const tr::Vec3 t{2 * (u.y * v.z - u.z * v.y), 2 * (u.z * v.x - u.x * v.z), 2 * (u.x * v.y - u.y * v.x)};
+                return tr::Vec3{v.x + q.w * t.x + (u.y * t.z - u.z * t.y), v.y + q.w * t.y + (u.z * t.x - u.x * t.z),
+                                v.z + q.w * t.z + (u.x * t.y - u.y * t.x)};
+            };
+            auto toWorld = [&](const Placed& p, const tr::Vec3& v) {
+                const tr::Vec3 r = rotate(p.rot, tr::Vec3{v.x * p.scale, v.y * p.scale, v.z * p.scale});
+                return tr::Vec3{r.x + p.pos.x, r.y + p.pos.y, r.z + p.pos.z};
+            };
+            // Bone world (mesh space) = inverse of the stored inverse bind (row vectors: v' = v.x X + v.y Y + v.z Z + T).
+            auto boneFrame = [](const float* m) {
+                // m: 16 floats row-major; rows 0..2 = X, Y, Z axes, row 3 = T. Invert the 3x3 and the translation.
+                const float a = m[0], b = m[1], c = m[2], d = m[4], e = m[5], f = m[6], g = m[8], h = m[9], i = m[10];
+                const float det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+                std::array<float, 12> inv{};
+                const float k = det != 0 ? 1.0f / det : 0.0f;
+                inv[0] = (e * i - f * h) * k; inv[1] = (c * h - b * i) * k; inv[2] = (b * f - c * e) * k;
+                inv[3] = (f * g - d * i) * k; inv[4] = (a * i - c * g) * k; inv[5] = (c * d - a * f) * k;
+                inv[6] = (d * h - e * g) * k; inv[7] = (b * g - a * h) * k; inv[8] = (a * e - b * d) * k;
+                const float tx = m[12], ty = m[13], tz = m[14];
+                inv[9] = -(tx * inv[0] + ty * inv[3] + tz * inv[6]);
+                inv[10] = -(tx * inv[1] + ty * inv[4] + tz * inv[7]);
+                inv[11] = -(tx * inv[2] + ty * inv[5] + tz * inv[8]);
+                return inv;
+            };
+            auto apply = [](const std::array<float, 12>& m, const tr::Vec3& v) {
+                return tr::Vec3{v.x * m[0] + v.y * m[3] + v.z * m[6] + m[9], v.x * m[1] + v.y * m[4] + v.z * m[7] + m[10],
+                                v.x * m[2] + v.y * m[5] + v.z * m[8] + m[11]};
+            };
+            std::map<std::string, std::shared_ptr<tr::GeoFile>> cache;
+            size_t ok = 0, dropped = 0, boxes = 0, spheres = 0, entities = 0;
+            for (const tr::MapEntity& e : map.map.entities) {
+                const float dx = e.location.x - eye.x, dy = e.location.y - eye.y, dz = e.location.z - eye.z;
+                if (dx * dx + dy * dy + dz * dz > radius * radius) continue;
+                const Placed placed{e.location, e.orientation, e.scale};
+                for (const tr::MapGeneratedAbv& abv : map.map.generatedAbvs)
+                    if (abv.entityId == e.entityId) {
+                        std::fprintf(out, "A");
+                        for (int c = 0; c < 8; ++c) {
+                            const tr::Vec3 w = toWorld(placed, tr::Vec3{(c & 1 ? 1 : -1) * abv.extents.x, (c & 2 ? 1 : -1) * abv.extents.y,
+                                                                         (c & 4 ? 1 : -1) * abv.extents.z});
+                            std::fprintf(out, " %.3f %.3f %.3f", w.x, w.y, w.z);
+                        }
+                        std::fprintf(out, "\n");
+                    }
+                const std::string mesh = data.classMeshName(e.classId);
+                if (mesh.empty() || mesh == "default.geo") continue;
+                auto& file = cache[mesh];
+                if (!file) {
+                    try { file = std::make_shared<tr::GeoFile>(tr::readGeoFile(assets.read(mesh))); } catch (const std::exception&) { file = std::make_shared<tr::GeoFile>(); }
+                }
+                bool any = false;
+                for (size_t b = 0; b < file->bones.size(); ++b) {
+                    const tr::GeoFileBone& bone = file->bones[b];
+                    if (bone.boundingVolume.empty()) continue;
+                    bool named = false;
+                    for (const tr::GeoPropertyGroup& g : file->properties)
+                        if (g.id == int32_t(b))
+                            for (const tr::GeoParameter& p : g.pairs) named = named || p.key == "WSName";
+                    const std::array<float, 12> frame = boneFrame(bone.inverseBind);
+                    std::vector<tr::GeoBoneVolume> volumes;
+                    try { volumes = tr::readBoneVolumes(bone.boundingVolume); } catch (const std::exception&) {}
+                    for (const tr::GeoBoneVolume& v : volumes) {
+                        any = true;
+                        if (v.kind == tr::fourcc("BVWS")) {
+                            const bool good = named && !(e.flags & 0x2);
+                            for (size_t t = 0; t + 2 < v.indices.size(); t += 3) {
+                                std::fprintf(out, "T %s", good ? "ok" : "dropped");
+                                for (int k = 0; k < 3; ++k) {
+                                    const tr::Vec3 w = toWorld(placed, apply(frame, v.vertices[v.indices[t + k]]));
+                                    std::fprintf(out, " %.3f %.3f %.3f", w.x, w.y, w.z);
+                                }
+                                std::fprintf(out, "\n");
+                                (good ? ok : dropped) += 1;
+                            }
+                        } else if (v.kind == tr::fourcc("BVBX")) {
+                            std::fprintf(out, "B");
+                            for (int c = 0; c < 8; ++c) {
+                                const tr::Vec3 local{v.centre.x + (c & 1 ? 1 : -1) * v.halfExtents.x, v.centre.y + (c & 2 ? 1 : -1) * v.halfExtents.y,
+                                                     v.centre.z + (c & 4 ? 1 : -1) * v.halfExtents.z};
+                                const tr::Vec3 w = toWorld(placed, apply(frame, local));
+                                std::fprintf(out, " %.3f %.3f %.3f", w.x, w.y, w.z);
+                            }
+                            std::fprintf(out, "\n");
+                            ++boxes;
+                        } else if (v.kind == tr::fourcc("BVSP")) {
+                            const tr::Vec3 w = toWorld(placed, apply(frame, v.centre));
+                            std::fprintf(out, "S %.3f %.3f %.3f %.3f\n", w.x, w.y, w.z, v.sphereRadius * e.scale);
+                            ++spheres;
+                        }
+                    }
+                }
+                entities += any;
+            }
+            std::fclose(out);
+            std::printf("collision dump: %zu entities with volumes, %zu surface triangles used, %zu dropped, %zu boxes, %zu spheres -> %s\n",
+                        entities, ok, dropped, boxes, spheres, outPath.c_str());
+        }
         // RASA_INGAMEREVERT=1: removes RASA_INGAMEPREP's test light, emitter (by name) and entity (the largest id) from the map folder's
         // files in the game folder (written without new backups).
         if (envValue("RASA_INGAMEREVERT")) {
@@ -2381,6 +2495,8 @@ int main(int argc, char** argv) {
         // RASA_SOUNDMARKERS=1: the map's sound emitters as marker boxes; RASA_SELECTSOUND=<emitter index> selects one (its distances
         // drawn) and frames it, overriding the camera.
         scene.showSoundMarkers = envValue("RASA_SOUNDMARKERS") != nullptr;
+        scene.showCollision = envValue("RASA_COLLISION") != nullptr;   // the collision layer (SceneView::showCollision)
+        scene.collisionBuildsPerFrame = 100000;
         if (const char* sound = envValue("RASA_SELECTSOUND")) {
             highlighted = Selection{SelectionKind::AudioEmitter, size_t(std::atoi(sound))};
             scene.focusOn(highlighted);

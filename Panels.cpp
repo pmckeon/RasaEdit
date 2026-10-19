@@ -464,6 +464,7 @@ void ViewportPanel::applyOptions(const ViewSettings& view, SceneView& scene) con
     scene.showPlaceholders = view.showPlaceholders;
     scene.showLightMarkers = view.lightMarkers && !serverControls_;      // selectable only where map entities are
     scene.showSoundMarkers = view.soundMarkers && !serverControls_;
+    scene.showCollision = view.collision;
     scene.showServer = options.showServer;
     scene.showMissionAreas = options.showMissionAreas;
     scene.showRegions = options.showRegions;
@@ -543,6 +544,11 @@ void ViewportPanel::draw(EditorContext& ctx, const char* title, Selection& selec
                                   scene.liveParticleSystems(), scene.liveParticles());
             ImGui::Checkbox("Placeholders", &ctx.view.showPlaceholders);
             tip("Boxes for entities without a drawable model (stand-ins, effect-only models).");
+            ImGui::Checkbox("Collision", &ctx.view.collision);
+            tip("What the player walks on and bumps into: each map entity's walkable surfaces where the game puts them (cyan).\n"
+                "Red: a surface the game drops (its bone has no WSName, or the entity's map flag turns surfaces off).\n"
+                "Grey outlines: box / sphere volumes, which the player does not collide with on map objects.\n"
+                "Terrain collides everywhere except its holes and is not drawn here.");
             if (!serverControls_) {
                 ImGui::SeparatorText("Markers");
                 ImGui::Checkbox("Light markers", &ctx.view.lightMarkers);
