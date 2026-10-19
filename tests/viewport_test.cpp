@@ -2,6 +2,7 @@
 // target and writes the frame as raw RGBA. Runs on any Vulkan driver, including Mesa's lavapipe.
 //   viewport_test <game root> <game.zip> <map> <out.rgba> <width> <height> <eye x y z> <target x y z>
 #include "Avatar.h"
+#include "RasaNetMapUsables.h"
 #include "SceneView.h"
 #include "ParticleSim.h"
 #include "PvsBuilder.h"
@@ -1657,6 +1658,16 @@ int main(int argc, char** argv) {
             content = database->loadMap(database->contextIdForMap(map.name));
             scene.setServerContent(&content, database.get(), [&](int32_t id) { return data.classMeshName(id); },
                                    [&](const Creature& c) { return resolveAvatar(data, *database, c); });
+            {
+                // The map's own usables in the states Rasa.NET sends them (its MapUsables table; RASA_RASANET=<source folder> overrides
+                // finding it beside the database), as EditorContext sets them.
+                const char* source = envValue("RASA_RASANET");
+                const std::string root = rasanet::findSource(source ? source : "", dbPath);
+                const rasanet::MapUsableStates states = rasanet::mapUsableStates(root, uint32_t(content.mapContextId));
+                scene.setMapUsableStates(states.states);
+                std::printf("map usables with a server state: %zu (from %s)%s%s\n", states.states.size(), states.source.empty() ? "nowhere" : states.source.c_str(),
+                            states.error.empty() ? "" : " - ", states.error.c_str());
+            }
             // The client's map-screen markers, as the Server workspace sets them (drawn with the server layer).
             try {
                 const int32_t templateId = int32_t(tr::py::asInt(

@@ -783,19 +783,17 @@ SceneLighting SceneView::lighting() const {
     // Special-FX lights of server objects' use states (SLIT; see tr::SfxLight): persistent ones only (durationMs 0) on the
     // object itself or an accessory (target 0), at contact point frame x (Position + Offset) - the same placement rule as
     // the model lights (UNVERIFIED for these); the curves are evaluated on the light clock.
-    for (const ServerPlacement& s : serverPlacements_) {
-        if (!showStateEffects) break;
-        for (const StateLight& sl : s.stateLights) {
+    auto considerStateLight = [&](const StateLight& sl, const Model* model, const Mat4& world) {
             const tr::SfxLight& e = sl.event;
-            if (e.durationMs != 0 || e.target != 0) continue;
+            if (e.durationMs != 0 || e.target != 0) return;
             Mat4 frame;
             tr::Quat cpRotation;
-            if (!contactFrame(sl.body ? sl.body : s.model, e.contactPoint, 1, frame, cpRotation)) continue;
+            if (!contactFrame(sl.body ? sl.body : model, e.contactPoint, 1, frame, cpRotation)) return;
             tr::PlacedLight light;
             light.kind = e.spot ? tr::PlacedLight::Kind::Spot : tr::PlacedLight::Kind::Point;
             light.colour = tr::Vec3{tr::sfxCurveValue(e.colourR, lightTime), tr::sfxCurveValue(e.colourG, lightTime), tr::sfxCurveValue(e.colourB, lightTime)};
             light.range = tr::sfxCurveValue(e.range, lightTime);
-            if (light.range < 0.06f) continue;               // the product switches the light off (FUN_00771410, 0x00c2b8f8)
+            if (light.range < 0.06f) return;               // the product switches the light off (FUN_00771410, 0x00c2b8f8)
             light.falloffPercent = tr::sfxCurveValue(e.falloffPercent, lightTime);
             light.intensity = tr::sfxCurveValue(e.intensity, lightTime);
             light.penumbraAngle = tr::sfxCurveValue(e.penumbraAngle, lightTime);
@@ -803,10 +801,20 @@ SceneLighting SceneView::lighting() const {
             light.globeMap = e.globeMap;
             light.castsShadows = e.castsShadows;
             light.isStatic = false;          // the SLIT trigger (FUN_0075a510) sets IsStatic "false" on every light it makes
-            light.position = transformPoint(s.world, transformPoint(frame, add(e.position, e.offset)));
-            light.worldOrientation = multiplyQuat(quatFromMatrix(s.world), multiplyQuat(cpRotation, e.rotation));
+            light.position = transformPoint(world, transformPoint(frame, add(e.position, e.offset)));
+            light.worldOrientation = multiplyQuat(quatFromMatrix(world), multiplyQuat(cpRotation, e.rotation));
             consider(light);
-        }
+    };
+    for (const ServerPlacement& s : serverPlacements_) {
+        if (!showStateEffects) break;
+        for (const StateLight& sl : s.stateLights) considerStateLight(sl, s.model, s.world);
+    }
+    // The map's own usables in the state the server sends them (setMapUsableStates): their state lights and accessories' lights.
+    for (const Placement& p : placements_) {
+        if (!showStateEffects || p.neverDrawn || p.useState < 0) continue;
+        for (const StateLight& sl : p.stateLights) considerStateLight(sl, p.model, p.world);
+        for (const Model* a : p.stateAccessories)
+            if (a) considerModelLights(*a, p.world);
     }
     std::sort(nearest.begin(), nearest.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
     // Which shadow-casting spot lights get their shadow this frame - the game's selection (tabula_rasa.exe, traced 2026-10-17):
@@ -2403,9 +2411,44 @@ void SceneView::advanceParticles(float dt) {
             }
         }
     }
+    // Map usables' state effects: the state's particle attaches (target 0) and their accessories' own systems.
+    std::set<std::tuple<size_t, int, size_t>> liveState;
+    for (const LiveParticles& l : liveParticles_)
+        if (l.mapState) liveState.insert({l.placement, l.body, l.mount});
+    for (size_t k = 0; k < placements_.size() && showStateEffects; ++k) {
+        const Placement& p = placements_[k];
+        if (p.useState < 0) continue;
+        const tr::Vec3 d = subtract(p.centre, camera_.position);
+        if (dot(d, d) > particleDistance * particleDistance) continue;
+        auto start = [&](const tr::ParticleSystem* system, const Mat4& world, int body, size_t mount) {
+            if (!system || liveState.count({k, body, mount})) return;
+            LiveParticles l;
+            l.placement = k;
+            l.mount = mount;
+            l.mapState = true;
+            l.body = body;
+            l.instance = std::make_unique<ParticleInstance>(*system, world, uint32_t(k * 6151u + size_t(body + 1) * 7417u + mount * 104729u + 5u));
+            l.instance->setGeoPoints(geoPointSource());
+            for (int step = 0; step < 90; ++step) l.instance->update(1.0f / 30.0f);
+            liveParticles_.push_back(std::move(l));
+        };
+        for (size_t m = 0; m < p.stateParticles.size(); ++m) {
+            const StateParticle& sp = p.stateParticles[m];
+            if (sp.event.target != 0) continue;
+            Mat4 frame;
+            tr::Quat rotation;
+            if (!contactFrame(sp.body ? sp.body : p.model, sp.event.contactPoint, 1, frame, rotation)) continue;
+            start(particleSystem(sp.event.file), multiply(p.world, frame), -1, m);
+        }
+        for (size_t b = 0; b < p.stateAccessories.size(); ++b) {
+            const Model* a = p.stateAccessories[b];
+            if (!a || !a->loaded) continue;
+            for (size_t m = 0; m < a->particles.size(); ++m) start(particleSystem(a->particles[m].file), multiply(p.world, a->particles[m].local), int(b), m);
+        }
+    }
     std::vector<uint8_t> live(placements_.size(), 0);
     for (const LiveParticles& l : liveParticles_)
-        if (!l.server) live[l.placement] = 1;
+        if (!l.server && !l.mapState) live[l.placement] = 1;
     for (size_t k = 0; k < placements_.size(); ++k) {
         const Placement& p = placements_[k];
         if (live[k] || !p.model || !p.model->loaded || p.model->particles.empty()) continue;
@@ -3380,6 +3423,9 @@ void SceneView::queueDraws(const Selection& selection) {
             const bool selected = int(k) == selectedEntity;
             const float fade = gameDistances ? entityDistanceAlpha(p) : 1.0f;
             if (p.model && p.model->loaded) drawModelPieces(*p.model, p.world, p.hue, selected, selected ? 1.0f : fade);
+            if (showStateEffects)                // a map usable's state accessories (e.g. a fire pit's flames' mesh), at the entity
+                for (Model* a : p.stateAccessories)
+                    if (a && a->loaded) drawModelPieces(*a, p.world, Vec4f{0, 0, 0, 0}, selected, selected ? 1.0f : fade);
             if (p.model && p.model->loaded && p.model->hasSolid) {
                 // drawn above
             } else if (p.model && p.model->loaded && p.model->effectOnly) {
@@ -4258,6 +4304,24 @@ SceneView::Placement SceneView::makePlacement(const tr::MapEntity& e) {
     const std::string mesh = p.neverDrawn || !meshForClass_ ? std::string() : meshForClass_(e.classId);
     // With the model's own animation, played on the light clock (without it the hologram's skinned pieces collapse into a column).
     p.model = objectModelFor(mesh);      // unordered_map nodes are stable
+    // A usable the map places, in the state the server sends it (Rasa.NET MapUsables; usable.py UsableState.__call__: the state's
+    // special-FX package and animation). Without one the client draws it with neither.
+    const auto useState = mapUsableStates_.find(e.entityId);
+    if (useState != mapUsableStates_.end() && !p.neverDrawn) {
+        p.useState = useState->second;
+        StateEffects fx = stateEffects(e.classId, p.useState);
+        p.stateAccessories = fx.accessories;
+        p.stateParticles = fx.particles;
+        p.stateLights = fx.lights;
+        // The state's animation (usabledata.animation (class, state, USE_STATE_NULL) -> a family on the mesh), looped from its
+        // first pick (the spec's type - looping / recurring one-shots - is not followed here: UNVERIFIED for the one-shot kinds).
+        if (usableAnimationFor_ && !mesh.empty()) {
+            try {
+                const tr::GameData::UsableAnimation animation = usableAnimationFor_(e.classId, p.useState);
+                if (!animation.animations.empty()) p.model = objectModelFor(mesh, animation.animations.front().name);
+            } catch (const std::exception&) {}
+        }
+    }
     tr::HueColour hue1 = e.hue1, hue2 = e.hue2;
     if (classHue_) classHue_(e.classId, hue1, hue2);              // physicalentityclasshue wins when the class has a row (setClassHues)
     p.hue = entityHue(hue1);
@@ -4312,6 +4376,11 @@ void SceneView::reloadMapLights() {
     } catch (const std::exception& e) {
         mapLightsError_ = e.what();
     }
+}
+
+void SceneView::setMapUsableStates(std::map<uint64_t, int32_t> states) {
+    mapUsableStates_ = std::move(states);
+    rebuildEntities();
 }
 
 void SceneView::rebuildEntities() {

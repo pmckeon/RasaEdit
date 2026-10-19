@@ -247,6 +247,9 @@ public:
     // Server teleporters show their USE_TS_STATE_1 (56) package - Rasa.NET puts world teleporters in that state
     // (DynamicObjectManager) - as accessory models (`ACCY` events, tr::readSfxPackage), e.g. the waypoint's beam.
     void setUsableStatePackages(std::function<std::string(int32_t classId, int32_t stateId)> packageFor) { usablePackageFor_ = std::move(packageFor); }
+    // The use states the server gives the map's own usables (entity id -> state; rasanet::mapUsableStates); rebuilds the entities.
+    void setMapUsableStates(std::map<uint64_t, int32_t> states);
+    int32_t entityUseState(size_t entityIndex) const { return entityIndex < placements_.size() ? placements_[entityIndex].useState : -1; }
     // The client's string table (an FX emitter names its package by string id); call before setServerContent.
     void setStringLookup(std::function<std::string(int32_t stringId)> lookup) { stringFor_ = std::move(lookup); }
     // A usable class's animation in a state (GameData::usableStateAnimation); ambient figures play theirs (state 44).
@@ -513,6 +516,16 @@ private:
     uint64_t frameNumber_ = 1;
     // A piece's texture transforms at time t from its material tracks (slots without a track keep out's values); false if none.
     bool animatedUvTransforms(const Model& model, const ModelPiece& piece, float time, UvTransforms& out) const;
+    // A special-FX event attached to a body: the placement's own model (body null) or one of its accessories (events of an
+    // accessory's nested package).
+    struct StateParticle {
+        Model* body = nullptr;
+        tr::SfxParticleAttach event;
+    };
+    struct StateLight {
+        Model* body = nullptr;
+        tr::SfxLight event;
+    };
     struct Placement {
         Mat4 world;                 // entity placement
         Mat4 boxWorld;              // placement * local bounds (for placeholders and selection)
@@ -524,22 +537,18 @@ private:
         int32_t cullingLayer = 3;   // map cullLayer, else the class's vizsetting layer
         bool neverDrawn = false;    // culling layer 6
         Vec4f hue = Vec4f{0, 0, 0, 0};   // the entity's hue1 / 255 when it is set (w = 1), else the materials keep theirs
+        // A usable the .map places, in the use state the server sends it (setMapUsableStates; -1 = none, as the client draws it
+        // without one): the state's special-FX accessories, particle attaches and lights, as server objects carry theirs.
+        int32_t useState = -1;
+        std::vector<Model*> stateAccessories;
+        std::vector<StateParticle> stateParticles;
+        std::vector<StateLight> stateLights;
     };
 
     struct AvatarDraw {                 // one suit's pieces of one swap set
         Model* model = nullptr;
         uint32_t swapsetId = 0;
         Vec4f hue;                      // w: 1 = hue the non-flesh pieces
-    };
-    // A special-FX event attached to a body: the placement's own model (body null) or one of its accessories (events of an
-    // accessory's nested package).
-    struct StateParticle {
-        Model* body = nullptr;
-        tr::SfxParticleAttach event;
-    };
-    struct StateLight {
-        Model* body = nullptr;
-        tr::SfxLight event;
     };
     struct IdleSequence {               // a creature's idle playback (poseIdle)
         float start = 0;                // light-clock time the current animation started
@@ -733,6 +742,7 @@ private:
     const WorldDatabase* serverDatabase_ = nullptr;
     std::function<std::string(int32_t)> serverMeshForClass_;
     std::function<std::string(int32_t, int32_t)> usablePackageFor_;
+    std::map<uint64_t, int32_t> mapUsableStates_;
     std::function<std::string(int32_t)> stringFor_;
     std::function<tr::GameData::UsableAnimation(int32_t, int32_t)> usableAnimationFor_;
     struct StateEffects {
@@ -760,6 +770,8 @@ private:
         size_t placement = 0;                   // map entity index, or server placement index when `server`
         size_t mount = 0;                       // model particle mount, or the server placement's stateParticles index
         bool server = false;
+        bool mapState = false;                  // a map usable's state effect: mount = stateParticles index (body -1) or the mount of
+                                                // stateAccessories[body]'s own particle systems
         int body = -1;                          // server: index in serverBodies (its model's mount), -1 = a state particle
         std::unique_ptr<ParticleInstance> instance;
     };

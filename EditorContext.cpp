@@ -1,4 +1,5 @@
 #include "EditorContext.h"
+#include "RasaNetMapUsables.h"
 
 #include <cstdlib>
 
@@ -222,6 +223,12 @@ bool EditorContext::openMap(const std::string& name) {
                 scene->setUsableStatePackages([this](int32_t classId, int32_t stateId) { return gameData->usableStatePackage(classId, stateId); });
                 scene->setStringLookup([this](int32_t stringId) { return gameData->stringById(stringId); });
                 scene->setUsableStateAnimations([this](int32_t classId, int32_t stateId) { return gameData->usableStateAnimation(classId, stateId); });
+                // The states Rasa.NET gives this map's own usables (its MapUsables table, read from the server's source when it sits
+                // beside the World database or the setting rasaNetSource names it; RasaNetMapUsables.h).
+                const std::string rasaNet = rasanet::findSource(setting("rasaNetSource"), setting("database"));
+                const rasanet::MapUsableStates usableStates = contextId >= 0 ? rasanet::mapUsableStates(rasaNet, uint32_t(contextId)) : rasanet::MapUsableStates{};
+                if (!usableStates.error.empty()) SDL_Log("%s", usableStates.error.c_str());
+                scene->setMapUsableStates(usableStates.states);
             }
         }
         currentMapName = map->name;
