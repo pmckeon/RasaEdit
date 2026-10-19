@@ -14,9 +14,10 @@
 // (name, region, port). A language dropdown picks the language; the Modules panel a module (or all of them, for searching);
 // the Texts panel lists and searches the entries; the Entry panel edits the chosen entry's strings (both genders, or one each),
 // adds and deletes entries, and lists where mission texts are used (the client's missionconversation / missionobjective /
-// objectiveconversation tables). Undo / redo per change. Saving writes game.zip (first save keeps game.zip.rasaedit-original):
-// each edited module as Python source (tr::moduleSource, non-ASCII as \uXXXX) with its compiled .pyo removed - Python's zip
-// import takes a .pyo before a .py - every other entry copied byte for byte.
+// objectiveconversation tables). Undo / redo per change. Saving writes each edited module as Python source (tr::moduleSource,
+// non-ASCII as \uXXXX) into a patch zip, data/rasaedit_text.zip, that tabula_rasa.cfg's [Data] puts before game.zip (added on the
+// first save), with forwarding package __init__.py files - or, when chosen ("Save to", setting textSave = game), into game.zip
+// itself (first save keeps game.zip.rasaedit-original; compiled copies removed - Python's zip import takes a .pyo before a .py).
 class TextWorkspace : public Workspace {
 public:
     explicit TextWorkspace(EditorContext& ctx);
@@ -64,8 +65,12 @@ public:
     // of every language's module, pending edits included.
     std::string missionText(int64_t id) const;
     int64_t newMissionTextId() const;
-    // Tests: save to this file (game.zip is read, never written; the game data is not reloaded) - "" for the real save.
+    // Tests: save to this file instead (the patch zip, or with "Save to" game.zip a copy of game.zip; the game data is not reloaded
+    // and tabula_rasa.cfg is not changed) - "" for the real save.
     void setSavePathForTests(const std::string& path) { savePathForTests_ = path; }
+    bool saveToGameZip() const;          // the "Save to" choice (setting textSave)
+    std::string patchZipPath() const;    // data/rasaedit_text.zip beside game.zip
+    static constexpr const char* kTextPatchName = "rasaedit_text.zip";
 
 private:
     struct Row {
@@ -95,6 +100,8 @@ private:
     int moduleIndex(const std::string& module) const;
     void buildMissionReferences();
 
+    void drawSaveTarget();
+    std::string patchState() const;     // the patch zip's [Data] entry, as a line for the panel
     void drawModules();
     void drawTexts();
     void drawEntry();

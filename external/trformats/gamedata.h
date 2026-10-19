@@ -145,6 +145,8 @@ private:
 // is written fresh (no data descriptor). Throws FormatError.
 void writeZip(const ZipArchive& source, const std::string& destination, const std::map<std::string, Bytes>& replace,
               const std::vector<std::string>& remove);
+// A new archive of `files` (zip path -> contents), every entry stored.
+void writeZip(const std::string& destination, const std::map<std::string, Bytes>& files);
 
 // Radar (mini-map) placement for one game context and region, from
 // generated.client.gamecontextuiradarinfo: lookup[(contextId, regionId)] = [(extentX, extentZ, offsetX, offsetZ)].
@@ -209,12 +211,18 @@ struct AccessoryAttachment {
 class GameData {
 public:
     explicit GameData(const std::string& gameZipPath);       // e.g. AssetLibrary::gameDataPath()
-    const std::string& path() const { return zip_->path(); }
+    // Several archives in the client's import order (AssetLibrary::gameDataPaths: tabula_rasa.cfg's [Data] entries): a module comes
+    // from the first archive that has it. The last is game.zip (path()).
+    explicit GameData(const std::vector<std::string>& zipPaths);
+    const std::string& path() const { return zips_.back()->path(); }
+    std::vector<std::string> archivePaths() const;
     // The zip entry a module comes from ("generated/client/language/english/missiontextlanguage.pyo"), "" if none.
     std::string moduleEntryName(const std::string& module) const;
-    // After game.zip was rewritten: re-read its directory, and take `updated` (module -> globals) as those modules' contents.
+    std::string moduleArchivePath(const std::string& module) const;    // the archive it comes from, "" if none
+    // After an archive was rewritten: re-read the directories, and take `updated` (module -> globals) as those modules' contents.
     // Other evaluated modules stay cached; replaced globals are kept alive, so objects handed out earlier stay valid.
     void reloadArchive(const std::map<std::string, py::Ref>& updated);
+    void reloadArchives(const std::vector<std::string>& zipPaths, const std::map<std::string, py::Ref>& updated);
 
     // Modules are named by dotted path from "generated", e.g. "generated.client.entityclass".
     std::vector<std::string> moduleNames() const;
@@ -364,9 +372,13 @@ public:
 
 private:
     void indexModules();
-    std::unique_ptr<ZipArchive> zip_;
+    struct ModuleEntry {
+        size_t archive = 0;
+        size_t entry = 0;
+    };
+    std::vector<std::unique_ptr<ZipArchive>> zips_;            // import order; game.zip last
     std::vector<py::Ref> retired_;                             // replaced module globals (still referenced from outside)
-    std::unordered_map<std::string, size_t> moduleEntries_;   // dotted name -> zip entry
+    std::unordered_map<std::string, ModuleEntry> moduleEntries_;   // dotted name -> archive and entry
     std::unordered_map<std::string, py::Ref> cache_;
     std::mutex cacheMutex_;
 };

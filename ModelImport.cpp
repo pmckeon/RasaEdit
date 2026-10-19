@@ -2,6 +2,8 @@
 
 #include "ModelExchange.h"
 
+#include "GameConfig.h"
+
 #include "Json.h"
 #include "assetlibrary.h"
 #include "geofile.h"
@@ -1707,130 +1709,13 @@ std::string addToPatchArchive(const std::string& gameRoot, const std::vector<Imp
     return "wrote " + path + ": " + std::to_string(added) + " file(s) added or replaced, " + std::to_string(kept) + " kept";
 }
 
-namespace {
-
-// tabula_rasa.cfg's [Paths] lines: key, value, byte offset of the line and its length without the end of line.
-struct CfgLine {
-    std::string key;
-    std::string value;
-    size_t at = 0;
-    size_t length = 0;
-};
-
-std::vector<CfgLine> pathsLines(const std::string& text, size_t* headerEnd = nullptr) {
-    std::vector<CfgLine> lines;
-    bool inPaths = false;
-    for (size_t p = 0; p < text.size();) {
-        size_t end = text.find('\n', p);
-        if (end == std::string::npos) end = text.size();
-        std::string line = text.substr(p, end - p);
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        std::string t = line;
-        t.erase(0, std::min(t.size(), t.find_first_not_of(" \t")));
-        if (!t.empty() && t[0] == '[') {
-            inPaths = lower(t).rfind("[paths]", 0) == 0;
-            if (inPaths && headerEnd) *headerEnd = end < text.size() ? end + 1 : end;
-        } else if (inPaths && !t.empty() && t[0] != ';' && t[0] != '#') {
-            const size_t eq = t.find('=');
-            if (eq != std::string::npos) {
-                CfgLine l;
-                l.key = t.substr(0, eq);
-                l.key.erase(l.key.find_last_not_of(" \t") + 1);
-                l.value = t.substr(eq + 1);
-                l.at = p;
-                l.length = line.size();
-                lines.push_back(l);
-            }
-        }
-        p = end + 1;
-    }
-    return lines;
-}
-
-bool namesPatchArchive(const CfgLine& l) { return lower(l.value).find("rasaedit_patch.glm") != std::string::npos; }
-
-std::string readText(const fs::path& path) {
-    const tr::Bytes bytes = readAll(path);
-    return std::string(bytes.begin(), bytes.end());
-}
-
-// A key the game takes before every other [Paths] key (tr::configKeyOrder): AAA_RasaEdit, else AAA_RasaEdit1, 2, ...
-std::string winningPatchKey(const std::vector<CfgLine>& others) {
-    std::vector<std::string> keys;
-    for (const CfgLine& l : others) keys.push_back(l.key);
-    for (int n = 0; n < 100000; ++n) {
-        const std::string candidate = n ? "AAA_RasaEdit" + std::to_string(n) : std::string("AAA_RasaEdit");
-        std::vector<std::string> with = keys;
-        with.push_back(candidate);
-        if (tr::configKeyOrder(with).front() == candidate) return candidate;
-    }
-    throw tr::FormatError("no key found that the game would take first");
-}
-
-}  // namespace
-
-std::string patchArchiveKey(const std::string& gameRoot) {
-    std::error_code ec;
-    const fs::path cfg = fs::u8path(gameRoot) / "tabula_rasa.cfg";
-    if (!fs::exists(cfg, ec)) return {};
-    for (const CfgLine& l : pathsLines(readText(cfg)))
-        if (namesPatchArchive(l)) return l.key;
-    return {};
-}
+// The patch archive's [Paths] entry (GameConfig.h; the first key wins, CLAUDE.md "Which archive wins").
+std::string patchArchiveKey(const std::string& gameRoot) { return gamecfg::entryKey(gameRoot, "Paths", "rasaedit_patch.glm"); }
 
 bool patchArchiveRegistered(const std::string& gameRoot) { return !patchArchiveKey(gameRoot).empty(); }
 
-bool patchArchiveWins(const std::string& gameRoot) {
-    std::error_code ec;
-    const fs::path cfg = fs::u8path(gameRoot) / "tabula_rasa.cfg";
-    if (!fs::exists(cfg, ec)) return false;
-    std::vector<std::string> keys;
-    std::string key;
-    for (const CfgLine& l : pathsLines(readText(cfg))) {
-        keys.push_back(l.key);
-        if (namesPatchArchive(l)) key = l.key;
-    }
-    return !key.empty() && lower(tr::configKeyOrder(keys).front()) == lower(key);
-}
+bool patchArchiveWins(const std::string& gameRoot) { return gamecfg::entryFirst(gameRoot, "Paths", "rasaedit_patch.glm"); }
 
 std::string registerPatchArchive(const std::string& gameRoot) {
-    if (patchArchiveWins(gameRoot))
-        return "tabula_rasa.cfg already names the patch archive (" + patchArchiveKey(gameRoot) + ", taken first)";
-    const fs::path cfg = fs::u8path(gameRoot) / "tabula_rasa.cfg";
-    std::string text = readText(cfg);
-    const std::string eol = text.find("\r\n") != std::string::npos ? "\r\n" : "\n";
-    size_t headerEnd = std::string::npos;
-    const std::vector<CfgLine> lines = pathsLines(text, &headerEnd);
-    if (headerEnd == std::string::npos) throw tr::FormatError("tabula_rasa.cfg has no [Paths] section");
-    std::vector<CfgLine> others;
-    const CfgLine* existing = nullptr;
-    for (const CfgLine& l : lines) {
-        if (namesPatchArchive(l)) existing = &l;
-        else others.push_back(l);
-    }
-    // The game takes [Paths] keys in its hash-table order and the FIRST key wins (tr::configKeyOrder) - not alphabetical order -
-    // so the key is chosen to come first among the keys the file has.
-    const std::string key = winningPatchKey(others);
-    const std::string newLine = key + " = \"data/rasaedit_patch.glm\"";
-    std::string what;
-    if (existing) {
-        what = "renamed " + existing->key + " to " + key + " (the old key was not taken first)";
-        text.replace(existing->at, existing->length, newLine);
-    } else {
-        std::string line = newLine + eol;
-        if (headerEnd == text.size() && !text.empty() && text.back() != '\n') line = eol + line;
-        text.insert(headerEnd, line);
-        what = "added " + newLine + " to [Paths]";
-    }
-    const fs::path backup = cfg.string() + ".rasaedit-original";
-    std::error_code ec;
-    if (!fs::exists(backup, ec)) fs::copy_file(cfg, backup, ec);
-    const fs::path temp = cfg.string() + ".tmp";
-    {
-        std::ofstream out(temp, std::ios::binary);
-        out.write(text.data(), std::streamsize(text.size()));
-        if (!out) throw tr::FormatError("cannot write " + temp.string());
-    }
-    fs::rename(temp, cfg);
-    return what + " in " + cfg.string() + " (backup " + backup.filename().string() + ")";
+    return gamecfg::registerFirst(gameRoot, "Paths", "AAA_RasaEdit", "data/rasaedit_patch.glm", "rasaedit_patch.glm");
 }

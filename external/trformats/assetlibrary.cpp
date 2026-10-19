@@ -379,6 +379,27 @@ std::string AssetLibrary::gameDataPath() const {
     return value.empty() ? "" : resolve(value);
 }
 
+std::vector<std::string> AssetLibrary::gameDataPaths() const {
+    std::vector<std::string> paths;
+    std::error_code ec;
+    if (const std::vector<ConfigFile::Item>* items = config_->section("Data")) {
+        std::vector<std::string> keys;
+        for (const ConfigFile::Item& item : *items) keys.push_back(item.key);
+        for (const std::string& key : configKeyOrder(keys)) {
+            const std::string value = config_->value("Data", key);
+            if (value.empty()) continue;
+            const std::string path = resolve(value);
+            if (fs::is_regular_file(fs::u8path(path), ec) && std::find(paths.begin(), paths.end(), path) == paths.end()) paths.push_back(path);
+        }
+    }
+    const std::string main = gameDataPath();
+    if (!main.empty()) {
+        paths.erase(std::remove(paths.begin(), paths.end(), main), paths.end());
+        if (fs::is_regular_file(fs::u8path(main), ec)) paths.push_back(main);
+    }
+    return paths;
+}
+
 // ------------------------------------------------------------------------------------------
 // MapBundle
 // ------------------------------------------------------------------------------------------

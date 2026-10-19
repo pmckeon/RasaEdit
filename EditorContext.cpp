@@ -105,7 +105,8 @@ bool EditorContext::openGame(const std::string& root) {
         std::unique_ptr<tr::GameData> newGameData;
         const std::string gameDataPath = newAssets->gameDataPath();
         std::error_code ec;
-        if (!gameDataPath.empty() && fs::exists(gameDataPath, ec)) newGameData = std::make_unique<tr::GameData>(gameDataPath);
+        // Every [Data] zip in the client's import order: a text patch (data/rasaedit_text.zip) is read over game.zip, as in game.
+        if (!gameDataPath.empty() && fs::exists(gameDataPath, ec)) newGameData = std::make_unique<tr::GameData>(newAssets->gameDataPaths());
 
         scene.reset();
         overview.reset();

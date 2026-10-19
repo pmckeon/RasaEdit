@@ -1113,8 +1113,18 @@ void put32(Bytes& out, uint32_t v) {
 }
 }  // namespace
 
+static void writeZipFrom(const ZipArchive* source, const std::string& destination, const std::map<std::string, Bytes>& replace,
+                         const std::vector<std::string>& remove);
+
 void writeZip(const ZipArchive& source, const std::string& destination, const std::map<std::string, Bytes>& replace,
               const std::vector<std::string>& remove) {
+    writeZipFrom(&source, destination, replace, remove);
+}
+
+void writeZip(const std::string& destination, const std::map<std::string, Bytes>& files) { writeZipFrom(nullptr, destination, files, {}); }
+
+static void writeZipFrom(const ZipArchive* source, const std::string& destination, const std::map<std::string, Bytes>& replace,
+                         const std::vector<std::string>& remove) {
     struct Written {
         ZipEntry entry;
         uint32_t offset = 0;
@@ -1171,13 +1181,14 @@ void writeZip(const ZipArchive& source, const std::string& destination, const st
         emit(e, raw);
     };
     std::set<std::string> done;
-    for (const ZipEntry& e : source.entries()) {
-        if (std::find(remove.begin(), remove.end(), e.name) != remove.end()) continue;
-        const auto r = replace.find(e.name);
-        if (r != replace.end()) storedEntry(e.name, r->second, e);
-        else emit(e, source.readStored(e));
-        done.insert(e.name);
-    }
+    if (source)
+        for (const ZipEntry& e : source->entries()) {
+            if (std::find(remove.begin(), remove.end(), e.name) != remove.end()) continue;
+            const auto r = replace.find(e.name);
+            if (r != replace.end()) storedEntry(e.name, r->second, e);
+            else emit(e, source->readStored(e));
+            done.insert(e.name);
+        }
     for (const auto& r : replace)
         if (!done.count(r.first)) storedEntry(r.first, r.second, ZipEntry{});
     const uint64_t directoryOffset = offset;
@@ -1222,25 +1233,43 @@ void writeZip(const ZipArchive& source, const std::string& destination, const st
 // ------------------------------------------------------------------------------------------
 // GameData
 // ------------------------------------------------------------------------------------------
-GameData::GameData(const std::string& gameZipPath) : zip_(std::make_unique<ZipArchive>(gameZipPath)) { indexModules(); }
+GameData::GameData(const std::string& gameZipPath) : GameData(std::vector<std::string>{gameZipPath}) {}
+
+GameData::GameData(const std::vector<std::string>& zipPaths) {
+    if (zipPaths.empty()) throw FormatError("no game data archive");
+    for (const std::string& path : zipPaths) zips_.push_back(std::make_unique<ZipArchive>(path));
+    indexModules();
+}
+
+std::vector<std::string> GameData::archivePaths() const {
+    std::vector<std::string> paths;
+    for (const auto& zip : zips_) paths.push_back(zip->path());
+    return paths;
+}
 
 void GameData::indexModules() {
     moduleEntries_.clear();
-    // Compiled modules (.pyo / .pyc) first; a module shipped only as source (.py) is evaluated by evaluateSource.
-    const auto& entries = zip_->entries();
-    for (int pass = 0; pass < 2; ++pass)
-        for (size_t k = 0; k < entries.size(); ++k) {
-            const std::string name = toLowerAscii(entries[k].name);
-            const bool compiled = name.size() > 4 && (name.compare(name.size() - 4, 4, ".pyo") == 0 || name.compare(name.size() - 4, 4, ".pyc") == 0);
-            const bool source = name.size() > 3 && name.compare(name.size() - 3, 3, ".py") == 0;
-            if (pass == 0 ? !compiled : !source) continue;
-            size_t start = 0;
-            for (size_t pos = name.find("generated/"); pos != std::string::npos; pos = name.find("generated/", pos + 1))
-                if (pos == 0 || name[pos - 1] == '/') { start = pos; break; }
-            std::string dotted = name.substr(start, name.size() - (compiled ? 4 : 3) - start);
-            std::replace(dotted.begin(), dotted.end(), '/', '.');
-            moduleEntries_.emplace(dotted, k);        // a compiled module of the same name stays
-        }
+    // As Python's import: the first archive on the path that has the module (a patch zip, then game.zip - its packages forward to
+    // game.zip's, see TextWorkspace::saveChanges); within one archive compiled modules (.pyo / .pyc) first, a module there only as
+    // source (.py) is evaluated by evaluateSource.
+    for (size_t a = 0; a < zips_.size(); ++a) {
+        const auto& entries = zips_[a]->entries();
+        std::unordered_map<std::string, ModuleEntry> found;
+        for (int pass = 0; pass < 2; ++pass)
+            for (size_t k = 0; k < entries.size(); ++k) {
+                const std::string name = toLowerAscii(entries[k].name);
+                const bool compiled = name.size() > 4 && (name.compare(name.size() - 4, 4, ".pyo") == 0 || name.compare(name.size() - 4, 4, ".pyc") == 0);
+                const bool source = name.size() > 3 && name.compare(name.size() - 3, 3, ".py") == 0;
+                if (pass == 0 ? !compiled : !source) continue;
+                size_t start = 0;
+                for (size_t pos = name.find("generated/"); pos != std::string::npos; pos = name.find("generated/", pos + 1))
+                    if (pos == 0 || name[pos - 1] == '/') { start = pos; break; }
+                std::string dotted = name.substr(start, name.size() - (compiled ? 4 : 3) - start);
+                std::replace(dotted.begin(), dotted.end(), '/', '.');
+                found.emplace(dotted, ModuleEntry{a, k});        // a compiled module of the same name stays
+            }
+        for (const auto& f : found) moduleEntries_.emplace(f.first, f.second);   // an earlier archive's module stays
+    }
 }
 
 std::vector<std::string> GameData::moduleNames() const {
@@ -1259,20 +1288,30 @@ const py::Object& GameData::module(const std::string& module) {
     if (cached != cache_.end()) return *cached->second;
     const auto it = moduleEntries_.find(key);
     if (it == moduleEntries_.end()) throw FormatError("game data has no module " + module);
-    const ZipEntry& entry = zip_->entries()[it->second];
+    const ZipArchive& zip = *zips_[it->second.archive];
+    const ZipEntry& entry = zip.entries()[it->second.entry];
     const bool source = entry.name.size() > 3 && toLowerAscii(entry.name.substr(entry.name.size() - 3)) == ".py";
-    py::Ref globals = source ? evaluateSource(zip_->read(entry), module) : evaluateModule(zip_->read(entry), module);
+    py::Ref globals = source ? evaluateSource(zip.read(entry), module) : evaluateModule(zip.read(entry), module);
     return *cache_.emplace(key, globals).first->second;
 }
 
 std::string GameData::moduleEntryName(const std::string& module) const {
     const auto it = moduleEntries_.find(toLowerAscii(module));
-    return it == moduleEntries_.end() ? std::string() : zip_->entries()[it->second].name;
+    return it == moduleEntries_.end() ? std::string() : zips_[it->second.archive]->entries()[it->second.entry].name;
 }
 
-void GameData::reloadArchive(const std::map<std::string, py::Ref>& updated) {
+std::string GameData::moduleArchivePath(const std::string& module) const {
+    const auto it = moduleEntries_.find(toLowerAscii(module));
+    return it == moduleEntries_.end() ? std::string() : zips_[it->second.archive]->path();
+}
+
+void GameData::reloadArchive(const std::map<std::string, py::Ref>& updated) { reloadArchives(archivePaths(), updated); }
+
+void GameData::reloadArchives(const std::vector<std::string>& zipPaths, const std::map<std::string, py::Ref>& updated) {
     std::lock_guard<std::mutex> lock(cacheMutex_);
-    zip_ = std::make_unique<ZipArchive>(zip_->path());
+    std::vector<std::unique_ptr<ZipArchive>> zips;
+    for (const std::string& path : zipPaths) zips.push_back(std::make_unique<ZipArchive>(path));
+    zips_ = std::move(zips);
     indexModules();
     for (const auto& u : updated) {
         py::Ref& slot = cache_[toLowerAscii(u.first)];

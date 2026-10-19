@@ -1,5 +1,7 @@
 #include "TextWorkspace.h"
 
+#include "GameConfig.h"
+
 #include "imgui_internal.h"   // DockBuilder
 
 #include <algorithm>
@@ -408,6 +410,27 @@ void TextWorkspace::drawPanels() {
     drawEntry();
 }
 
+// Where Save writes: the patch zip (default) or game.zip itself.
+void TextWorkspace::drawSaveTarget() {
+    const bool game = saveToGameZip();
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted("Save to");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if (ImGui::BeginCombo("##saveTo", game ? "game.zip (overwrite)" : kTextPatchName)) {
+        if (ImGui::Selectable(kTextPatchName, !game)) ctx_.setSetting("textSave", "patch");
+        ImGui::SetItemTooltip("A patch zip beside game.zip that tabula_rasa.cfg's [Data] loads first: only the edited modules, game.zip "
+                              "untouched. Undo by removing its [Data] line or the file.");
+        if (ImGui::Selectable("game.zip (overwrite)", game)) ctx_.setSetting("textSave", "game");
+        ImGui::SetItemTooltip("Rewrite game.zip itself (the first save keeps game.zip.rasaedit-original). A module the patch zip also "
+                              "holds cannot be saved this way - the game would still read the patch's.");
+        ImGui::EndCombo();
+    }
+    if (game) ImGui::TextDisabled("game.zip is rewritten on save");
+    else ImGui::TextDisabled("%s", patchState().c_str());
+    ImGui::Separator();
+}
+
 void TextWorkspace::drawModules() {
     if (!ImGui::Begin("Modules###Text.Modules")) {
         ImGui::End();
@@ -418,6 +441,7 @@ void TextWorkspace::drawModules() {
         ImGui::End();
         return;
     }
+    drawSaveTarget();
     ImGui::TextDisabled("%s", language_.c_str());
     ImGui::SetItemTooltip("generated/client/language/%s - the language is chosen at the top of Texts", language_.c_str());
     if (ImGui::BeginTable("modules", 2, ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg)) {
@@ -688,51 +712,130 @@ void TextWorkspace::revertChanges() {
     rowsDirty_ = true;
 }
 
+bool TextWorkspace::saveToGameZip() const { return ctx_.setting("textSave") == "game"; }
+
+std::string TextWorkspace::patchZipPath() const {
+    if (!ctx_.gameData) return {};
+    return (std::filesystem::path(ctx_.gameData->path()).parent_path() / kTextPatchName).string();
+}
+
+std::string TextWorkspace::patchState() const {
+    if (!ctx_.assets) return {};
+    const std::string root = ctx_.assets->root();
+    const std::string key = gamecfg::entryKey(root, "Data", kTextPatchName);
+    if (key.empty()) return "not in tabula_rasa.cfg yet - the first save adds it to [Data]";
+    if (!gamecfg::entryFirst(root, "Data", kTextPatchName)) return "in [Data] as " + key + ", but not before game.zip - the next save fixes the key";
+    return "loaded before game.zip ([Data] " + key + ")";
+}
+
 bool TextWorkspace::saveChanges() {
     if (!hasUnsavedChanges()) return true;
     if (!ctx_.gameData) return false;
     namespace fs = std::filesystem;
     tr::GameData& data = *ctx_.gameData;
     try {
-        tr::ZipArchive archive(data.path());
-        std::map<std::string, tr::Bytes> replace;
-        std::vector<std::string> remove;
         std::map<std::string, py::Ref> updated;
+        std::map<std::string, std::string> sources;                 // zip path without extension -> module source
         for (const auto& e : edited_) {
             const std::string entry = data.moduleEntryName(e.first);
             if (entry.empty()) continue;
-            const std::string base = entry.substr(0, entry.rfind('.'));
-            const std::string source = py::moduleSource(*e.second);
-            replace[base + ".py"] = tr::Bytes(source.begin(), source.end());
-            // Python's zip import takes a compiled module before the source: drop every compiled copy.
-            for (const tr::ZipEntry& z : archive.entries())
-                if (lowerAscii(z.name) == lowerAscii(base + ".pyo") || lowerAscii(z.name) == lowerAscii(base + ".pyc")) remove.push_back(z.name);
+            sources[entry.substr(0, entry.rfind('.'))] = py::moduleSource(*e.second);
             updated[e.first] = e.second;
         }
+
+        if (saveToGameZip()) {
+            // Overwrite game.zip itself (the user's choice): each module as source, its compiled copies dropped.
+            for (const auto& u : updated)
+                if (data.moduleArchivePath(u.first) != data.path())
+                    throw tr::FormatError(u.first + " comes from " + fs::path(data.moduleArchivePath(u.first)).filename().string() +
+                                          ", which the game reads before game.zip - an edit in game.zip would not show; save to the patch zip");
+            tr::ZipArchive archive(data.path());
+            std::map<std::string, tr::Bytes> replace;
+            std::vector<std::string> remove;
+            for (const auto& [stem, source] : sources) {
+                replace[stem + ".py"] = tr::Bytes(source.begin(), source.end());
+                // Python's zip import takes a compiled module before the source: drop every compiled copy.
+                for (const tr::ZipEntry& z : archive.entries())
+                    if (lowerAscii(z.name) == lowerAscii(stem + ".pyo") || lowerAscii(z.name) == lowerAscii(stem + ".pyc")) remove.push_back(z.name);
+            }
+            if (!savePathForTests_.empty()) {
+                tr::writeZip(archive, savePathForTests_, replace, remove);
+                savedVersion_ = version_;
+                ctx_.setStatus("Saved " + std::to_string(updated.size()) + " text module(s) to " + savePathForTests_, false);
+                return true;
+            }
+            const fs::path path = fs::path(data.path());
+            fs::path backup = path;
+            backup += ".rasaedit-original";
+            std::error_code ec;
+            if (!fs::exists(backup, ec)) fs::copy_file(path, backup, ec);
+            if (ec) throw tr::FormatError("cannot keep the original as " + backup.string() + ": " + ec.message());
+            fs::path temp = path;
+            temp += ".rasaedit-new";
+            tr::writeZip(archive, temp.string(), replace, remove);
+            { tr::ZipArchive check(temp.string()); }              // reads back (a broken write throws here, before the swap)
+            fs::rename(temp, path, ec);
+            if (ec) throw tr::FormatError("cannot replace " + path.string() + " (is the game running?): " + ec.message());
+            data.reloadArchive(updated);
+            edited_.clear();
+            savedVersion_ = version_;
+            scanModules();
+            rowsDirty_ = true;
+            ctx_.setStatus("Saved " + std::to_string(updated.size()) + " text module(s) to " + path.filename().string(), false);
+            return true;
+        }
+
+        // The patch zip (default): data/rasaedit_text.zip, which tabula_rasa.cfg's [Data] puts on Python's path before game.zip
+        // (trmain.GetDataPaths; VERIFIED in game 2026-10-19, CLAUDE.md "A separate Python patch zip works"). Python 2.4 binds a package
+        // to the first path entry that has it, so every package level the patch holds gets an __init__.py that adds the same folder
+        // of game.zip to the package's path - modules the patch lacks still load from game.zip. game.zip is not touched.
+        const fs::path patch = savePathForTests_.empty() ? fs::path(patchZipPath()) : fs::path(savePathForTests_);
+        const std::string gameName = fs::path(data.path()).filename().string();
+        const std::string forward = "__path__.append(__path__[0].replace('" + std::string(kTextPatchName) + "', '" + gameName + "'))\n";
+        std::map<std::string, tr::Bytes> replace;
+        for (const auto& [stem, source] : sources) {
+            if (lowerAscii(stem).rfind("generated/", 0) != 0) throw tr::FormatError(stem + " is not under generated/");
+            replace[stem + ".py"] = tr::Bytes(source.begin(), source.end());
+            for (size_t slash = stem.find('/'); slash != std::string::npos; slash = stem.find('/', slash + 1))
+                replace[stem.substr(0, slash) + "/__init__.py"] = tr::Bytes(forward.begin(), forward.end());
+        }
+        std::error_code ec;
+        fs::path temp = patch;
+        temp += ".rasaedit-new";
+        if (fs::exists(patch, ec)) {
+            tr::ZipArchive existing(patch.string());
+            std::vector<std::string> remove;                      // a compiled copy in the patch would be taken first
+            for (const auto& [stem, source] : sources)
+                for (const tr::ZipEntry& z : existing.entries())
+                    if (lowerAscii(z.name) == lowerAscii(stem + ".pyo") || lowerAscii(z.name) == lowerAscii(stem + ".pyc")) remove.push_back(z.name);
+            tr::writeZip(existing, temp.string(), replace, remove);
+        } else {
+            tr::writeZip(temp.string(), replace);
+        }
+        { tr::ZipArchive check(temp.string()); }
+        fs::rename(temp, patch, ec);
+        if (ec) throw tr::FormatError("cannot replace " + patch.string() + " (is the game running?): " + ec.message());
         if (!savePathForTests_.empty()) {
-            tr::writeZip(archive, savePathForTests_, replace, remove);
             savedVersion_ = version_;
             ctx_.setStatus("Saved " + std::to_string(updated.size()) + " text module(s) to " + savePathForTests_, false);
             return true;
         }
-        const fs::path path(data.path());
-        fs::path backup = path;
-        backup += ".rasaedit-original";
-        std::error_code ec;
-        if (!fs::exists(backup, ec)) fs::copy_file(path, backup, ec);
-        if (ec) throw tr::FormatError("cannot keep the original as " + backup.string() + ": " + ec.message());
-        fs::path temp = path;
-        temp += ".rasaedit-new";
-        tr::writeZip(archive, temp.string(), replace, remove);
-        { tr::ZipArchive check(temp.string()); }              // reads back (a broken write throws here, before the swap)
-        fs::rename(temp, path, ec);
-        if (ec) throw tr::FormatError("cannot replace " + path.string() + " (is the game running?): " + ec.message());
-        data.reloadArchive(updated);
+        std::string registered;
+        if (ctx_.assets && !gamecfg::entryFirst(ctx_.assets->root(), "Data", kTextPatchName)) {
+            const fs::path relative = fs::relative(patch, fs::path(ctx_.assets->root()), ec);
+            registered = "; " + gamecfg::registerFirst(ctx_.assets->root(), "Data", "AAA_RasaEditText",
+                                                      ec || relative.empty() ? patch.generic_string() : relative.generic_string(),
+                                                      kTextPatchName);
+        }
+        std::vector<std::string> paths{patch.string()};
+        for (const std::string& path : data.archivePaths())
+            if (fs::path(path) != patch) paths.push_back(path);
+        data.reloadArchives(paths, updated);
         edited_.clear();
         savedVersion_ = version_;
         scanModules();
         rowsDirty_ = true;
-        ctx_.setStatus("Saved " + std::to_string(updated.size()) + " text module(s) to " + path.filename().string(), false);
+        ctx_.setStatus("Saved " + std::to_string(updated.size()) + " text module(s) to " + patch.filename().string() + registered, false);
         return true;
     } catch (const std::exception& e) {
         ctx_.setStatus(std::string("Text save failed: ") + e.what(), true);

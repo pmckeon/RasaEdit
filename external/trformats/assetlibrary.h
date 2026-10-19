@@ -105,6 +105,10 @@ public:
     std::string terrainArchivePath(const std::string& mapName) const; // "" for interior-only maps
     std::string radarArchivePath(const std::string& mapName) const;   // "" if absent
     std::string gameDataPath() const;                                 // [Data] GameData, absolute
+    // Every [Data] entry that exists, absolute, in the order the client puts them on Python's path (trmain.GetDataPaths,
+    // FUN_00405480: the section's keys in configKeyOrder) - a patch zip before game.zip; the game data archive (GameData) last if it
+    // is not already in the list.
+    std::vector<std::string> gameDataPaths() const;
 
 private:
     std::string resolve(const std::string& relative) const;

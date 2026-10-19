@@ -1386,9 +1386,12 @@ int main() {
                 const auto realTime = fs::last_write_time(real);
                 const auto realSize = fs::file_size(real);
                 const std::string copy = (fs::temp_directory_path() / "rasaedit_smoke_game.zip").string();
+                const std::string saveSetting = ctx.setting("textSave");
+                ctx.setSetting("textSave", "game");               // the "Save to: game.zip (overwrite)" option
                 text.setSavePathForTests(copy);
                 const bool saved = text.saveChanges();
                 text.setSavePathForTests("");
+                ctx.setSetting("textSave", saveSetting);
                 bool readBack = false;
                 if (saved) {
                     tr::GameData reread(copy);
@@ -1396,7 +1399,7 @@ int main() {
                                reread.moduleEntryName(module).size() > 3 &&
                                reread.moduleEntryName(module).compare(reread.moduleEntryName(module).size() - 3, 3, ".py") == 0;
                 }
-                check(saved && readBack && !text.hasUnsavedChanges(), "text: saved to a copy of game.zip, read back as source");
+                check(saved && readBack && !text.hasUnsavedChanges(), "text: saved (Save to game.zip) to a copy of game.zip, read back as source");
                 check(fs::last_write_time(real) == realTime && fs::file_size(real) == realSize, "text: the game's own game.zip untouched");
                 text.revertChanges();
                 check(text.text(module, 737, 1, 0) == original, "text: reverted");
@@ -1444,13 +1447,38 @@ int main() {
                     check(pending, "mission texts: a new name / body text and the client references are pending in the Text workspace");
                     editor.setActive(editor.server_.get());
                     frames(editor, device, 2);                // the Missions panel draws with the pending edits
-                    const std::string copy = (fs::temp_directory_path() / "rasaedit_smoke_missiontext.zip").string();
+                    // Saved as the default does: into a patch zip (here a temporary file named as the real one), read back as the game
+                    // reads it - the patch first on the path, game.zip after.
+                    const fs::path patchFolder = fs::temp_directory_path() / "rasaedit_smoke_patch";
+                    fs::create_directories(patchFolder);
+                    const std::string copy = (patchFolder / TextWorkspace::kTextPatchName).string();
+                    fs::remove(copy);
+                    const std::string saveSetting = ctx.setting("textSave");
+                    ctx.setSetting("textSave", "patch");
                     text.setSavePathForTests(copy);
                     const bool saved = text.saveChanges();
                     text.setSavePathForTests("");
-                    bool readBack = false, stored = false;
+                    ctx.setSetting("textSave", saveSetting);
+                    bool readBack = false, stored = false, patchOnly = false, forwards = false, fromGame = false;
                     if (saved) {
-                        tr::GameData reread(copy);
+                        tr::GameData reread(std::vector<std::string>{copy, ctx.gameData->path()});
+                        // Only the edited modules and the package __init__ files, each forwarding to game.zip's package.
+                        tr::ZipArchive patchZip(copy);
+                        patchOnly = !patchZip.entries().empty();
+                        forwards = true;
+                        for (const tr::ZipEntry& e : patchZip.entries()) {
+                            const bool init = e.name.size() > 12 && e.name.compare(e.name.size() - 12, 12, "/__init__.py") == 0;
+                            if (!init && e.name != reread.moduleEntryName(conv) && e.name != reread.moduleEntryName(objectives) &&
+                                e.name != reread.moduleEntryName("generated.client.language.english.missiontextlanguage"))
+                                patchOnly = false;
+                            if (init) {
+                                const tr::Bytes body = patchZip.read(e);
+                                forwards = forwards && std::string(body.begin(), body.end()) ==
+                                                           "__path__.append(__path__[0].replace('rasaedit_text.zip', 'game.zip'))\n";
+                            }
+                        }
+                        fromGame = reread.moduleArchivePath(conv) == copy &&
+                                   reread.moduleArchivePath("generated.client.language.english.uielementlanguage") == ctx.gameData->path();
                         const tr::py::Object* objective = tr::py::item(tr::py::dictGetTuple(reread.global(objectives, "lookup"), {300, 2}), 0);
                         readBack = reread.missionText(int32_t(fresh), 1) == "Smoke mission name" &&
                                    tr::py::asInt(tr::py::item(tr::py::dictGetTuple(reread.global(conv, "lookup"), {300, 1}), 0)) == fresh &&
@@ -1460,8 +1488,10 @@ int main() {
                         stored = true;
                         for (const tr::ZipEntry& e : zip.entries()) stored = stored && e.method == 0;
                     }
-                    check(saved && readBack, "mission texts: saved to a copy of game.zip - the client tables and texts read back");
-                    check(stored, "mission texts: every game.zip entry stored (the client's Python has no zlib)");
+                    check(saved && readBack, "mission texts: saved to the patch zip - the client tables and texts read back over game.zip");
+                    check(stored, "mission texts: every patch zip entry stored (the client's Python has no zlib)");
+                    check(patchOnly && forwards, "mission texts: the patch holds only the edited modules and forwarding package __init__ files");
+                    check(fromGame, "mission texts: edited modules come from the patch, the others from game.zip");
                     text.undo();
                     check(text.missionText(fresh).empty() &&
                               tr::py::asInt(tr::py::item(tr::py::dictGetTuple(text.currentLookup(conv), {300, 1}), 0)) != fresh,
