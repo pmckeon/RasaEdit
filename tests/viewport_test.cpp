@@ -576,6 +576,117 @@ int main(int argc, char** argv) {
                 std::printf("pkg %s: %s\n", pkg, e.what());
             }
         }
+        // RASA_CFGKEYTEST=<empty folder>: the archives in the order the game takes them (tr::configKeyOrder: the first wins), then
+        // registerPatchArchive on a copy of the stock tabula_rasa.cfg (tabula_rasa.cfg.rasaedit-original) in that folder: added, then a
+        // losing key (AAA_RasaEdit) renamed; each time the patch key must be taken first and the other lines unchanged.
+        if (const char* folder = envValue("RASA_CFGKEYTEST")) {
+            for (size_t k = 0; k < assets.archives().size(); ++k)
+                std::printf("cfg order %zu: %s\n", k, assets.archives()[k].configKey.c_str());
+            namespace fs = std::filesystem;
+            const fs::path dir = fs::u8path(folder), cfg = dir / "tabula_rasa.cfg";
+            fs::create_directories(dir);
+            fs::copy_file(fs::u8path(argv[1]) / "tabula_rasa.cfg.rasaedit-original", cfg, fs::copy_options::overwrite_existing);
+            auto keyLines = [&]() {
+                std::ifstream in(cfg);
+                std::vector<std::string> lines;
+                for (std::string l; std::getline(in, l);) lines.push_back(l);
+                return lines;
+            };
+            const std::vector<std::string> before = keyLines();
+            std::printf("cfg test: %s\n", registerPatchArchive(dir.string()).c_str());
+            std::printf("cfg test: key %s, taken first %s, %zu -> %zu lines\n", patchArchiveKey(dir.string()).c_str(),
+                        patchArchiveWins(dir.string()) ? "yes" : "NO", before.size(), keyLines().size());
+            // A losing key: rewrite the line to AAA_RasaEdit (taken after Mesh10 with the stock keys).
+            {
+                std::vector<std::string> lines = keyLines();
+                for (std::string& l : lines)
+                    if (l.find("rasaedit_patch.glm") != std::string::npos) l = "AAA_RasaEdit = \"data/rasaedit_patch.glm\"";
+                std::ofstream out(cfg, std::ios::binary);
+                for (const std::string& l : lines) out << l << "\n";
+            }
+            std::printf("cfg test: AAA_RasaEdit taken first %s\n", patchArchiveWins(dir.string()) ? "yes" : "no");
+            std::printf("cfg test: %s\n", registerPatchArchive(dir.string()).c_str());
+            const std::vector<std::string> after = keyLines();
+            size_t changed = 0;
+            for (size_t i = 0; i < std::min(before.size(), after.size()); ++i) changed += before[i] != after[i];
+            std::printf("cfg test: key %s, taken first %s, lines %zu (stock %zu), %zu line(s) differ from the stock file\n",
+                        patchArchiveKey(dir.string()).c_str(), patchArchiveWins(dir.string()) ? "yes" : "NO", after.size(), before.size(),
+                        changed);
+        }
+        // RASA_WSSURVEY=1: per bone volume kind, whether the model's property group with id = that bone's index names a WSName (the
+        // client's WalkableSurfaceManager::AddWalkableSurfaces, FUN_00925590 / FUN_00940840, looks it up that way), and which property
+        // groups name a WSName on a bone without a volume.
+        if (envValue("RASA_WSSURVEY")) {
+            std::map<std::string, size_t> counts;
+            std::map<std::string, std::string> windings;
+            size_t windingSamples = 0, totalOut = 0, totalTris = 0;
+            double slopeBins[4] = {0, 0, 0, 0};
+            for (const std::string& name : assets.namesWithExtension(".geo")) {
+                tr::GeoFile file;
+                try { file = tr::readGeoFile(assets.read(name)); } catch (const std::exception&) { continue; }
+                auto wsName = [&](int32_t bone) -> const tr::GeoParameter* {
+                    for (const tr::GeoPropertyGroup& g : file.properties)
+                        if (g.id == bone)
+                            for (const tr::GeoParameter& p : g.pairs)
+                                if (p.key == "WSName") return &p;
+                    return nullptr;
+                };
+                for (size_t b = 0; b < file.bones.size(); ++b) {
+                    const tr::GeoFileBone& bone = file.bones[b];
+                    std::string kinds;
+                    try {
+                        for (const tr::GeoBoneVolume& v : tr::readBoneVolumes(bone.boundingVolume)) kinds += tr::tagName(v.kind) + " ";
+                    } catch (const std::exception&) { kinds = "unreadable "; }
+                    const tr::GeoParameter* ws = wsName(int32_t(b));
+                    if (kinds.empty() && !ws) continue;
+                    const std::string key = (kinds.empty() ? std::string("no volume ") : kinds) + (ws ? "with WSName" : "without WSName");
+                    if (++counts[key] <= 3 || name.find(envValue("RASA_WSSURVEY")) != std::string::npos)
+                        std::printf("ws %s: bone %zu %s: %s%s\n", name.c_str(), b, bone.name.c_str(), key.c_str(),
+                                    ws ? (" = " + ws->value).c_str() : "");
+                    // Winding of closed-ish surfaces: triangles whose (b - a) x (c - a) points away from the surface's centre.
+                    try {
+                        for (const tr::GeoBoneVolume& v : tr::readBoneVolumes(bone.boundingVolume)) {
+                            if (v.kind != tr::fourcc("BVWS") || v.vertices.empty()) continue;
+                            tr::Vec3 c{};
+                            for (const tr::Vec3& p : v.vertices) c = tr::Vec3{c.x + p.x, c.y + p.y, c.z + p.z};
+                            const float n = float(v.vertices.size());
+                            c = tr::Vec3{c.x / n, c.y / n, c.z / n};
+                            size_t out = 0, tris = v.indices.size() / 3, up = 0;
+                            for (size_t t = 0; t < tris; ++t) {
+                                const tr::Vec3 &a = v.vertices[v.indices[3 * t]], &bb = v.vertices[v.indices[3 * t + 1]],
+                                               &cc = v.vertices[v.indices[3 * t + 2]];
+                                const tr::Vec3 e1{bb.x - a.x, bb.y - a.y, bb.z - a.z}, e2{cc.x - a.x, cc.y - a.y, cc.z - a.z};
+                                const tr::Vec3 nn{e1.y * e2.z - e1.z * e2.y, e1.z * e2.x - e1.x * e2.z, e1.x * e2.y - e1.y * e2.x};
+                                const tr::Vec3 m{(a.x + bb.x + cc.x) / 3 - c.x, (a.y + bb.y + cc.y) / 3 - c.y, (a.z + bb.z + cc.z) / 3 - c.z};
+                                out += nn.x * m.x + nn.y * m.y + nn.z * m.z > 0;
+                                up += nn.y > 0;
+                                const float len = std::sqrt(nn.x * nn.x + nn.y * nn.y + nn.z * nn.z);
+                                if (len > 0) {
+                                    const float ny = nn.y / len;
+                                    const size_t bin = ny > 0.7f ? 0 : ny > 0.3f ? 1 : ny > -0.3f ? 2 : 3;
+                                    slopeBins[bin] += 1;
+                                }
+                            }
+                            windings[name.find(envValue("RASA_WSSURVEY")) != std::string::npos ? name : std::string("(all shipped)")] +=
+                                std::to_string(out) + "/" + std::to_string(tris) + " out, " + std::to_string(up) + " up; ";
+                            if (++windingSamples <= 8)
+                                std::printf("ws winding %s: %zu of %zu triangles face away from the centre, %zu face up\n", name.c_str(), out, tris, up);
+                            totalOut += out;
+                            totalTris += tris;
+                        }
+                    } catch (const std::exception&) {}
+                }
+                for (const tr::GeoPropertyGroup& g : file.properties)
+                    for (const tr::GeoParameter& p : g.pairs)
+                        if (p.key == "WSName" && (g.id < 0 || size_t(g.id) >= file.bones.size())) ++counts["WSName on a missing bone"];
+            }
+            for (const auto& c : counts) std::printf("ws survey: %s: %zu\n", c.first.c_str(), c.second);
+            std::printf("ws winding: %zu of %zu surface triangles face away from their surface centre\n", totalOut, totalTris);
+            std::printf("ws slopes: normal y > 0.7 (floor) %.0f, 0.3..0.7 %.0f, -0.3..0.3 (wall) %.0f, below %.0f\n", slopeBins[0], slopeBins[1],
+                        slopeBins[2], slopeBins[3]);
+            for (const auto& w : windings)
+                if (w.first != "(all shipped)") std::printf("ws winding %s: %s\n", w.first.c_str(), w.second.c_str());
+        }
         // RASA_GEOROUNDTRIP=1: every .geo read with tr::readGeoFile and written back must be byte-identical, and decodeGeoFile must
         // give what readGeo gives (piece / vertex / bone counts).
         if (envValue("RASA_GEOROUNDTRIP")) {
@@ -795,16 +906,34 @@ int main(int argc, char** argv) {
                 for (const std::string& w : result.warnings) std::printf("gltf import warning: %s\n", w.c_str());
                 // RASA_GLTFPATCH=1: the imported files into the game's patch archive (data/rasaedit_patch.glm), registered in
                 // tabula_rasa.cfg - what the Blender panel's two buttons do. Changes the game folder.
-                if (envValue("RASA_GLTFPATCH") && !result.files.empty()) {
-                    std::printf("patch archive: %s\n", addToPatchArchive(argv[1], result.files, &assets).c_str());
+                // RASA_GLTFPATCHONLY=<.ext,.ext>: only the imported files with those extensions (e.g. just the edited .mkr / .anm,
+                // leaving the rebuilt model out of the archive).
+                std::vector<ImportedFile> toPatch;
+                for (const ImportedFile& f : result.files) {
+                    const char* only = envValue("RASA_GLTFPATCHONLY");
+                    if (!only) {
+                        toPatch.push_back(f);
+                        continue;
+                    }
+                    std::stringstream list(only);
+                    for (std::string ext; std::getline(list, ext, ',');)
+                        if (!ext.empty() && f.name.size() >= ext.size() &&
+                            tr::toLowerAscii(f.name.substr(f.name.size() - ext.size())) == tr::toLowerAscii(ext)) {
+                            toPatch.push_back(f);
+                            break;
+                        }
+                }
+                if (envValue("RASA_GLTFPATCH") && !toPatch.empty()) {
+                    for (const ImportedFile& f : toPatch) std::printf("patch archive: adding %s\n", f.name.c_str());
+                    std::printf("patch archive: %s\n", addToPatchArchive(argv[1], toPatch, &assets).c_str());
                     std::printf("tabula_rasa.cfg: %s\n", registerPatchArchive(argv[1]).c_str());
                     // The library re-mounted the archive: reads in this process see the new files.
                     size_t same = 0;
-                    for (const ImportedFile& f : result.files) {
+                    for (const ImportedFile& f : toPatch) {
                         tr::Bytes back;
                         same += assets.tryRead(f.name, back) && back == f.data ? 1 : 0;
                     }
-                    std::printf("patch archive: %zu of %zu files read back equal in this session\n", same, result.files.size());
+                    std::printf("patch archive: %zu of %zu files read back equal in this session\n", same, toPatch.size());
                 }
                 if (const char* dump = envValue("RASA_GLTFIMPORTDIR"))
                     for (const ImportedFile& f : result.files) {
@@ -1038,8 +1167,49 @@ int main(int argc, char** argv) {
                 const tr::MapEntity& e = map.map.entities[k];
                 const float dx = e.location.x - x, dz = e.location.z - z;
                 if (dx * dx + dz * dz > radius * radius) continue;
-                std::printf("near %zu %s at %.1f %.1f %.1f scale %.2f orientation %.3f %.3f %.3f %.3f\n", k, data.classMeshName(e.classId).c_str(), e.location.x,
-                            e.location.y, e.location.z, e.scale, e.orientation.x, e.orientation.y, e.orientation.z, e.orientation.w);
+                std::printf("near %zu %s at %.1f %.1f %.1f scale %.2f orientation %.3f %.3f %.3f %.3f flags 0x%x\n", k, data.classMeshName(e.classId).c_str(), e.location.x,
+                            e.location.y, e.location.z, e.scale, e.orientation.x, e.orientation.y, e.orientation.z, e.orientation.w,
+                            unsigned(e.flags));
+                // The map's generated collision for it (gamemap.py _LoadGeneratedABVs1 -> body.GenerateCollisionBody(shape, extents)).
+                for (const tr::MapGeneratedAbv& a : map.map.generatedAbvs)
+                    if (a.entityId == e.entityId)
+                        std::printf("     generated ABV shape %u extents %.3f %.3f %.3f\n", unsigned(a.shape), a.extents.x, a.extents.y, a.extents.z);
+            }
+        }
+        // RASA_FLAGSURVEY=1: the map entities' .map flags (gamemap.py passes them to World::AddToWorld, FUN_00543940: bit 0 -> no
+        // collision-manager body, bit 1 -> no walkable surfaces) against whether their model has a walkable surface (BVWS) - per flags
+        // value, how many entities, with example meshes.
+        if (envValue("RASA_FLAGSURVEY")) {
+            std::map<std::string, bool> hasSurface;
+            auto surfaceOf = [&](const std::string& mesh) {
+                auto it = hasSurface.find(mesh);
+                if (it != hasSurface.end()) return it->second;
+                bool found = false;
+                try {
+                    for (const tr::GeoFileBone& b : tr::readGeoFile(assets.read(mesh)).bones)
+                        for (const tr::GeoBoneVolume& v : tr::readBoneVolumes(b.boundingVolume)) found = found || v.kind == tr::fourcc("BVWS");
+                } catch (const std::exception&) {}
+                return hasSurface[mesh] = found;
+            };
+            std::map<std::pair<int32_t, bool>, std::pair<size_t, std::set<std::string>>> counts;
+            std::map<uint64_t, size_t> abvs;
+            for (const tr::MapGeneratedAbv& a : map.map.generatedAbvs) ++abvs[a.entityId];
+            std::map<std::string, size_t> abvMeshes;
+            for (const tr::MapEntity& e : map.map.entities)
+                if (abvs.count(e.entityId)) ++abvMeshes[data.classMeshName(e.classId)];
+            std::printf("flags: %zu generated ABVs on %zu entities\n", map.map.generatedAbvs.size(), abvs.size());
+            for (const auto& m : abvMeshes) std::printf("flags abv mesh %4zu %s%s\n", m.second, m.first.c_str(), surfaceOf(m.first) ? " (has BVWS)" : "");
+            for (const tr::MapEntity& e : map.map.entities) {
+                const std::string mesh = data.classMeshName(e.classId);
+                if (mesh.empty()) continue;
+                auto& c = counts[{e.flags, surfaceOf(mesh)}];
+                ++c.first;
+                if (c.second.size() < 4) c.second.insert(mesh);
+            }
+            for (const auto& c : counts) {
+                std::printf("flags 0x%x %s: %zu entities, e.g.", unsigned(c.first.first), c.first.second ? "with BVWS" : "no BVWS", c.second.first);
+                for (const std::string& m : c.second.second) std::printf(" %s", m.c_str());
+                std::printf("\n");
             }
         }
         // RASA_FADEDUMP=<multiplier>: per map entity the game's distance fade (tabula_rasa.exe FUN_00856c00, see CLAUDE.md

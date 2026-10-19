@@ -85,16 +85,20 @@ ModelImportResult importModelGltf(tr::AssetLibrary& assets, const std::string& p
 void computeTangentFrames(const std::vector<tr::Vec3>& positions, const std::vector<tr::Vec3>& normals, const std::vector<tr::Vec2>& uvs,
                           const std::vector<uint32_t>& indices, std::vector<tr::Vec3>& tangents, std::vector<tr::Vec3>& binormals);
 
-// The patch archive (verified mechanism, CLAUDE.md "How client changes reach the game"): data/rasaedit_patch.glm, registered in
-// tabula_rasa.cfg [Paths] as AAA_RasaEdit (sorts before every shipped key, so its files win). addToPatchArchive merges the files
-// into the archive (replacing entries of the same name); registerPatchArchive adds the [Paths] line once (first save keeps
-// tabula_rasa.cfg.rasaedit-original). Both return a description of what they did.
+// The patch archive (verified mechanism, CLAUDE.md "How client changes reach the game" / "Which archive wins"): data/rasaedit_patch.glm,
+// named in tabula_rasa.cfg [Paths] under a key the game takes before every other one (tr::configKeyOrder - the game's hash order, first
+// key wins; e.g. AAA_RasaEdit39 with the stock keys), so its files replace the shipped ones. addToPatchArchive merges the files into the
+// archive (replacing entries of the same name); registerPatchArchive adds the [Paths] line, or renames its key when another key would
+// be taken first (first change keeps tabula_rasa.cfg.rasaedit-original). Both return a description of what they did. patchArchiveKey:
+// the [Paths] key naming the archive ("" if none); patchArchiveWins: that key is taken first.
 std::string patchArchivePath(const std::string& gameRoot);
 // `library`: the editor's asset library, which has the archive mounted once tabula_rasa.cfg names it - it is released for the
 // rewrite and mounted again (tr::AssetLibrary::rewriteArchive), so a second add in one session works and reads see the new files.
 std::string addToPatchArchive(const std::string& gameRoot, const std::vector<ImportedFile>& files, tr::AssetLibrary* library = nullptr);
 std::string registerPatchArchive(const std::string& gameRoot);
 bool patchArchiveRegistered(const std::string& gameRoot);
+std::string patchArchiveKey(const std::string& gameRoot);
+bool patchArchiveWins(const std::string& gameRoot);
 
 // The animations a model plays: its `anim` property (the object animation the engine plays), X.anm for X.geo when present, and
 // (for avatar skeletons) none - creatures' animations come from animationdata families, chosen by the caller.

@@ -91,8 +91,8 @@ class RASAEDIT_OT_make_collision(bpy.types.Operator):
         ('HULL', "Convex hull", "The smallest convex shape around the selection (a walkable surface)"),
         ('COPY', "Copy", "The selection's own triangles (a walkable surface)"),
         ('SIMPLE', "Simplified copy", "The selection's triangles, reduced (a walkable surface)"),
-        ('BOX', "Box", "A box around the selection, in the bone's frame"),
-        ('SPHERE', "Sphere", "A sphere around the selection")])
+        ('BOX', "Box", "A box volume (BVBX). The player does NOT collide with it on a map object - only scripted bodies such as doors use boxes"),
+        ('SPHERE', "Sphere", "A sphere volume (BVSP). The player does NOT collide with it on a map object")])
     ratio: FloatProperty(name="Keep", default=0.25, min=0.01, max=1.0, subtype='FACTOR', description="Share of triangles a simplified copy keeps")
     bone: EnumProperty(name="Bone", items=bone_items)
 
@@ -172,8 +172,8 @@ class RASAEDIT_OT_mark_collision(bpy.types.Operator):
 
     kind: EnumProperty(name="Kind", items=[
         ('surface', "Walkable surface", "The mesh as it is"),
-        ('box', "Box", "RasaEdit fits the axis-aligned box around it in the bone's frame"),
-        ('sphere', "Sphere", "RasaEdit fits the sphere around it")])
+        ('box', "Box", "RasaEdit fits the axis-aligned box around it in the bone's frame (not collided with on a map object)"),
+        ('sphere', "Sphere", "RasaEdit fits the sphere around it (not collided with on a map object)")])
     bone: EnumProperty(name="Bone", items=bone_items)
 
     @classmethod

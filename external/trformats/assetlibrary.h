@@ -41,6 +41,15 @@ private:
     std::vector<std::pair<std::string, std::vector<Item>>> sections_;
 };
 
+// The order tabula_rasa.exe takes a tabula_rasa.cfg section's keys in (traced 2026-10-19, CLAUDE.md "Which archive wins"): a VC8
+// stdext hash table - djb2 of the lower-cased key (FUN_007086b0), linear-hashing buckets that grow at 4 keys per bucket (a split moves
+// keys to the new, last bucket), each bucket sorted case-insensitively; the keys come out bucket by bucket. The game queues archives
+// in this order, mounts them in reverse and uses a name's last-mounted entry, so for a file in several archives the FIRST key here
+// wins. A repeated key keeps one place (its last value, FUN_00478430). Verified in game: AAA_RasaEdit beat Mesh03 / Animation02 /
+// Texture03 but not Mesh10; AAA_RasaEdit39 beats every stock key.
+std::vector<std::string> configKeyOrder(const std::vector<std::string>& keys);
+uint32_t configKeyHash(const std::string& key);
+
 struct AssetLocation {
     bool inArchive = false;
     uint32_t archiveIndex = 0;            // into AssetLibrary::archives()

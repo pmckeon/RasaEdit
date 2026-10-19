@@ -337,18 +337,25 @@ void BlenderPanel::drawPatchArchive(EditorContext& ctx) {
             ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "unreadable: %s", e.what());
         }
     }
-    if (registered) {
-        ImGui::TextColored(ImVec4(0.5f, 0.9f, 0.5f, 1.0f), "tabula_rasa.cfg names it ([Paths] AAA_RasaEdit): the game loads its files first.");
+    const bool wins = registered && patchArchiveWins(ctx.gameRoot);
+    if (wins) {
+        ImGui::TextColored(ImVec4(0.5f, 0.9f, 0.5f, 1.0f), "tabula_rasa.cfg names it ([Paths] %s), taken first: its files replace the game's.",
+                           patchArchiveKey(ctx.gameRoot).c_str());
     } else {
-        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "tabula_rasa.cfg does not name it yet - the game ignores it.");
-        if (ImGui::Button("Add it to tabula_rasa.cfg")) {
+        if (registered)
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "tabula_rasa.cfg names it as %s, but the game takes other archives first - files "
+                               "they also hold (e.g. map models in mesh10.glm) are not replaced.", patchArchiveKey(ctx.gameRoot).c_str());
+        else
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "tabula_rasa.cfg does not name it yet - the game ignores it.");
+        if (ImGui::Button(registered ? "Fix its key in tabula_rasa.cfg" : "Add it to tabula_rasa.cfg")) {
             try {
                 ctx.setStatus(registerPatchArchive(ctx.gameRoot), false);
             } catch (const std::exception& e) {
                 ctx.setStatus(std::string("Changing tabula_rasa.cfg failed: ") + e.what(), true);
             }
         }
-        ImGui::SetItemTooltip("Adds AAA_RasaEdit = \"data/rasaedit_patch.glm\" under [Paths] (the key sorts before every shipped one, so its "
-                              "files win). The first change keeps tabula_rasa.cfg.rasaedit-original.");
+        ImGui::SetItemTooltip("Names data/rasaedit_patch.glm under [Paths] with a key the game takes before every other one (the game reads "
+                              "the keys in its own hash order, not alphabetically). The first change keeps tabula_rasa.cfg.rasaedit-original. "
+                              "Restart the game afterwards.");
     }
 }

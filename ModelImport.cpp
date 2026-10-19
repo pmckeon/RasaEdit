@@ -1281,6 +1281,41 @@ ModelImportResult importModelGltf(tr::AssetLibrary& assets, const std::string& p
                     if (lower(sb.name) == lower(b.name) && !sb.boundingVolume.empty() && b.boundingVolume.empty()) ++lost;
             if (lost) warn(std::to_string(lost) + " changed bone(s) lost their collision (the file has no collision meshes)");
         }
+        // What the client collides with (tabula_rasa.exe, traced 2026-10-19): WalkableSurfaceManager::AddWalkableSurfaces (FUN_00925590)
+        // takes only bone volumes of type 5 = phyBVWalkableSurface (BVWS; box 2, sphere 1 are not walked on or blocked by) and needs
+        // the bone's WSName - the property group whose id is the bone's index (FUN_00940840) - else "Walkable Surface on entity has no
+        // name!" and none of the entity's surfaces are added. All 3,712 shipped BVWS carry one ("collision" in every model); give a
+        // bone that has a surface and no name one.
+        size_t named = 0, boxes = 0;
+        for (size_t b = 0; b < out.bones.size(); ++b) {
+            if (out.bones[b].boundingVolume.empty()) continue;
+            bool surface = false;
+            try {
+                for (const tr::GeoBoneVolume& v : tr::readBoneVolumes(out.bones[b].boundingVolume)) {
+                    surface = surface || v.kind == tr::fourcc("BVWS");
+                    boxes += v.kind == tr::fourcc("BVBX") || v.kind == tr::fourcc("BVSP");
+                }
+            } catch (const std::exception&) { continue; }
+            if (!surface) continue;
+            tr::GeoPropertyGroup* group = nullptr;
+            bool hasName = false;
+            for (tr::GeoPropertyGroup& g : out.properties)
+                if (g.id == int32_t(b)) {
+                    group = group ? group : &g;
+                    for (const tr::GeoParameter& p : g.pairs) hasName = hasName || p.key == "WSName";
+                }
+            if (hasName) continue;
+            if (!group) {
+                out.properties.push_back(tr::GeoPropertyGroup{int32_t(b), {}});
+                group = &out.properties.back();
+            }
+            group->pairs.push_back(tr::GeoParameter{"WSName", "collision"});
+            ++named;
+        }
+        if (named) collisionNote += (collisionNote.empty() ? "" : ", ") + std::to_string(named) + " collision bone(s) given WSName \"collision\"";
+        if (boxes)
+            warn(std::to_string(boxes) + " box / sphere collision volume(s): the client does not walk on or collide with these on a map "
+                 "object (only walkable surfaces, BVWS, count) - make the collision a mesh (surface / convex hull) to block the player");
     }
 
     // ---- contact points ----
@@ -1648,6 +1683,7 @@ std::string addToPatchArchive(const std::string& gameRoot, const std::vector<Imp
         tr::GlmSource s;
         s.name = f.name;
         s.data = f.data;
+        s.compress = tr::glmShippedCompressed(f.name);   // stored like the shipped files (a compressed static model was ignored)
         sources.push_back(std::move(s));
     }
     size_t kept = 0;
@@ -1660,6 +1696,7 @@ std::string addToPatchArchive(const std::string& gameRoot, const std::vector<Imp
             s.name = e.name;
             s.data = existing.read(e);
             s.timestamp = e.timestamp;
+            s.compress = tr::glmShippedCompressed(e.name);
             sources.push_back(std::move(s));
             ++kept;
         }
@@ -1672,58 +1709,128 @@ std::string addToPatchArchive(const std::string& gameRoot, const std::vector<Imp
 
 namespace {
 
-const char* kPatchKey = "AAA_RasaEdit";
+// tabula_rasa.cfg's [Paths] lines: key, value, byte offset of the line and its length without the end of line.
+struct CfgLine {
+    std::string key;
+    std::string value;
+    size_t at = 0;
+    size_t length = 0;
+};
 
-}  // namespace
-
-bool patchArchiveRegistered(const std::string& gameRoot) {
-    std::ifstream in(fs::u8path(gameRoot) / "tabula_rasa.cfg");
-    std::string line;
+std::vector<CfgLine> pathsLines(const std::string& text, size_t* headerEnd = nullptr) {
+    std::vector<CfgLine> lines;
     bool inPaths = false;
-    while (std::getline(in, line)) {
-        std::string t = line;
-        t.erase(0, t.find_first_not_of(" \t"));
-        if (!t.empty() && t[0] == '[') inPaths = lower(t).rfind("[paths]", 0) == 0;
-        else if (inPaths && lower(t).rfind(lower(kPatchKey), 0) == 0) return true;
-    }
-    return false;
-}
-
-std::string registerPatchArchive(const std::string& gameRoot) {
-    if (patchArchiveRegistered(gameRoot)) return "tabula_rasa.cfg already names the patch archive";
-    const fs::path cfg = fs::u8path(gameRoot) / "tabula_rasa.cfg";
-    const tr::Bytes original = readAll(cfg);
-    std::string textIn(original.begin(), original.end());
-    const bool crlf = textIn.find("\r\n") != std::string::npos;
-    const std::string eol = crlf ? "\r\n" : "\n";
-    // Insert right after the [Paths] header (the game sorts keys alphabetically, the editor too; first is just tidy).
-    size_t at = std::string::npos;
-    for (size_t p = 0; p < textIn.size();) {
-        size_t end = textIn.find('\n', p);
-        if (end == std::string::npos) end = textIn.size();
-        std::string line = textIn.substr(p, end - p);
+    for (size_t p = 0; p < text.size();) {
+        size_t end = text.find('\n', p);
+        if (end == std::string::npos) end = text.size();
+        std::string line = text.substr(p, end - p);
         if (!line.empty() && line.back() == '\r') line.pop_back();
         std::string t = line;
-        t.erase(0, t.find_first_not_of(" \t"));
-        if (lower(t).rfind("[paths]", 0) == 0) {
-            at = end < textIn.size() ? end + 1 : end;
-            break;
+        t.erase(0, std::min(t.size(), t.find_first_not_of(" \t")));
+        if (!t.empty() && t[0] == '[') {
+            inPaths = lower(t).rfind("[paths]", 0) == 0;
+            if (inPaths && headerEnd) *headerEnd = end < text.size() ? end + 1 : end;
+        } else if (inPaths && !t.empty() && t[0] != ';' && t[0] != '#') {
+            const size_t eq = t.find('=');
+            if (eq != std::string::npos) {
+                CfgLine l;
+                l.key = t.substr(0, eq);
+                l.key.erase(l.key.find_last_not_of(" \t") + 1);
+                l.value = t.substr(eq + 1);
+                l.at = p;
+                l.length = line.size();
+                lines.push_back(l);
+            }
         }
         p = end + 1;
     }
-    if (at == std::string::npos) throw tr::FormatError("tabula_rasa.cfg has no [Paths] section");
-    std::string line = std::string(kPatchKey) + " = \"data/rasaedit_patch.glm\"" + eol;
-    if (at == textIn.size() && !textIn.empty() && textIn.back() != '\n') line = eol + line;
-    textIn.insert(at, line);
+    return lines;
+}
+
+bool namesPatchArchive(const CfgLine& l) { return lower(l.value).find("rasaedit_patch.glm") != std::string::npos; }
+
+std::string readText(const fs::path& path) {
+    const tr::Bytes bytes = readAll(path);
+    return std::string(bytes.begin(), bytes.end());
+}
+
+// A key the game takes before every other [Paths] key (tr::configKeyOrder): AAA_RasaEdit, else AAA_RasaEdit1, 2, ...
+std::string winningPatchKey(const std::vector<CfgLine>& others) {
+    std::vector<std::string> keys;
+    for (const CfgLine& l : others) keys.push_back(l.key);
+    for (int n = 0; n < 100000; ++n) {
+        const std::string candidate = n ? "AAA_RasaEdit" + std::to_string(n) : std::string("AAA_RasaEdit");
+        std::vector<std::string> with = keys;
+        with.push_back(candidate);
+        if (tr::configKeyOrder(with).front() == candidate) return candidate;
+    }
+    throw tr::FormatError("no key found that the game would take first");
+}
+
+}  // namespace
+
+std::string patchArchiveKey(const std::string& gameRoot) {
+    std::error_code ec;
+    const fs::path cfg = fs::u8path(gameRoot) / "tabula_rasa.cfg";
+    if (!fs::exists(cfg, ec)) return {};
+    for (const CfgLine& l : pathsLines(readText(cfg)))
+        if (namesPatchArchive(l)) return l.key;
+    return {};
+}
+
+bool patchArchiveRegistered(const std::string& gameRoot) { return !patchArchiveKey(gameRoot).empty(); }
+
+bool patchArchiveWins(const std::string& gameRoot) {
+    std::error_code ec;
+    const fs::path cfg = fs::u8path(gameRoot) / "tabula_rasa.cfg";
+    if (!fs::exists(cfg, ec)) return false;
+    std::vector<std::string> keys;
+    std::string key;
+    for (const CfgLine& l : pathsLines(readText(cfg))) {
+        keys.push_back(l.key);
+        if (namesPatchArchive(l)) key = l.key;
+    }
+    return !key.empty() && lower(tr::configKeyOrder(keys).front()) == lower(key);
+}
+
+std::string registerPatchArchive(const std::string& gameRoot) {
+    if (patchArchiveWins(gameRoot))
+        return "tabula_rasa.cfg already names the patch archive (" + patchArchiveKey(gameRoot) + ", taken first)";
+    const fs::path cfg = fs::u8path(gameRoot) / "tabula_rasa.cfg";
+    std::string text = readText(cfg);
+    const std::string eol = text.find("\r\n") != std::string::npos ? "\r\n" : "\n";
+    size_t headerEnd = std::string::npos;
+    const std::vector<CfgLine> lines = pathsLines(text, &headerEnd);
+    if (headerEnd == std::string::npos) throw tr::FormatError("tabula_rasa.cfg has no [Paths] section");
+    std::vector<CfgLine> others;
+    const CfgLine* existing = nullptr;
+    for (const CfgLine& l : lines) {
+        if (namesPatchArchive(l)) existing = &l;
+        else others.push_back(l);
+    }
+    // The game takes [Paths] keys in its hash-table order and the FIRST key wins (tr::configKeyOrder) - not alphabetical order -
+    // so the key is chosen to come first among the keys the file has.
+    const std::string key = winningPatchKey(others);
+    const std::string newLine = key + " = \"data/rasaedit_patch.glm\"";
+    std::string what;
+    if (existing) {
+        what = "renamed " + existing->key + " to " + key + " (the old key was not taken first)";
+        text.replace(existing->at, existing->length, newLine);
+    } else {
+        std::string line = newLine + eol;
+        if (headerEnd == text.size() && !text.empty() && text.back() != '\n') line = eol + line;
+        text.insert(headerEnd, line);
+        what = "added " + newLine + " to [Paths]";
+    }
     const fs::path backup = cfg.string() + ".rasaedit-original";
     std::error_code ec;
     if (!fs::exists(backup, ec)) fs::copy_file(cfg, backup, ec);
     const fs::path temp = cfg.string() + ".tmp";
     {
         std::ofstream out(temp, std::ios::binary);
-        out.write(textIn.data(), std::streamsize(textIn.size()));
+        out.write(text.data(), std::streamsize(text.size()));
         if (!out) throw tr::FormatError("cannot write " + temp.string());
     }
     fs::rename(temp, cfg);
-    return "added " + std::string(kPatchKey) + " = \"data/rasaedit_patch.glm\" to [Paths] in " + cfg.string() + " (backup " + backup.filename().string() + ")";
+    return what + " in " + cfg.string() + " (backup " + backup.filename().string() + ")";
 }

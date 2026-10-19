@@ -197,6 +197,15 @@ Bytes GlmArchive::read(const std::string& name) const {
     return read(*entry);
 }
 
+bool glmShippedCompressed(const std::string& name) {
+    const std::string lower = toLowerAscii(name);
+    auto endsWith = [&](const char* ext) {
+        const size_t n = std::strlen(ext);
+        return lower.size() >= n && lower.compare(lower.size() - n, n, ext) == 0;
+    };
+    return endsWith(".fxc") || endsWith(".shc");
+}
+
 Bytes buildGlmArchive(std::vector<GlmSource> files) {
     std::sort(files.begin(), files.end(), [](const GlmSource& a, const GlmSource& b) { return toLowerAscii(a.name) < toLowerAscii(b.name); });
     for (size_t k = 0; k < files.size(); ++k) {

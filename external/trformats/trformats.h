@@ -127,6 +127,11 @@ struct GlmSource {
     bool compress = true;
     uint32_t timestamp = 0;            // unix time; 0 = now
 };
+// Whether the shipped archives compress a file of this name: only compiled shaders (.fxc 521, .shc 42) are zlib entries; every other
+// shipped file - all 7,240 .geo, .anm, .dds, .mkr, .pfx, .pkg, ... (36,800 in all) - is stored (survey 2026-10-19). Stored matters:
+// the game ignored a zlib-compressed static map model in the patch archive and drew the stored original from mesh10.glm instead
+// (2026-10-19, arch_forean_crystal_torch_v01.geo), although compressed accessories, animations and markers loaded.
+bool glmShippedCompressed(const std::string& name);
 Bytes buildGlmArchive(std::vector<GlmSource> files);
 void writeGlmArchive(const std::string& path, std::vector<GlmSource> files);
 

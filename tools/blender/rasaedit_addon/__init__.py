@@ -23,7 +23,7 @@ every glTF export; RasaEdit writes the .mkr).
 bl_info = {
     "name": "RasaEdit Tabula Rasa models",
     "author": "RasaEdit",
-    "version": (0, 2, 0),
+    "version": (0, 2, 1),
     "blender": (4, 2, 0),
     "location": "File > Import / Export > Tabula Rasa model (RasaEdit); 3D view sidebar > RasaEdit",
     "description": "Import and export Tabula Rasa models exchanged with RasaEdit (glTF)",
@@ -243,6 +243,27 @@ def deform_bone_names(mesh_obj):
     return arm, {b.name for b in arm.data.bones if b.use_deform}
 
 
+def box_turned_in_bone_frame(obj, bone_name):
+    """True when the box's corners are not the corners of an axis-aligned box in its bone's rest frame (RasaEdit fits a box as the
+    axis-aligned bounds in that frame; a box made in the frame, as the add-on's Make collision does, comes back exactly)."""
+    import mathutils
+    frame = mathutils.Matrix.Identity(4)
+    for arm in bpy.data.objects:
+        if arm.type == 'ARMATURE' and bone_name in arm.data.bones:
+            frame = arm.matrix_world @ arm.data.bones[bone_name].matrix_local
+            break
+    inverse = frame.inverted()
+    pts = [inverse @ (obj.matrix_world @ v.co) for v in obj.data.vertices]
+    if not pts:
+        return False
+    for i in range(3):
+        lo, hi = min(p[i] for p in pts), max(p[i] for p in pts)
+        tol = max(1e-4, 1e-3 * (hi - lo))
+        if any(min(abs(p[i] - lo), abs(p[i] - hi)) > tol for p in pts):
+            return True
+    return False
+
+
 def check_scene(scene):
     """(errors, warnings, notes) for exporting `scene` to RasaEdit."""
     errors, warnings, notes = [], [], []
@@ -270,7 +291,10 @@ def check_scene(scene):
                 errors.append("%s: %d vertices - a collision mesh may have at most %d (use a simpler one)" %
                               (o.name, len(o.data.vertices), MAX_COLLISION_VERTICES))
             data = rasa_data(o, "rasaCollision") or rasa_data(o.data, "rasaCollision") or {}
-            if data.get("kind") == "box" and (abs(o.rotation_euler.x) > 1e-4 or abs(o.rotation_euler.y) > 1e-4 or abs(o.rotation_euler.z) > 1e-4):
+            if data.get("kind") in ("box", "sphere"):
+                warnings.append("%s: a %s collision volume - the game's player walks on and bumps into walkable surfaces only, so a map "
+                                "object with this collision can be walked through (use a convex hull or a copy)" % (o.name, data.get("kind")))
+            if data.get("kind") == "box" and box_turned_in_bone_frame(o, data.get("bone") or (o.parent_bone if o.parent_type == 'BONE' else "")):
                 warnings.append("%s: a rotated collision box comes back as the larger axis-aligned box around it" % o.name)
             continue
         if not o.data.uv_layers:

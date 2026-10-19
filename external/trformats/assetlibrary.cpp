@@ -2,6 +2,7 @@
 #include "assetlibrary.h"
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <regex>
@@ -73,6 +74,46 @@ std::string ConfigFile::value(const std::string& sectionName, const std::string&
     return fallback;
 }
 
+uint32_t configKeyHash(const std::string& key) {
+    uint32_t h = 5381;                                                    // FUN_007086b0
+    for (char c : key) h = h * 33u + uint32_t(int32_t(static_cast<signed char>(std::tolower(static_cast<unsigned char>(c)))));
+    return h;
+}
+
+std::vector<std::string> configKeyOrder(const std::vector<std::string>& keys) {
+    // Unique keys (case-insensitive), then the table's final shape: FUN_00478cd0 grows before an insert when maxidx <= size / 4 -
+    // the mask doubles (+1) once maxidx passes it, and the bucket vector (8 + 1 at first) is doubled when maxidx reaches its end.
+    std::vector<std::string> unique;
+    for (const std::string& k : keys) {
+        bool seen = false;
+        for (const std::string& u : unique) seen = seen || equalsIgnoreCase(u, k);
+        if (!seen) unique.push_back(k);
+    }
+    uint32_t mask = 1, maxidx = 1, vecSize = 9;
+    for (size_t n = 0; n < unique.size(); ++n) {
+        if (maxidx <= n >> 2) {
+            if (maxidx < vecSize - 1) {
+                if (mask < maxidx) mask = mask * 2 + 1;
+            } else {
+                mask = vecSize * 2 - 3;
+                vecSize = vecSize * 2 - 1;
+            }
+            ++maxidx;
+        }
+    }
+    auto bucket = [&](const std::string& k) {
+        uint32_t b = configKeyHash(k) & mask;
+        if (b >= maxidx) b -= (mask >> 1) + 1;
+        return b;
+    };
+    std::stable_sort(unique.begin(), unique.end(), [&](const std::string& a, const std::string& b) {
+        const uint32_t ba = bucket(a), bb = bucket(b);
+        if (ba != bb) return ba < bb;
+        return toLowerAscii(a) < toLowerAscii(b);                         // _stricmp within a bucket
+    });
+    return unique;
+}
+
 // ------------------------------------------------------------------------------------------
 // AssetLibrary
 // ------------------------------------------------------------------------------------------
@@ -95,14 +136,18 @@ std::string AssetLibrary::resolve(const std::string& relative) const {
 void AssetLibrary::mountSection(const ConfigFile& cfg, const std::string& name) {
     const auto* section = cfg.section(name);
     if (!section) return;
-    // The game takes a section's entries in alphabetical key order, first registration winning - not file order (verified in
-    // game 2026-10-15: a patch archive under the key AAA_RasaEdit, or RasaEditPatch / S, replaced a texture of Texture03's
-    // whether its line came first or last; under U it did not). Shipped file names are unique across archives, so the order
-    // only matters for a patch archive.
-    std::vector<ConfigFile::Item> items(section->begin(), section->end());
-    std::stable_sort(items.begin(), items.end(), [](const ConfigFile::Item& a, const ConfigFile::Item& b) {
-        return toLowerAscii(a.key) < toLowerAscii(b.key);
-    });
+    // The game takes a section's entries in its hash-table order (configKeyOrder), the first key winning for a file several
+    // archives hold. Shipped file names are unique across archives, so the order only matters for a patch archive. A repeated key
+    // keeps its last value.
+    std::vector<std::string> keys;
+    for (const ConfigFile::Item& item : *section) keys.push_back(item.key);
+    std::vector<ConfigFile::Item> items;
+    for (const std::string& key : configKeyOrder(keys)) {
+        ConfigFile::Item chosen;
+        for (const ConfigFile::Item& item : *section)
+            if (equalsIgnoreCase(item.key, key)) chosen = item;
+        items.push_back(chosen);
+    }
     for (const ConfigFile::Item& item : items) {
         const std::string& value = item.value;
         if (value.find(".glm") != std::string::npos) {                 // archive (client: rfind(".glm"))
@@ -277,7 +322,7 @@ std::vector<std::string> AssetLibrary::namesWithExtension(const std::string& ext
         if (item.first.size() >= ext.size() && item.first.compare(item.first.size() - ext.size(), ext.size(), ext) == 0)
             names.push_back(item.second.inArchive ? item.second.entry->name : fs::path(item.second.filePath).filename().string());
     {
-        std::lock_guard<std::mutex> lock(overridesMutex_);
+        std::lock_guard<std::mutex> overridesLock(overridesMutex_);
         for (const auto& o : overrides_)
             if (o.first.size() >= ext.size() && o.first.compare(o.first.size() - ext.size(), ext.size(), ext) == 0 && !index_.count(o.first))
                 names.push_back(o.second.first);
