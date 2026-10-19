@@ -6,7 +6,14 @@ if (POLICY CMP0141)
   set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "$<IF:$<AND:$<C_COMPILER_ID:MSVC>,$<CXX_COMPILER_ID:MSVC>>,$<$<CONFIG:Debug,RelWithDebInfo>:EditAndContinue>,$<$<CONFIG:Debug,RelWithDebInfo>:ProgramDatabase>>")
 endif()
 
-project ("RasaEdit")
+# Linux: static vcpkg libraries except the LGPL ones (triplets/x64-linux-rasaedit.cmake). Set before project(), where vcpkg's
+# toolchain reads it; a VCPKG_TARGET_TRIPLET given on the command line wins.
+if (CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux" AND NOT DEFINED VCPKG_TARGET_TRIPLET)
+    set(VCPKG_TARGET_TRIPLET "x64-linux-rasaedit" CACHE STRING "vcpkg triplet")
+    set(VCPKG_OVERLAY_TRIPLETS "${CMAKE_CURRENT_SOURCE_DIR}/triplets" CACHE STRING "vcpkg triplet overlays")
+endif()
+
+project ("RasaEdit" VERSION 0.1.0)
 
 # Find the dependencies from vcpkg
 find_package(SDL3 CONFIG REQUIRED)
@@ -73,6 +80,10 @@ target_link_libraries(RasaEdit PRIVATE
 )
 
 set_property(TARGET RasaEdit PROPERTY CXX_STANDARD 20)
+# Linux: the shared LGPL libraries (libmariadb, libmpg123) are looked for beside the executable once installed.
+if (UNIX AND NOT APPLE)
+    set_target_properties(RasaEdit PROPERTIES INSTALL_RPATH "$ORIGIN")
+endif()
 
 # MariaDB Connector/C loads its authentication plugins (MySQL 8's default caching_sha2_password is one) at run time from a
 # folder: copy the vcpkg port's plugins to <exe dir>/plugins/libmariadb, where the editor points the connector (DbConnection).
@@ -102,3 +113,84 @@ if (RASAEDIT_BUILD_TESTS)
     rasaedit_copy_mariadb_plugins(viewport_test)
     rasaedit_copy_mariadb_plugins(ui_smoke_test)
 endif()
+
+# ------------------------------------------------------------------------------------------
+# Distribution: only RasaEdit and the Blender add-on (no tests, tools or scripts).
+#   cmake --install out/build/release --prefix <folder>      the distributable folder
+#   cmake --build out/build/release --target package         the same as RasaEdit-<version>-<platform>.zip / .tar.gz
+# Build the release preset first; the package takes the vcpkg release libraries.
+# ------------------------------------------------------------------------------------------
+if (DEFINED VCPKG_INSTALLED_DIR AND DEFINED VCPKG_TARGET_TRIPLET)
+    set(RASAEDIT_VCPKG "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}")
+endif()
+if (WIN32 AND RASAEDIT_VCPKG AND NOT CMAKE_VERSION VERSION_LESS 3.21)
+    # The executable with the DLLs it loads, found through its imports in vcpkg's bin folder (SDL3_mixer's codecs included);
+    # Windows' own DLLs and the API sets stay out.
+    install(TARGETS RasaEdit
+            RUNTIME_DEPENDENCIES
+                PRE_EXCLUDE_REGEXES "^api-ms-" "^ext-ms-"
+                POST_EXCLUDE_REGEXES ".*[Ss][Yy][Ss][Tt][Ee][Mm]32.*" ".*[Ss][Yy][Ss][Ww][Oo][Ww]64.*"
+                DIRECTORIES "${RASAEDIT_VCPKG}/bin"
+            RUNTIME DESTINATION .)
+    # The Visual C++ runtime (msvcp140, vcruntime140, vcruntime140_1) beside the executable, so a PC with an older runtime works.
+    set(CMAKE_INSTALL_SYSTEM_RUNTIME_DESTINATION .)
+    include(InstallRequiredSystemLibraries)
+elseif (RASAEDIT_VCPKG AND NOT CMAKE_VERSION VERSION_LESS 3.21)
+    # Linux: the binary plus the shared libraries it takes from vcpkg (the LGPL ones, see the triplet); the system's libraries
+    # (glibc, libstdc++, ...) stay out.
+    install(TARGETS RasaEdit
+            RUNTIME_DEPENDENCIES
+                POST_INCLUDE_REGEXES ".*vcpkg_installed.*"
+                POST_EXCLUDE_REGEXES ".*"
+                DIRECTORIES "${RASAEDIT_VCPKG}/lib"
+            RUNTIME DESTINATION .
+            LIBRARY DESTINATION .)
+else()
+    install(TARGETS RasaEdit RUNTIME DESTINATION .)
+endif()
+if (RASAEDIT_VCPKG)
+    # MariaDB Connector/C's authentication plugins (MySQL / MariaDB World databases), where DbConnection points the connector.
+    if (EXISTS "${RASAEDIT_VCPKG}/plugins/libmariadb")
+        install(DIRECTORY "${RASAEDIT_VCPKG}/plugins/libmariadb/" DESTINATION plugins/libmariadb)
+    endif()
+    # Every installed library's copyright / licence file, as licenses/<port>.txt - vcpkg's own helpers and build-only tools left out.
+    file(GLOB RASAEDIT_COPYRIGHTS "${RASAEDIT_VCPKG}/share/*/copyright")
+    foreach (copyright IN LISTS RASAEDIT_COPYRIGHTS)
+        get_filename_component(port_dir "${copyright}" DIRECTORY)
+        get_filename_component(port "${port_dir}" NAME)
+        if (NOT port MATCHES "^(vcpkg-.*|gperf|yasm|nasm)$")
+            install(FILES "${copyright}" DESTINATION licenses RENAME "${port}.txt")
+        endif()
+    endforeach()
+endif()
+install(FILES "packaging/README.txt" DESTINATION .)
+install(FILES "LICENSE" DESTINATION . RENAME "LICENSE.txt")
+
+# The Blender add-on as blender/rasaedit_addon.zip (Blender: Edit > Preferences > Add-ons > Install from Disk): the add-on folder's
+# files at the zip's top level (the extension format; tools/blender/make_addon_zip.py makes the same zip).
+file(GLOB RASAEDIT_ADDON_FILES RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}/tools/blender/rasaedit_addon"
+     "${CMAKE_CURRENT_SOURCE_DIR}/tools/blender/rasaedit_addon/*.py" "${CMAKE_CURRENT_SOURCE_DIR}/tools/blender/rasaedit_addon/*.toml")
+install(CODE "
+    set(addon_out \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/blender\")
+    file(MAKE_DIRECTORY \"\${addon_out}\")
+    execute_process(COMMAND \"${CMAKE_COMMAND}\" -E tar cf \"\${addon_out}/rasaedit_addon.zip\" --format=zip ${RASAEDIT_ADDON_FILES}
+                    WORKING_DIRECTORY \"${CMAKE_CURRENT_SOURCE_DIR}/tools/blender/rasaedit_addon\" RESULT_VARIABLE addon_result)
+    if (addon_result)
+        message(FATAL_ERROR \"packing the Blender add-on failed: \${addon_result}\")
+    endif()
+    message(STATUS \"Installing: \${addon_out}/rasaedit_addon.zip\")
+")
+
+if (WIN32)
+    set(RASAEDIT_PLATFORM "windows-x64")
+    set(CPACK_GENERATOR "ZIP")
+else()
+    string(TOLOWER "${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}" RASAEDIT_PLATFORM)
+    set(CPACK_GENERATOR "TGZ")
+endif()
+set(CPACK_PACKAGE_NAME "RasaEdit")
+set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+set(CPACK_PACKAGE_FILE_NAME "RasaEdit-${PROJECT_VERSION}-${RASAEDIT_PLATFORM}")
+set(CPACK_INCLUDE_TOPLEVEL_DIRECTORY ON)
+set(CPACK_PACKAGE_DIRECTORY "${CMAKE_BINARY_DIR}/package")
+include(CPack)
