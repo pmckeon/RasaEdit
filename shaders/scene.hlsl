@@ -23,6 +23,9 @@ cbuffer VertexUniforms : register(b0, space1)
     row_major float4x4 anisoNormal;   // the 3 x 3 applied to the vertex normal
     float4 eyePosition;               // xyz
     float4 anisoFog;                  // x start, y density, z 1 = fog on; w 1 = sky layer: put at the far plane (z = w)
+    // TRDiffMapVertColorWave's vertex sway (vsWaveDeferred / vsWave, disassembled 2026-10-20): x gSwayRate, y gSwayAmplitude, z gTime
+    // (the editor's light clock - which clock the TIME semantic is fed is NOT traced), w 1 = on.
+    float4 sway;
 };
 
 // GPU skinning (Renderer::setSkin): per vertex up to 4 bones of the model's skeleton and their weights (SV_VertexID indexes it;
@@ -165,7 +168,18 @@ VertexOutput vsMain(VertexInput input, uint vertexId : SV_VertexID)
             binormal = sb;
         }
     }
-    const float4 world = mul(model, float4(position, 1.0));
+    float4 world = mul(model, float4(position, 1.0));
+    if (sway.w > 0.5)
+    {
+        // t = vertex alpha x gSwayRate x gTime; phases frac(world.x / 7 + 0.15 t) and frac(world.z / 3 + 0.11 t); each a sine
+        // (the shader's cosine polynomial a quarter turn on, the phase x 0.999493); s = 0.3 (sin + sin) x gSwayAmplitude x 0.5; the
+        // vertex moves by (s u1, 0, s (1 - v1)) in world units - the shader adds it through the inverse world matrix before the
+        // world transform. UV set 1 holds the sway weights.
+        const float t = input.colour.a * sway.x * sway.z;
+        const float2 phase = frac(float2(world.x * 0.142857149 + t * 0.15, world.z * 0.33333 + t * 0.11)) * 0.999493062;
+        const float s = 0.3 * (sin(phase.x * 6.28318548) + sin(phase.y * 6.28318548)) * sway.y * 0.5;
+        world.xyz += float3(s * input.uv1.x, 0.0, s * (1.0 - input.uv1.y));
+    }
     output.position = mul(viewProjection, world);
     if (anisoFog.w > 0.5)
         output.position.z = output.position.w;      // sky layer: passes the LESS_OR_EQUAL test only on background pixels
@@ -408,6 +422,17 @@ float4 psMain(VertexOutput input) : SV_Target0
     // Specular (gloss map r = power, g = intensity), added untinted as trhdrcomposite adds its specular buffer.
     // TR materials: spec power = saturate(MatSpecular.x), intensity = MatSpecular.y (x detail.a / diffuse.a for the gloss
     // variants), from their vertex shaders (oT5 / oT7 = MatSpecular.x x 255, MatSpecular.y; the pixel shader clamps and / 255).
+    // Pal* forward (fading, mode 6; ps2x_BaseHemiDir*, disassembled 2026-10-20): its own specular - the forward directional light
+    // only, H = normalize(V + towards), exponent 255 x gloss.r (none when gloss.r is 0), x gloss.g x the light colour, where N.L > 0.
+    if ((trBits & 0x10) && ((trBits >> 6) & 0x7) == 6 && material.y > 0.5)
+    {
+        const float4 gloss = glossTexture.Sample(glossSampler, input.uv);
+        const float exponent = gloss.r * 255.0;
+        const float ndl = dot(n, s.towardsLight);
+        const float ndh = dot(n, normalize(normalize(view) + s.towardsLight));
+        if (exponent > 0.0 && ndl > 0.0 && ndh > 0.0)
+            lit += pow(ndh, exponent) * gloss.g * s.sunFront;
+    }
     // Not for fading (forward) pieces: the forward vertex-lit shaders add no specular (oT5 = 0).
     if ((material.y > 0.5 || (trBits & 0x4)) && !(trBits & 0x10))
     {
@@ -429,6 +454,7 @@ float4 psMain(VertexOutput input) : SV_Target0
                           : fadeMode == 3 ? texel.a * tint.a
                           : fadeMode == 4 ? input.colour.a * tint.a
                           : fadeMode == 5 ? 2.0 * texel.a * input.colour.a * tint.a
+                          : fadeMode == 6 ? tint.a                // Pal* forward: MatDiffuse.a x gBlendFade (1)
                           : fadeAlpha;
     const float blendAlpha = (trBits & 0x10) ? saturate(fadeBlend) : base.a * texel.a;
     return float4(applyFog(lit, length(view), fogColour, fogRange), options.y > 1.5 ? blendAlpha : 1.0);

@@ -225,7 +225,13 @@ public:
     void destroyBuffer(SDL_GPUBuffer*& buffer);
     uint32_t addBones(const std::vector<Mat4>& skinMatrices);
     void setSkin(SDL_GPUBuffer* skinVertices, uint32_t boneBase, bool skinNormals);
-    void clearSkin() { currentSkin_ = nullptr; }
+    void clearSkin() { currentSkin_ = nullptr; currentSway_ = Vec4f{0, 0, 0, 0}; }
+    // Foliage sway (TRDiffMapVertColorWave's vertex shader) for the following draws: x gSwayRate, y gSwayAmplitude, z gTime (s),
+    // w 1 = on. Applied to the colour and sun-shadow passes (scene.hlsl vsMain).
+    void setSway(const Vec4f& sway) { currentSway_ = sway; }
+    // The next draw() is a fading forward piece (SceneView ModelPiece::fadeAlphaMode, e.g. 6 = Pal* forward): drawn translucent with
+    // its full material, trFlags.w 0x10 | mode << 6, no shadow.
+    void setNextFading(int alphaMode) { nextFading_ = alphaMode; }
 
     // Frame: begin, queue draws, then record everything into a command buffer.
     void beginFrame(const Mat4& viewProjection, const tr::Vec3& cameraPosition, const SceneLighting& lighting);
@@ -356,6 +362,7 @@ private:
         bool forwardLit = false;                 // lit additive (forward-phase piece)
         bool twoSided = false;
         SDL_GPUBuffer* skinVertices = nullptr;   // GPU skinning (setSkin); null = as stored
+        Vec4f sway = Vec4f{0, 0, 0, 0};           // setSway at the time of the draw
         Mat4 anisoNormal = identityMatrix();     // aniso: AnisoMaterial::normalMatrix
         uint32_t boneBase = 0;
         bool skinNormals = true;
@@ -419,6 +426,8 @@ private:
     uint32_t boneCapacity_ = 0;                // rows
     SDL_GPUBuffer* skinDummy_ = nullptr;       // bound for draws that are not skinned
     SDL_GPUBuffer* currentSkin_ = nullptr;
+    Vec4f currentSway_ = Vec4f{0, 0, 0, 0};
+    int nextFading_ = 0;
     uint32_t currentBoneBase_ = 0;
     bool currentSkinNormals_ = true;
     std::vector<RefractItem> refractDraws_;

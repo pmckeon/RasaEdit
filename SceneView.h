@@ -396,6 +396,11 @@ private:
         // TRDiffMapDiffMap* lerp(diffuse.a, modifier.a, vertex.a) (no MatDiffuse), 2 diffuse.a x vertex.a x MatDiffuse.a, 3 diffuse.a
         // x MatDiffuse.a, 4 vertex.a x MatDiffuse.a, 5 2 x diffuse.a x vertex.a x MatDiffuse.a; 0 = not decoded (drawn opaque).
         int fadeAlphaMode = 0;
+        // TRDiffMapVertColorWave: the vertex sway's gSwayRate / gSwayAmplitude (the piece's, else the effect's defaults 25 / 1);
+        // UV set 1 (the sway weights) is in texU1 / texV1.
+        bool sway = false;
+        bool palFading = false;     // fadeAlphaMode 6 = Pal* forward (alpha MatDiffuse.a x gBlendFade), drawn through draw()
+        float swayRate = 25.0f, swayAmplitude = 1.0f;
         bool lavaForward = false;              // TRLava: forward-only effect (no deferred technique), drawn after the composite - not in the light buffer
         // The material's stored Hue parameter (w = 1 when set): what a map entity's pieces keep when the entity is not hued.
         Vec4f materialHue = Vec4f{0, 0, 0, 0};

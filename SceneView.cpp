@@ -1826,6 +1826,10 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 }
                 v.texU2 = uvOfSet(gv, uvSet2).x;
                 v.texV2 = uvOfSet(gv, uvSet2).y;
+                if (effect.rfind("trdiffmapvertcolorwave", 0) == 0) {     // vsWave*: TEXCOORD1 = the sway weights
+                    v.texU1 = gv.uv1.x;
+                    v.texV1 = gv.uv1.y;
+                }
                 if (water) {
                     // TRWaterReflectRefract: normal maps on NormalMap0TexCoord / NormalMap1TexCoord, the volume on VolMapTexCoord
                     // (1, 2, 3 on the traced piece, whose shader read TEXCOORD1..3; other values UNVERIFIED).
@@ -1935,9 +1939,22 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 // editor tests the texture alpha only). TRDiffMapVertColorWave (swaying foliage, e.g.
                 // flora_foreas_gen_bush03_v01; no AlphaTestEnable parameter) always kills below 0.25 (psWaveDeferred and
                 // psWaveLegacy: texkill(diffuse.a - 0.25)).
+                // Pal* forward (ps2x_BaseHemiDir*, the preferred static forward technique of every Pal normal-map effect,
+                // disassembled 2026-10-20): alpha = MatDiffuse.a x gBlendFade (preshader mul c5.x, c2.w, c3.x).
+                for (const tr::GeoParameter& gp : piece.parameters)      // MatDiffuse.a: x the fade for fading forward pieces
+                    if (gp.key == "MatDiffuse") part.matDiffuseAlpha = parseColour(gp.value).w;
+                if (palDeferred && !hair) {
+                    part.fadeAlphaMode = 6;
+                    part.palFading = true;
+                }
                 if (effect.rfind("trdiffmapvertcolorwave", 0) == 0) {
                     part.alphaTest = true;
                     part.alphaReference = 0.25f;
+                    part.sway = true;
+                    for (const tr::GeoParameter& gp : piece.parameters) {
+                        if (gp.key == "gSwayRate") part.swayRate = float(std::atof(gp.value.c_str()));
+                        if (gp.key == "gSwayAmplitude") part.swayAmplitude = float(std::atof(gp.value.c_str()));
+                    }
                 }
                 // PalDiffAlpha* (all five effects; deferred pixel shaders ps2x_*AlphaTest*, verified 2026-10-12) always kill
                 // diffuse.a < 0.5, whatever AlphaTestEnable says (e.g. the memory tree's foliage sets none).
@@ -2474,6 +2491,14 @@ Mat4 SceneView::anisoNormalMatrix(const Model* model, const ModelPiece& piece, c
 }
 
 void SceneView::setPieceSkin(const ModelPiece& piece) {
+    // Foliage sway (TRDiffMapVertColorWave) applies to this piece's draws until the skin is cleared (SkinScope / clearSkin).
+    // viewport_test RASA_SWAYSCALE=<k>: the amplitude x k (a diagnostic to make the centimetre sway visible).
+    static const float swayScale = [] { const char* v = std::getenv("RASA_SWAYSCALE"); return v && *v ? float(std::atof(v)) : 1.0f; }();
+    struct SwayOnExit {                 // set after the skin: clearSkin() below resets the sway too
+        Renderer& renderer;
+        Vec4f sway;
+        ~SwayOnExit() { renderer.setSway(sway); }
+    } swayOnExit{*renderer_, piece.sway && showTextures ? Vec4f{piece.swayRate, piece.swayAmplitude * swayScale, lightTime, 1.0f} : Vec4f{0, 0, 0, 0}};
     if (!piece.skinBuffer || !piece.skinOwner) {
         renderer_->clearSkin();
         return;
@@ -3320,7 +3345,15 @@ void SceneView::queueDraws(const Selection& selection) {
                     continue;
                 }
                 if (showLightBuffer && piece.lavaForward) continue;       // forward-only: not in the game's light buffer
-                renderer_->draw(piece.mesh, world, scaledTint(tint, piece.colourScale), true, showTextures ? piece.texture : nullptr, showTextures && piece.alphaTest,
+                Vec4f drawTint = scaledTint(tint, piece.colourScale);
+                if (fading && piece.palFading && !onlyMode1 && showTextures && materialMaps) {
+                    // Pal* forward: translucent with the full Pal material; alpha = MatDiffuse.a (the fade x the material's alpha)
+                    // x gBlendFade (its runtime value is NOT traced: 1).
+                    renderer_->setNextFading(6);
+                    drawTint.w = tint.w * piece.matDiffuseAlpha * fade;
+                    ++fadingForwardPieces_;
+                }
+                renderer_->draw(piece.mesh, world, drawTint, true, showTextures ? piece.texture : nullptr, showTextures && piece.alphaTest,
                                 hue, showTextures ? piece.glow : nullptr, piece.twoSided, piece.alphaReference,
                                 showTextures && materialMaps ? piece.normalMap : nullptr, showTextures && materialMaps ? piece.glossMap : nullptr,
                                 showTextures && materialMaps && piece.environment,

@@ -23,6 +23,7 @@ struct VertexUniforms {
     Mat4 anisoNormal = identityMatrix();
     Vec4f eyePosition = Vec4f{0, 0, 0, 1};
     Vec4f anisoFog = Vec4f{0, 0, 0, 0};
+    Vec4f sway = Vec4f{0, 0, 0, 0};       // scene.hlsl `sway`
 };
 
 // The lighting fields shared by both fragment shaders (shaders/lighting.hlsli), in cbuffer order.
@@ -649,8 +650,18 @@ void Renderer::draw(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, b
         item.layers.w = 2.0f;
     }
     item.skinVertices = currentSkin_;
+    item.sway = currentSway_;
     item.boneBase = currentBoneBase_;
     item.skinNormals = currentSkinNormals_;
+    if (nextFading_ != 0) {
+        item.translucent = true;
+        item.tr.flags.w = float(int(item.tr.flags.w) | 0x10 | ((nextFading_ & 0x7) << 6));
+        item.castsShadow = false;
+        item.cullBlended = !twoSided;
+        nextFading_ = 0;
+        translucentDraws_.push_back(item);
+        return;
+    }
     draws_.push_back(item);
 }
 
@@ -675,6 +686,7 @@ void Renderer::drawTranslucent(const GpuMesh& mesh, const Mat4& model, const Vec
     }
     item.cullBlended = cullBack;
     item.skinVertices = currentSkin_;
+    item.sway = currentSway_;
     item.boneBase = currentBoneBase_;
     item.skinNormals = currentSkinNormals_;
     translucentDraws_.push_back(item);
@@ -692,6 +704,7 @@ void Renderer::drawFadingForward(const GpuMesh& mesh, const Mat4& model, const V
     item.decal = material.slot2;
     item.cullBlended = cullBack;
     item.skinVertices = currentSkin_;
+    item.sway = currentSway_;
     item.boneBase = currentBoneBase_;
     item.skinNormals = currentSkinNormals_;
     item.castsShadow = false;
@@ -714,6 +727,7 @@ void Renderer::drawAdditive(const GpuMesh& mesh, const Mat4& model, const Vec4f&
         item.tr.transform2u = uvTransforms->transform2u; item.tr.transform2v = uvTransforms->transform2v;
     }
     item.skinVertices = currentSkin_;
+    item.sway = currentSway_;
     item.boneBase = currentBoneBase_;
     item.skinNormals = currentSkinNormals_;
     additiveDraws_.push_back(item);
@@ -750,6 +764,7 @@ void Renderer::drawAnisoAdditive(const GpuMesh& mesh, const Mat4& model, const A
     item.tr.transform1u = material.transform1u; item.tr.transform1v = material.transform1v;
     item.tr.transform2u = material.transform2u; item.tr.transform2v = material.transform2v;
     item.skinVertices = currentSkin_;
+    item.sway = currentSway_;
     item.boneBase = currentBoneBase_;
     item.skinNormals = currentSkinNormals_;
     item.sky = sky;
@@ -1151,7 +1166,7 @@ void Renderer::record(SDL_GPUCommandBuffer* /*caller's command buffer: the scene
             SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
             SDL_GPUBufferBinding indexBinding = {item.mesh->indices, 0};
             SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_32BIT);
-            const VertexUniforms vertexUniforms{viewProjection_, item.model, item.skinVertices ? 1u : 0u, item.boneBase, item.skinNormals ? 1u : 0u, 0};
+            VertexUniforms vertexUniforms{viewProjection_, item.model, item.skinVertices ? 1u : 0u, item.boneBase, item.skinNormals ? 1u : 0u, 0};
             SDL_PushGPUVertexUniformData(commands, 0, &vertexUniforms, sizeof vertexUniforms);
             bindSkin(pass, item.skinVertices);
             const RefractMaterial& m = item.material;
@@ -1307,7 +1322,7 @@ void Renderer::recordShadows(SDL_GPUCommandBuffer*& commands) {
         SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
         SDL_GPUBufferBinding indexBinding = {item.mesh->indices, 0};
         SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_32BIT);
-        const VertexUniforms vertexUniforms{shadowMatrix_, item.model, item.skinVertices ? 1u : 0u, item.boneBase, item.skinNormals ? 1u : 0u, 0};
+        VertexUniforms vertexUniforms{shadowMatrix_, item.model, item.skinVertices ? 1u : 0u, item.boneBase, item.skinNormals ? 1u : 0u, 0}; vertexUniforms.sway = item.sway;
         SDL_PushGPUVertexUniformData(commands, 0, &vertexUniforms, sizeof vertexUniforms);
         bindSkin(pass, item.skinVertices);
         const bool alphaTest = !item.terrain && item.alphaTest;
@@ -1337,6 +1352,7 @@ void Renderer::recordItem(SDL_GPUCommandBuffer*& commands, SDL_GPURenderPass*& p
     SDL_GPUBufferBinding indexBinding = {item.mesh->indices, 0};
     SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_32BIT);
     VertexUniforms vertexUniforms{viewProjection_, item.model, item.skinVertices ? 1u : 0u, item.boneBase, item.skinNormals ? 1u : 0u, 0};
+    vertexUniforms.sway = item.sway;
     if (item.aniso) {
         vertexUniforms.aniso = 1;
         vertexUniforms.anisoNormal = item.anisoNormal;
@@ -1565,7 +1581,7 @@ void Renderer::recordPvsView(const Mat4& inverseViewProjection, const tr::Vec3& 
         SDL_BindGPUVertexBuffers(pass, 0, &vertexBinding, 1);
         SDL_GPUBufferBinding indexBinding = {item.mesh->indices, 0};
         SDL_BindGPUIndexBuffer(pass, &indexBinding, SDL_GPU_INDEXELEMENTSIZE_32BIT);
-        const VertexUniforms vertexUniforms{viewProjection_, item.model, item.skinVertices ? 1u : 0u, item.boneBase, item.skinNormals ? 1u : 0u, 0};
+        VertexUniforms vertexUniforms{viewProjection_, item.model, item.skinVertices ? 1u : 0u, item.boneBase, item.skinNormals ? 1u : 0u, 0}; vertexUniforms.sway = item.sway;
         SDL_PushGPUVertexUniformData(commands, 0, &vertexUniforms, sizeof vertexUniforms);
         bindSkin(pass, item.skinVertices);
         const bool alphaTest = !item.terrain && item.alphaTest;
