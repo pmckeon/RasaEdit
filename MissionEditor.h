@@ -66,8 +66,14 @@ private:
     // objective, package, flag, kind)]) in missiontextlanguage. The database's client_*_text_id columns are copies the server only
     // checks, so a field shows the client's text, warns when the column names another, and picks ids from a searchable browser.
     std::optional<int64_t> clientTextId(EditorContext& ctx, const DbTable& table, const std::vector<DbValue>& row, const char* column) const;
-    bool missionTextField(EditorContext& ctx, const char* label, int64_t& value, std::optional<int64_t> client);
-    void drawClientTexts(EditorContext& ctx, const DbTable& table, const std::vector<DbValue>& row);
+    // showInGame false: no "In game" line (the client-text editor, where the field IS the client's reference).
+    bool missionTextField(EditorContext& ctx, const char* label, int64_t& value, std::optional<int64_t> client, bool showInGame = true);
+    // The client's mission texts in game.zip, editable (2026-10-19): per mission its six missionconversation texts, per objective its
+    // missionobjective texts (name, body, three counters) and its objectiveconversation lines - pick an existing text, make a new
+    // one, edit the English text in place (both genders), remove. Edits go through the Text workspace (EditorContext::textWorkspace:
+    // one undo history, saved into game.zip with its other changes, the modules written as stored source).
+    void drawClientTexts(EditorContext& ctx, const WorldDatabase& database, const DbTable& table, const std::vector<DbValue>& row);
+    int64_t newConversationPackage_ = 0, newConversationFlag_ = 1, newConversationKind_ = 1;
     // The mission text placeholder, shown as ID_DEFAULT_TEXT (as the UI's ID_DEFAULT_TEXT: an id the client has, with no text): the
     // lowest missiontextlanguage id that is empty in every language that has it (both genders) and that no client mission table
     // (missionconversation / missionobjective / objectiveconversation) names - 17240 in the shipped data. New missions get it as their

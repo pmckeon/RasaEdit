@@ -11,6 +11,7 @@ Editor::Editor(SDL_Window* window, SDL_GPUDevice* device)
       text_(std::make_unique<TextWorkspace>(*context_)),
       server_(std::make_unique<ServerWorkspace>(*context_)),
       assets_(std::make_unique<AssetsWorkspace>(*context_)) {
+    context_->textWorkspace = text_.get();
     const std::string workspace = context_->setting("workspace");
     active_ = workspace == "client"   ? static_cast<Workspace*>(client_.get())
               : workspace == "ui"     ? static_cast<Workspace*>(ui_.get())

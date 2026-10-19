@@ -1415,6 +1415,59 @@ int main() {
                 check(requested && text.text(ctx.showTextModule.empty() ? "generated.client.language.english.uielementlanguage" : "",
                                              tr::py::asInt(index), 1, 0) == ctx.gameData->uiText("ID_LOGOUT"),
                       "text: a UI textId opens its entry in the Text workspace");
+                // Client mission texts (the Missions panel's editor, through the Text workspace's editEntries): a new name text for
+                // mission 300 and a new body text for its objective 2, saved to a copy of game.zip and read back.
+                {
+                    namespace fs = std::filesystem;
+                    const std::string conv = "generated.client.missionconversation", objectives = "generated.client.missionobjective",
+                                      textModule = "generated.client.language.english.missiontextlanguage";
+                    const int64_t fresh = text.newMissionTextId();
+                    auto key2 = [](int64_t a, int64_t b) { return tr::py::makeTuple({tr::py::makeInt(a), tr::py::makeInt(b)}); };
+                    auto none = []() { return std::make_shared<tr::py::Object>(); };
+                    const tr::py::Object* oldObjective = tr::py::item(tr::py::dictGetTuple(text.currentLookup(objectives), {300, 2}), 0);
+                    std::vector<tr::py::Ref> items;
+                    for (size_t k = 0; k < 5; ++k) {
+                        const tr::py::Object* v = tr::py::item(oldObjective, k);
+                        items.push_back(k == 1 ? tr::py::makeInt(fresh + 1) : v && !tr::py::isNone(v) ? tr::py::makeInt(tr::py::asInt(v)) : none());
+                    }
+                    text.editEntries("smoke: new mission name",
+                                     {{conv, key2(300, 1), tr::py::makeList({tr::py::makeInt(fresh)})},
+                                      {objectives, key2(300, 2), tr::py::makeList({tr::py::makeTuple(items)})},
+                                      {textModule, key2(fresh, 1), tr::py::makeList({tr::py::makeText("Smoke mission name")})},
+                                      {textModule, key2(fresh, 2), tr::py::makeList({tr::py::makeText("Smoke mission name")})},
+                                      {textModule, key2(fresh + 1, 1), tr::py::makeList({tr::py::makeText("Smoke objective body\nsecond line")})},
+                                      {textModule, key2(fresh + 1, 2), tr::py::makeList({tr::py::makeText("Smoke objective body\nsecond line")})}},
+                                     false);
+                    const bool pending = text.missionText(fresh) == "Smoke mission name" &&
+                                         tr::py::asInt(tr::py::item(tr::py::dictGetTuple(text.currentLookup(conv), {300, 1}), 0)) == fresh &&
+                                         text.hasUnsavedChanges();
+                    check(pending, "mission texts: a new name / body text and the client references are pending in the Text workspace");
+                    editor.setActive(editor.server_.get());
+                    frames(editor, device, 2);                // the Missions panel draws with the pending edits
+                    const std::string copy = (fs::temp_directory_path() / "rasaedit_smoke_missiontext.zip").string();
+                    text.setSavePathForTests(copy);
+                    const bool saved = text.saveChanges();
+                    text.setSavePathForTests("");
+                    bool readBack = false, stored = false;
+                    if (saved) {
+                        tr::GameData reread(copy);
+                        const tr::py::Object* objective = tr::py::item(tr::py::dictGetTuple(reread.global(objectives, "lookup"), {300, 2}), 0);
+                        readBack = reread.missionText(int32_t(fresh), 1) == "Smoke mission name" &&
+                                   tr::py::asInt(tr::py::item(tr::py::dictGetTuple(reread.global(conv, "lookup"), {300, 1}), 0)) == fresh &&
+                                   tr::py::asInt(tr::py::item(objective, 1)) == fresh + 1 &&
+                                   reread.missionText(int32_t(fresh + 1), 2) == "Smoke objective body\nsecond line";
+                        tr::ZipArchive zip(copy);
+                        stored = true;
+                        for (const tr::ZipEntry& e : zip.entries()) stored = stored && e.method == 0;
+                    }
+                    check(saved && readBack, "mission texts: saved to a copy of game.zip - the client tables and texts read back");
+                    check(stored, "mission texts: every game.zip entry stored (the client's Python has no zlib)");
+                    text.undo();
+                    check(text.missionText(fresh).empty() &&
+                              tr::py::asInt(tr::py::item(tr::py::dictGetTuple(text.currentLookup(conv), {300, 1}), 0)) != fresh,
+                          "mission texts: one undo step takes the references and texts back");
+                    text.revertChanges();
+                }
             }
         }
 

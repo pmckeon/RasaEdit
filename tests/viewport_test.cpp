@@ -459,6 +459,105 @@ int main(int argc, char** argv) {
                 std::printf("text write test: FAILED: %s\n", e.what());
             }
         }
+        // RASA_INGAMEMISSIONTEXT=<mission id>,...: an in-game check of the client mission tables written by the editor - for each mission
+        // its name / log / opening texts (missionconversation types 1-3) and every objective's name (missionobjective slot 0) are pointed at
+        // NEW missiontextlanguage entries "RASAEDIT TEST <what>: <the original text>" (English, both genders); game.zip is rewritten IN THE
+        // GAME FOLDER as the Text workspace saves it (the three tables and the English missiontext as stored .py source, their compiled
+        // copies removed), after copying the current file to game.zip.before-missiontext.
+        if (const char* spec = envValue("RASA_INGAMEMISSIONTEXT")) {
+            namespace fs = std::filesystem;
+            try {
+                std::vector<int64_t> missions;
+                for (const char* p = spec; *p;) {
+                    missions.push_back(std::strtoll(p, nullptr, 10));
+                    while (*p && *p != ',') ++p;
+                    if (*p == ',') ++p;
+                }
+                const std::string conv = "generated.client.missionconversation", objectives = "generated.client.missionobjective",
+                                  textModule = "generated.client.language.english.missiontextlanguage";
+                auto copyOf = [&](const std::string& module) {
+                    return tr::py::deepCopy(std::shared_ptr<tr::py::Object>(&const_cast<tr::py::Object&>(data.module(module)), [](tr::py::Object*) {}));
+                };
+                tr::py::Ref convGlobals = copyOf(conv), objGlobals = copyOf(objectives), textGlobals = copyOf(textModule);
+                tr::py::Object& convLookup = *const_cast<tr::py::Object*>(tr::py::dictGet(convGlobals.get(), "lookup"));
+                tr::py::Object& objLookup = *const_cast<tr::py::Object*>(tr::py::dictGet(objGlobals.get(), "lookup"));
+                tr::py::Object& textLookup = *const_cast<tr::py::Object*>(tr::py::dictGet(textGlobals.get(), "lookup"));
+                int64_t next = 0;
+                for (const std::string& module : data.moduleNames())
+                    if (module.size() > 20 && module.compare(module.size() - 20, 20, ".missiontextlanguage") == 0)
+                        for (const auto& e : data.global(module, "lookup")->entries) next = std::max(next, tr::py::asInt(tr::py::item(e.first.get(), 0)));
+                ++next;
+                auto key2 = [](int64_t a, int64_t b) { return tr::py::makeTuple({tr::py::makeInt(a), tr::py::makeInt(b)}); };
+                auto newText = [&](const std::string& what, int64_t oldId) {
+                    const tr::py::Object* old = tr::py::dictGetTuple(&textLookup, {oldId, 1});
+                    const std::string text = "RASAEDIT TEST " + what + ": " + (old ? tr::py::asString(tr::py::item(old, 0)) : std::string());
+                    const int64_t id = next++;
+                    for (int64_t g : {1, 2}) tr::py::dictPut(textLookup, key2(id, g), tr::py::makeList({tr::py::makeText(text)}));
+                    return id;
+                };
+                size_t changed = 0;
+                for (int64_t m : missions) {
+                    static const char* kTypes[] = {"", "name", "log", "offer"};
+                    for (int64_t type = 1; type <= 3; ++type)
+                        if (const tr::py::Object* e = tr::py::dictGetTuple(&convLookup, {m, type})) {
+                            const int64_t id = newText(std::string("mission ") + kTypes[type], tr::py::asInt(tr::py::item(e, 0)));
+                            tr::py::dictPut(convLookup, key2(m, type), tr::py::makeList({tr::py::makeInt(id)}));
+                            ++changed;
+                        }
+                    std::vector<std::pair<tr::py::Ref, tr::py::Ref>> objectiveEdits;
+                    for (const auto& e : objLookup.entries)
+                        if (tr::py::asInt(tr::py::item(e.first.get(), 0)) == m) {
+                            const tr::py::Object* tuple = tr::py::item(e.second.get(), 0);
+                            const tr::py::Object* name = tr::py::item(tuple, 0);
+                            if (!name || tr::py::isNone(name)) continue;
+                            std::vector<tr::py::Ref> items;
+                            for (size_t k = 0; k < tr::py::length(tuple); ++k) items.push_back(tuple->items[k]);
+                            items[0] = tr::py::makeInt(newText("objective", tr::py::asInt(name)));
+                            objectiveEdits.emplace_back(e.first, tr::py::makeList({tr::py::makeTuple(items)}));
+                        }
+                    for (const auto& [k, v] : objectiveEdits) {
+                        tr::py::dictPut(objLookup, k, v);
+                        ++changed;
+                    }
+                }
+                std::map<std::string, tr::Bytes> replace;
+                std::vector<std::string> remove;
+                tr::ZipArchive zip(data.path());
+                for (const auto& [module, globals] : std::vector<std::pair<std::string, tr::py::Ref>>{{conv, convGlobals}, {objectives, objGlobals}, {textModule, textGlobals}}) {
+                    const std::string entry = data.moduleEntryName(module);
+                    const std::string base = entry.substr(0, entry.rfind('.'));
+                    const std::string source = tr::py::moduleSource(*globals);
+                    replace[base + ".py"] = tr::Bytes(source.begin(), source.end());
+                    for (const tr::ZipEntry& z : zip.entries())
+                        if (z.name == base + ".pyo" || z.name == base + ".pyc") remove.push_back(z.name);
+                }
+                const fs::path path = fs::u8path(data.path());
+                fs::path keep = path;
+                keep += ".before-missiontext";
+                std::error_code ec;
+                fs::copy_file(path, keep, fs::copy_options::overwrite_existing, ec);
+                if (ec) throw std::runtime_error("cannot keep " + keep.string() + ": " + ec.message());
+                fs::path temp = path;
+                temp += ".rasaedit-new";
+                tr::writeZip(zip, temp.string(), replace, remove);
+                tr::GameData check(temp.string());
+                size_t found = 0;
+                for (int64_t m : missions)
+                    if (const tr::py::Object* e = tr::py::dictGetTuple(check.global(conv, "lookup"), {m, 1}))
+                        found += check.missionText(int32_t(tr::py::asInt(tr::py::item(e, 0))), 1).rfind("RASAEDIT TEST", 0) == 0;
+                tr::ZipArchive written(temp.string());
+                bool stored = true;
+                for (const tr::ZipEntry& e : written.entries()) stored = stored && e.method == 0;
+                fs::rename(temp, path, ec);
+                if (ec) throw std::runtime_error("cannot replace game.zip (is the game running?): " + ec.message());
+                std::printf("in-game mission text: %zu references changed for %zu mission(s); %zu mission names read back as test texts; all "
+                            "entries stored %s; new text ids up to %lld; previous game.zip kept as %s\n", changed, missions.size(), found,
+                            stored ? "yes" : "NO", static_cast<long long>(next - 1), keep.string().c_str());
+            } catch (const std::exception& e) {
+                std::printf("in-game mission text FAILED: %s\n", e.what());
+            }
+            return 0;
+        }
         // RASA_GLMTEST=<out.glm>: write an archive of a few game files (a texture, a model, an animation, a text file, an empty file),
         // open it with GlmArchive and compare every entry; then rewrite one shipped archive's every entry and compare again.
         if (const char* out = envValue("RASA_GLMTEST")) {

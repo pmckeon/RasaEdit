@@ -235,6 +235,41 @@ bool TextWorkspace::setText(const std::string& module, int64_t id, int gender, s
     return true;
 }
 
+void TextWorkspace::editEntries(const std::string& label, const std::vector<EntryEdit>& edits, bool coalesce) {
+    if (!ctx_.gameData) return;
+    Step step;
+    step.label = label;
+    for (const EntryEdit& e : edits) {
+        if (!ctx_.gameData->hasModule(e.module) && !edited_.count(e.module)) continue;
+        const py::Object* lookup = lookupOf(e.module);
+        py::Ref before = lookup ? py::dictGetRef(*lookup, *e.key) : nullptr;   // owned: values are replaced, never changed in place
+        step.changes.push_back(Change{e.module, e.key, before, e.value});
+        put(e.module, e.key, e.value);
+    }
+    record(std::move(step), coalesce);
+    coalescing_ = false;
+}
+
+const py::Object* TextWorkspace::currentLookup(const std::string& module) const { return lookupOf(module); }
+
+std::string TextWorkspace::missionText(int64_t id) const {
+    const py::Object* lookup = lookupOf(std::string(kPrefix) + "english.missiontextlanguage");
+    const py::Object* value = py::dictGetTuple(lookup, {id, 1});
+    return value ? py::asString(py::item(value, 0)) : std::string();
+}
+
+int64_t TextWorkspace::newMissionTextId() const {
+    int64_t largest = 0;
+    if (ctx_.gameData)
+        for (const std::string& module : ctx_.gameData->moduleNames()) {
+            const std::string suffix = ".missiontextlanguage";
+            if (module.size() < suffix.size() || module.compare(module.size() - suffix.size(), suffix.size(), suffix) != 0) continue;
+            if (const py::Object* lookup = lookupOf(module))
+                for (const auto& e : lookup->entries) largest = std::max(largest, py::asInt(py::item(e.first.get(), 0)));
+        }
+    return largest + 1;
+}
+
 std::string TextWorkspace::text(const std::string& module, int64_t id, int gender, size_t item) const {
     const int index = moduleIndex(module);
     if (index < 0) return "";
@@ -517,8 +552,9 @@ void TextWorkspace::drawEntry() {
         std::memcpy(buffer.data(), current.c_str(), current.size() + 1);
         ImGui::TextUnformatted(label);
         ImGui::PushID(gender * 100 + int(item));
-        const float lines = std::clamp(float(std::count(current.begin(), current.end(), '\n') + 2), 3.0f, 14.0f);
-        if (ImGui::InputTextMultiline("##text", buffer.data(), buffer.size(), ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * lines))) {
+        // A couple of paragraphs tall, word-wrapped; longer texts scroll vertically.
+        if (ImGui::InputTextMultiline("##text", buffer.data(), buffer.size(), ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 10.5f),
+                                      ImGuiInputTextFlags_WordWrap)) {
             setText(m.module, selectedId_, gender, item, buffer.data());
             coalescing_ = true;
         }

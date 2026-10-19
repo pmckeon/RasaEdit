@@ -53,6 +53,8 @@ struct ViewSettings {
 // State shared by both workspaces: settings, the game install and its data tables, the open map with
 // its renderer and scene, and work queued for between frames. It knows nothing about workspaces;
 // the Editor tells them when the game or map changes.
+class TextWorkspace;
+
 class EditorContext {
 public:
     EditorContext(SDL_Window* window, SDL_GPUDevice* device);
@@ -69,6 +71,9 @@ public:
     // "Open in Text" from another workspace: the language module (dotted) and the entry's id to show in the Text workspace.
     std::string showTextModule;
     int64_t showTextId = -1;
+    // The Text workspace, which holds every pending edit of game.zip's modules (language texts and the client's mission text tables):
+    // other panels (the Missions panel's client texts) edit through it, so undo / redo and the save are shared. Set by the Editor.
+    TextWorkspace* textWorkspace = nullptr;
     const ClassInfo& classInfo(int32_t classId);
 
     // Loading. Call between frames (they replace GPU textures and the scene). false on failure (status set).

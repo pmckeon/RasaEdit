@@ -51,6 +51,19 @@ public:
     std::string text(const std::string& module, int64_t id, int gender, size_t item) const;
     void undo();
     void redo();
+    // Edits of any game.zip module's `lookup` from other panels (the Missions panel's client mission texts): one undo step (typing
+    // in one field coalesces when coalesce is true and the label repeats), saved with the workspace's other changes. value nullptr
+    // removes the entry. currentLookup: the module's lookup with pending edits (nullptr when the module is missing).
+    struct EntryEdit {
+        std::string module;
+        tr::py::Ref key, value;
+    };
+    void editEntries(const std::string& label, const std::vector<EntryEdit>& edits, bool coalesce);
+    const tr::py::Object* currentLookup(const std::string& module) const;   // out of line: ui_smoke_test reaches privates by #define
+    // Mission texts (missiontextlanguage): the English text (male character's) with pending edits; a new id - one past the largest id
+    // of every language's module, pending edits included.
+    std::string missionText(int64_t id) const;
+    int64_t newMissionTextId() const;
     // Tests: save to this file (game.zip is read, never written; the game data is not reloaded) - "" for the real save.
     void setSavePathForTests(const std::string& path) { savePathForTests_ = path; }
 

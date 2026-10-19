@@ -1,13 +1,17 @@
 #include "MissionEditor.h"
 
 #include "EditorContext.h"
+#include "Lookups.h"
+#include "TextWorkspace.h"
 #include "gamedata.h"
 
 #include "imgui.h"
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <memory>
 #include <set>
@@ -568,6 +572,31 @@ int64_t findPlaceholderTextId(tr::GameData& data) {
 }
 }  // namespace
 
+namespace {
+const char* kConversationModule = "generated.client.missionconversation";
+const char* kObjectiveModule = "generated.client.missionobjective";
+const char* kObjectiveConversationModule = "generated.client.objectiveconversation";
+const char* kMissionTextModule = "generated.client.language.english.missiontextlanguage";
+
+// The client's current tables and texts: through the Text workspace (pending edits included) when there is one.
+const tr::py::Object* clientLookup(EditorContext& ctx, const char* module) {
+    if (ctx.textWorkspace) return ctx.textWorkspace->currentLookup(module);
+    try {
+        return ctx.gameData ? ctx.gameData->global(module, "lookup") : nullptr;
+    } catch (const std::exception&) {
+        return nullptr;
+    }
+}
+
+std::string clientMissionText(EditorContext& ctx, int64_t id) {
+    if (ctx.textWorkspace) return ctx.textWorkspace->missionText(id);
+    return ctx.gameData ? ctx.gameData->missionText(int32_t(id)) : std::string();
+}
+
+tr::py::Ref noneValue() { return std::make_shared<tr::py::Object>(); }
+tr::py::Ref textValue(const std::string& text) { return tr::py::makeList({tr::py::makeText(text)}); }
+}  // namespace
+
 std::optional<int64_t> MissionEditor::clientTextId(EditorContext& ctx, const DbTable& table, const std::vector<DbValue>& row,
                                                    const char* column) const {
     if (!ctx.gameData) return std::nullopt;
@@ -578,13 +607,13 @@ std::optional<int64_t> MissionEditor::clientTextId(EditorContext& ctx, const DbT
     const int64_t mission = value("mission_id");
     try {
         if (table.name == "mission_content_definition" && std::strcmp(column, "client_name_text_id") == 0) {
-            const tr::py::Object* t = tr::py::dictGetTuple(ctx.gameData->global("generated.client.missionconversation", "lookup"), {mission, 1});
+            const tr::py::Object* t = tr::py::dictGetTuple(clientLookup(ctx, kConversationModule), {mission, 1});
             if (t) return tr::py::asInt(tr::py::item(t, 0));
         }
         if (table.name == "mission_objective_definition") {
             static const char* kColumns[] = {"client_name_text_id", "client_body_text_id", "client_counter_0_text_id", "client_counter_1_text_id",
                                              "client_counter_2_text_id"};
-            const tr::py::Object* t = tr::py::dictGetTuple(ctx.gameData->global("generated.client.missionobjective", "lookup"), {mission, value("objective_id")});
+            const tr::py::Object* t = tr::py::dictGetTuple(clientLookup(ctx, kObjectiveModule), {mission, value("objective_id")});
             const tr::py::Object* texts = tr::py::item(t, 0);
             for (size_t k = 0; k < 5; ++k)
                 if (std::strcmp(column, kColumns[k]) == 0 && tr::py::item(texts, k) && !tr::py::isNone(tr::py::item(texts, k)))
@@ -604,12 +633,12 @@ std::string oneLine(std::string text, size_t limit = 120) {
 }
 }  // namespace
 
-bool MissionEditor::missionTextField(EditorContext& ctx, const char* label, int64_t& value, std::optional<int64_t> client) {
+bool MissionEditor::missionTextField(EditorContext& ctx, const char* label, int64_t& value, std::optional<int64_t> client, bool showInGame) {
     bool changed = false;
     // The placeholder stops being one once its text is filled in (in the Text workspace): work it out again.
     if (placeholderTextId_ > 0 && ctx.gameData && !ctx.gameData->missionText(int32_t(placeholderTextId_)).empty()) placeholderTextId_ = -1;
     const bool placeholder = placeholderTextId_ > 0 && value == placeholderTextId_;
-    const std::string current = value == 0 ? std::string("(none)") : "#" + std::to_string(value) + "  " + oneLine(ctx.gameData ? ctx.gameData->missionText(int32_t(value)) : "");
+    const std::string current = value == 0 ? std::string("(none)") : "#" + std::to_string(value) + "  " + oneLine(clientMissionText(ctx, value));
     ImGui::TextUnformatted(label);
     ImGui::SameLine();
     const bool browse = ImGui::SmallButton("Browse...");
@@ -627,7 +656,7 @@ bool MissionEditor::missionTextField(EditorContext& ctx, const char* label, int6
         textBrowseAll_.clear();
         textBrowseShownFor_ = "\x01";
         if (ctx.gameData) {
-            const tr::py::Object* lookup = ctx.gameData->global("generated.client.language.english.missiontextlanguage", "lookup");
+            const tr::py::Object* lookup = clientLookup(ctx, kMissionTextModule);
             if (lookup)
                 for (const auto& e : lookup->entries)
                     if (tr::py::asInt(tr::py::item(e.first.get(), 1)) == 1)
@@ -636,12 +665,13 @@ bool MissionEditor::missionTextField(EditorContext& ctx, const char* label, int6
         }
     }
     // What the player sees: the client's own reference for this mission / objective.
-    if (client) {
+    if (!showInGame) {
+    } else if (client) {
         ImGui::Indent();
-        if (*client == value) ImGui::TextDisabled("In game: %s", oneLine(ctx.gameData->missionText(int32_t(*client)), 200).c_str());
+        if (*client == value) ImGui::TextDisabled("In game: %s", oneLine(clientMissionText(ctx, *client), 200).c_str());
         else {
             ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "In game: #%lld %s", static_cast<long long>(*client),
-                               oneLine(ctx.gameData->missionText(int32_t(*client)), 160).c_str());
+                               oneLine(clientMissionText(ctx, *client), 160).c_str());
             ImGui::SetItemTooltip("The client shows its own text for this mission, not the id stored here (the server never sends text ids).");
             ImGui::SameLine();
             if (ImGui::SmallButton("Use the client's")) {
@@ -699,7 +729,7 @@ bool MissionEditor::missionTextField(EditorContext& ctx, const char* label, int6
         }
         ImGui::EndChild();
         if (ImGui::BeginChild("preview", ImVec2(0, previewHeight), ImGuiChildFlags_Borders)) {
-            if (textBrowsePick_ > 0 && ctx.gameData) ImGui::TextWrapped("%s", ctx.gameData->missionText(int32_t(textBrowsePick_)).c_str());
+            if (textBrowsePick_ > 0 && ctx.gameData) ImGui::TextWrapped("%s", clientMissionText(ctx, textBrowsePick_).c_str());
         }
         ImGui::EndChild();
         if (ImGui::Button("Select") && textBrowsePick_ >= 0) {
@@ -726,53 +756,179 @@ bool MissionEditor::missionTextField(EditorContext& ctx, const char* label, int6
     return changed;
 }
 
-// The client's texts of a mission (every text type) or an objective (its conversation lines), read-only, with "Open in Text".
-void MissionEditor::drawClientTexts(EditorContext& ctx, const DbTable& table, const std::vector<DbValue>& row) {
+
+// The client's texts of a mission (missionconversation: name, log, opening, finishing, reward, reminder) or an objective (missionobjective:
+// name, body, counters; objectiveconversation lines), editable through the Text workspace.
+void MissionEditor::drawClientTexts(EditorContext& ctx, const WorldDatabase& database, const DbTable& table, const std::vector<DbValue>& row) {
     if (!ctx.gameData) return;
+    const bool isMission = table.name == "mission_content_definition";
+    if (!isMission && table.name != "mission_objective_definition") return;
     const auto value = [&](const char* c) {
         const int i = table.column(c);
         return i < 0 ? int64_t(-1) : row[size_t(i)].asInt();
     };
     const int64_t mission = value("mission_id");
-    std::vector<std::pair<std::string, int64_t>> texts;            // label, text id
-    try {
-        if (table.name == "mission_content_definition") {
-            static const char* kTypes[] = {"", "Name", "Log", "Opening (offer)", "Finishing", "Reward", "Reminder"};
-            const tr::py::Object* t = ctx.gameData->global("generated.client.missionconversation", "lookup");
-            for (int type = 1; type <= 6; ++type)
-                if (const tr::py::Object* e = tr::py::dictGetTuple(t, {mission, type})) texts.emplace_back(kTypes[type], tr::py::asInt(tr::py::item(e, 0)));
-        } else if (table.name == "mission_objective_definition") {
-            const int64_t objective = value("objective_id");
-            static const char* kKinds[] = {"", "completion", "reminder", "choice body", "choice 1", "choice 2", "choice 3"};
-            const tr::py::Object* t = ctx.gameData->global("generated.client.objectiveconversation", "lookup");
-            for (const auto& e : t ? t->entries : decltype(t->entries){}) {
-                const tr::py::Object* k = e.first.get();
-                if (tr::py::asInt(tr::py::item(k, 0)) != mission || tr::py::asInt(tr::py::item(k, 1)) != objective) continue;
-                const int64_t kind = tr::py::asInt(tr::py::item(k, 4));
-                texts.emplace_back("Conversation, package " + std::to_string(tr::py::asInt(tr::py::item(k, 2))) + ", flag " +
-                                       std::to_string(tr::py::asInt(tr::py::item(k, 3))) + ", " + (kind >= 1 && kind <= 6 ? kKinds[kind] : "?"),
-                                   tr::py::asInt(tr::py::item(e.second.get(), 0)));
-            }
-        } else return;
-    } catch (const std::exception&) {
-        return;
-    }
-    const char* header = table.name == "mission_content_definition" ? "Client texts (game.zip)" : "Client conversation texts (game.zip)";
+    const int64_t objective = isMission ? 0 : value("objective_id");
+    TextWorkspace* text = ctx.textWorkspace;
+    const char* header = isMission ? "Client texts (game.zip)" : "Client texts and conversation lines (game.zip)";
+    // Preview hook: RASAEDIT_OPEN_CLIENT_TEXTS=1 opens the section once.
+    if (std::getenv("RASAEDIT_OPEN_CLIENT_TEXTS")) ImGui::SetNextItemOpen(true, ImGuiCond_Once);
     if (!ImGui::TreeNode(header)) return;
-    if (texts.empty()) ImGui::TextDisabled("The client has none for this id.");
-    for (size_t k = 0; k < texts.size(); ++k) {
-        ImGui::PushID(int(k));
-        ImGui::TextDisabled("%s  #%lld", texts[k].first.c_str(), static_cast<long long>(texts[k].second));
+    if (!text) ImGui::TextDisabled("Read only (no Text workspace).");
+    else
+        ImGui::TextDisabled("What the game shows for mission %lld%s. Changes are saved with the Text workspace (File > Save, Client > Text).",
+                            static_cast<long long>(mission), isMission ? "" : (", objective " + std::to_string(objective)).c_str());
+    if (!text) ImGui::BeginDisabled();
+
+    // One text: its id (pick another, make a new one, remove) and its English text, edited in place for both genders.
+    // setId(newId) stores the reference (0 = remove); returns whether the reference changed.
+    int slot = 0;
+    const auto textSlot = [&](const char* label, int64_t id, const std::function<std::vector<TextWorkspace::EntryEdit>(int64_t)>& setId,
+                              bool removable) {
+        ImGui::PushID(slot++);
+        int64_t picked = id;
+        if (missionTextField(ctx, label, picked, std::nullopt, false) && text && picked != id)
+            text->editEntries(std::string("client text ") + label, setId(picked), false);
         ImGui::SameLine();
-        if (ImGui::SmallButton("Open in Text")) {
-            ctx.showTextModule = "generated.client.language.english.missiontextlanguage";
-            ctx.showTextId = texts[k].second;
+        if (ImGui::SmallButton("New text") && text) {
+            const int64_t fresh = text->newMissionTextId();
+            std::vector<TextWorkspace::EntryEdit> edits = setId(fresh);
+            edits.push_back({kMissionTextModule, tr::py::makeTuple({tr::py::makeInt(fresh), tr::py::makeInt(1)}), textValue("")});
+            edits.push_back({kMissionTextModule, tr::py::makeTuple({tr::py::makeInt(fresh), tr::py::makeInt(2)}), textValue("")});
+            text->editEntries(std::string("new client text ") + label, edits, false);
+            id = fresh;
         }
-        ImGui::Indent();
-        ImGui::TextWrapped("%s", ctx.gameData->missionText(int32_t(texts[k].second)).c_str());
-        ImGui::Unindent();
+        ImGui::SetItemTooltip("A new missiontextlanguage entry (English, both genders; the next free id) for this text");
+        if (id != 0 && removable) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Remove") && text) {
+                text->editEntries(std::string("remove client text ") + label, setId(0), false);
+                id = 0;
+            }
+            ImGui::SetItemTooltip("The game then shows no text here (the missiontextlanguage entry itself stays)");
+        }
+        if (id != 0 && text) {
+            const tr::py::Object* lookup = text->currentLookup(kMissionTextModule);
+            const tr::py::Object* male = tr::py::dictGetTuple(lookup, {id, 1});
+            const tr::py::Object* female = tr::py::dictGetTuple(lookup, {id, 2});
+            const std::string current = male ? tr::py::asString(tr::py::item(male, 0)) : std::string();
+            if (!male) {
+                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "#%lld has no English text yet", static_cast<long long>(id));
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Add one"))
+                    text->editEntries("add text", {{kMissionTextModule, tr::py::makeTuple({tr::py::makeInt(id), tr::py::makeInt(1)}), textValue("")},
+                                                   {kMissionTextModule, tr::py::makeTuple({tr::py::makeInt(id), tr::py::makeInt(2)}), textValue("")}},
+                                      false);
+            } else if (female && tr::py::asString(tr::py::item(female, 0)) != current) {
+                ImGui::TextDisabled("The male and female character's texts differ - edit them in the Text workspace.");
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Open in Text")) {
+                    ctx.showTextModule = kMissionTextModule;
+                    ctx.showTextId = id;
+                }
+            } else {
+                // A couple of paragraphs tall, word-wrapped, scrolling vertically (as the Text workspace's entry box).
+                std::vector<char> buffer(std::max<size_t>(current.size() + 4096, 1024));
+                std::memcpy(buffer.data(), current.c_str(), current.size() + 1);
+                if (ImGui::InputTextMultiline("##text", buffer.data(), buffer.size(), ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 10.5f),
+                                              ImGuiInputTextFlags_WordWrap)) {
+                    const std::string updated = buffer.data();
+                    text->editEntries("mission text " + std::to_string(id),
+                                      {{kMissionTextModule, tr::py::makeTuple({tr::py::makeInt(id), tr::py::makeInt(1)}), textValue(updated)},
+                                       {kMissionTextModule, tr::py::makeTuple({tr::py::makeInt(id), tr::py::makeInt(2)}), textValue(updated)}},
+                                      true);
+                }
+            }
+        }
         ImGui::PopID();
+    };
+
+    try {
+        if (isMission) {
+            static const char* kTypes[] = {"", "Name", "Log", "Opening (offer)", "Finishing", "Reward", "Reminder"};
+            const tr::py::Object* conversation = clientLookup(ctx, kConversationModule);
+            for (int type = 1; type <= 6; ++type) {
+                const tr::py::Object* e = tr::py::dictGetTuple(conversation, {mission, type});
+                const int64_t id = e ? tr::py::asInt(tr::py::item(e, 0)) : 0;
+                textSlot(kTypes[type], id, [&](int64_t newId) {
+                    return std::vector<TextWorkspace::EntryEdit>{{kConversationModule, tr::py::makeTuple({tr::py::makeInt(mission), tr::py::makeInt(type)}),
+                                                                  newId ? tr::py::makeList({tr::py::makeInt(newId)}) : nullptr}};
+                }, true);
+            }
+        } else {
+            // missionobjective[(mission, objective)] = [(name, body, counter 0, counter 1, counter 2)] (None where unset).
+            static const char* kSlots[] = {"Name", "Body", "Counter 1", "Counter 2", "Counter 3"};
+            const tr::py::Object* objectives = clientLookup(ctx, kObjectiveModule);
+            const tr::py::Object* entry = tr::py::item(tr::py::dictGetTuple(objectives, {mission, objective}), 0);
+            int64_t ids[5] = {0, 0, 0, 0, 0};
+            for (size_t k = 0; k < 5; ++k)
+                if (const tr::py::Object* v = tr::py::item(entry, k); v && !tr::py::isNone(v)) ids[k] = tr::py::asInt(v);
+            if (!entry) ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "The client has no texts for this objective (a missing-translation message in game).");
+            for (size_t k = 0; k < 5; ++k)
+                textSlot(kSlots[k], ids[k], [&, k](int64_t newId) {
+                    std::vector<tr::py::Ref> items;
+                    for (size_t q = 0; q < 5; ++q) {
+                        const int64_t v = q == k ? newId : ids[q];
+                        items.push_back(v ? tr::py::makeInt(v) : noneValue());
+                    }
+                    const bool empty = std::all_of(items.begin(), items.end(), [](const tr::py::Ref& r) { return tr::py::isNone(r.get()); });
+                    return std::vector<TextWorkspace::EntryEdit>{{kObjectiveModule, tr::py::makeTuple({tr::py::makeInt(mission), tr::py::makeInt(objective)}),
+                                                                  empty ? nullptr : tr::py::makeList({tr::py::makeTuple(items)})}};
+                }, true);
+
+            // objectiveconversation[(mission, objective, NPC package, player flag, kind)] = [text]: the NPC lines of this objective.
+            ImGui::SeparatorText("Conversation lines");
+            static const char* kKinds[] = {"", "Completion", "Reminder", "Choice body", "Choice 1", "Choice 2", "Choice 3"};
+            const tr::py::Object* lines = clientLookup(ctx, kObjectiveConversationModule);
+            std::vector<std::pair<tr::py::Ref, int64_t>> mine;             // key, text id
+            for (const auto& e : lines ? lines->entries : decltype(lines->entries){}) {
+                const tr::py::Object* k = e.first.get();
+                if (tr::py::asInt(tr::py::item(k, 0)) == mission && tr::py::asInt(tr::py::item(k, 1)) == objective)
+                    mine.emplace_back(e.first, tr::py::asInt(tr::py::item(e.second.get(), 0)));
+            }
+            if (mine.empty()) ImGui::TextDisabled("None.");
+            for (const auto& [key, id] : mine) {
+                const int64_t kind = tr::py::asInt(tr::py::item(key.get(), 4));
+                const std::string label = "Package " + std::to_string(tr::py::asInt(tr::py::item(key.get(), 2))) + ", flag " +
+                                          std::to_string(tr::py::asInt(tr::py::item(key.get(), 3))) + ", " + (kind >= 1 && kind <= 6 ? kKinds[kind] : "?");
+                const tr::py::Ref lineKey = key;
+                textSlot(label.c_str(), id, [&, lineKey](int64_t newId) {
+                    return std::vector<TextWorkspace::EntryEdit>{{kObjectiveConversationModule, lineKey,
+                                                                  newId ? tr::py::makeList({tr::py::makeInt(newId)}) : nullptr}};
+                }, true);
+            }
+            // A new line: the NPC package that says it, the player flag, the kind - with a new text.
+            ImGui::Spacing();
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16);
+            lookupCombo("NPC package", newConversationPackage_, lookup::npcPackage(database, "(pick a package)"));
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6);
+            ImGui::InputScalar("Player flag", ImGuiDataType_S64, &newConversationFlag_);
+            ImGui::SetItemTooltip("The objectiveconversation key's fourth part (1 in most shipped lines)");
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10);
+            int kindIndex = int(std::clamp<int64_t>(newConversationKind_, 1, 6)) - 1;
+            if (ImGui::Combo("Kind", &kindIndex, "Completion\0Reminder\0Choice body\0Choice 1\0Choice 2\0Choice 3\0")) newConversationKind_ = kindIndex + 1;
+            const tr::py::Ref newKey = tr::py::makeTuple({tr::py::makeInt(mission), tr::py::makeInt(objective), tr::py::makeInt(newConversationPackage_),
+                                                          tr::py::makeInt(newConversationFlag_), tr::py::makeInt(newConversationKind_)});
+            const bool exists = lines && tr::py::dictGetRef(*lines, *newKey);
+            if (newConversationPackage_ <= 0 || exists || !text) ImGui::BeginDisabled();
+            if (ImGui::Button("Add a line with a new text")) {
+                const int64_t fresh = text->newMissionTextId();
+                text->editEntries("new conversation line",
+                                  {{kObjectiveConversationModule, newKey, tr::py::makeList({tr::py::makeInt(fresh)})},
+                                   {kMissionTextModule, tr::py::makeTuple({tr::py::makeInt(fresh), tr::py::makeInt(1)}), textValue("")},
+                                   {kMissionTextModule, tr::py::makeTuple({tr::py::makeInt(fresh), tr::py::makeInt(2)}), textValue("")}},
+                                  false);
+            }
+            if (newConversationPackage_ <= 0 || exists || !text) ImGui::EndDisabled();
+            if (exists) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("(a line with that package, flag and kind exists)");
+            }
+        }
+    } catch (const std::exception& e) {
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", e.what());
     }
+    if (!text) ImGui::EndDisabled();
     ImGui::TreePop();
 }
 
@@ -938,7 +1094,7 @@ bool MissionEditor::drawRowFields(EditorContext& ctx, const WorldDatabase& datab
         ImGui::PopID();
     }
     if (!editable) ImGui::EndDisabled();
-    drawClientTexts(ctx, d, row);
+    drawClientTexts(ctx, database, d, row);
     if (changed) validationDirty_ = true;
     return changed;
 }
