@@ -1066,6 +1066,11 @@ tr::PlacedLight SceneView::modifiedLight(const tr::PlacedLight& light) const {
                 case tr::LightModifierTrack::Kind::Intensity:
                     out.intensity = track.intensity1 + w * (track.intensity2 - track.intensity1);
                     break;
+                case tr::LightModifierTrack::Kind::Range:
+                    // TRasa::RangeModifier (vtable slot 28 FUN_00458ce0, traced 2026-10-20): the light's float property "Range"
+                    // (bound by name in FUN_00458c10) = Range1 + w (Range2 - Range1), as IntensityModifier sets Intensity.
+                    out.range = track.range1 + w * (track.range2 - track.range1);
+                    break;
                 case tr::LightModifierTrack::Kind::Color:
                     out.colour = add(track.colour1, scaled(subtract(track.colour2, track.colour1), w));
                     break;
@@ -1972,6 +1977,19 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                 if (trDesc.known) {
                     TrMaterial& m = part.trMaterial;
                     part.fadeForward = effect.rfind("trdiffmapdiffmap", 0) == 0;
+                    {
+                        // The preferred static forward technique's pixel shader alpha (effects.glm, disassembled 2026-10-20).
+                        const std::string base = effect.size() > 3 && effect.compare(effect.size() - 3, 3, ".fx") == 0 ? effect.substr(0, effect.size() - 3) : effect;
+                        if (part.fadeForward) part.fadeAlphaMode = 1;
+                        else if (base == "trdiffmapdetmapvertcolor" || base == "trdiffmapglowmapvertcolor" || base == "tremissivediffmapdetmapdecmapvertcolor")
+                            part.fadeAlphaMode = 2;     // PerVertex psPixelShader / psNormal: diffuse.a x v0.w x MatDiffuse.a
+                        else if (base == "trdiffmapdecmapvertcolor" || base == "trdiffmapdetmapdecmapvertcolor")
+                            part.fadeAlphaMode = 3;     // PerVertex psPixelShader: diffuse.a x MatDiffuse.a (v0 has no alpha)
+                        else if (base == "trdiffglossmapenvmapvertcolor" || base == "trdiffmapvertcolorwave")
+                            part.fadeAlphaMode = 4;     // psGlossEnvVertexLitMatAlpha / wave: v0.w x MatDiffuse.a
+                        else if (base == "trdiffmapvertcolor")
+                            part.fadeAlphaMode = 5;     // psNormal: 2 x diffuse.a x v0.w x MatDiffuse.a
+                    }
                     part.lavaForward = effect.rfind("trlava", 0) == 0;
                     m.active = true;
                     auto textureOf = [&](const char* key) -> SDL_GPUTexture* {
@@ -3230,7 +3248,8 @@ void SceneView::queueDraws(const Selection& selection) {
     // lerp(diffuse, modifier, vertex alpha) [+ decal / detail] x 2 x light, alpha = lerp(diffuse.a, modifier.a, vertex alpha) -
     // MatDiffuse.a is not read, so these bodies show their textures' alpha, not a fade. Other effects have several forward techniques
     // whose runtime choice is not decoded (the engine validates them, FUN_005c1d40); their pieces stay opaque here (UNVERIFIED).
-    auto drawModelPieces = [&](const Model& model, const Mat4& placementWorld, const Vec4f& entityHue, bool selected, bool fading = false) {
+    auto drawModelPieces = [&](const Model& model, const Mat4& placementWorld, const Vec4f& entityHue, bool selected, float fade = 1.0f) {
+        const bool fading = fade < 0.999f;
         const std::vector<Mat4> animatedMatrices = animatedPieceMatrices(model, lightTime);
         auto pieceWorld = [&](const ModelPiece& piece) {
             return piece.animBone >= 0 && size_t(piece.animBone) < animatedMatrices.size() ? multiply(placementWorld, animatedMatrices[size_t(piece.animBone)]) : placementWorld;
@@ -3282,8 +3301,13 @@ void SceneView::queueDraws(const Selection& selection) {
                     trm.transform0u = uv.u0; trm.transform0v = uv.v0; trm.transform1u = uv.u1; trm.transform1v = uv.v1;
                     trm.transform2u = uv.u2; trm.transform2v = uv.v2;
                 }
-                if (fading && piece.fadeForward && showTextures && materialMaps && trm.active) {
-                    renderer_->drawFadingForward(piece.mesh, world, scaledTint(tint, piece.colourScale), piece.texture, trm, !piece.twoSided);
+                // RASA_FADEMODES=0 (viewport_test): only the TRDiffMapDiffMap* rule (mode 1), as before 2026-10-20.
+                static const bool onlyMode1 = [] { const char* v = std::getenv("RASA_FADEMODES"); return v && *v == '0'; }();
+                if (fading && piece.fadeAlphaMode != 0 && (!onlyMode1 || piece.fadeAlphaMode == 1) && showTextures && materialMaps && trm.active) {
+                    // MatDiffuse.a = the fade x the material's own alpha (FUN_007ffd80); the mode picks how the shader uses it.
+                    const Vec4f fadeTint = scaledTint(Vec4f{tint.x, tint.y, tint.z, tint.w * piece.matDiffuseAlpha * fade}, piece.colourScale);
+                    renderer_->drawFadingForward(piece.mesh, world, fadeTint, piece.texture, trm, !piece.twoSided, piece.fadeAlphaMode,
+                                                 piece.alphaTest ? piece.alphaReference : 0.0f);
                     ++fadingForwardPieces_;
                     continue;
                 }
@@ -3314,7 +3338,7 @@ void SceneView::queueDraws(const Selection& selection) {
             ++drawnEntities_;
             const bool selected = int(k) == selectedEntity;
             const float fade = gameDistances ? entityDistanceAlpha(p) : 1.0f;
-            if (p.model && p.model->loaded) drawModelPieces(*p.model, p.world, p.hue, selected, fade < 0.999f && !selected);
+            if (p.model && p.model->loaded) drawModelPieces(*p.model, p.world, p.hue, selected, selected ? 1.0f : fade);
             if (p.model && p.model->loaded && p.model->hasSolid) {
                 // drawn above
             } else if (p.model && p.model->loaded && p.model->effectOnly) {

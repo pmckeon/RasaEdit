@@ -681,11 +681,13 @@ void Renderer::drawTranslucent(const GpuMesh& mesh, const Mat4& model, const Vec
 }
 
 void Renderer::drawFadingForward(const GpuMesh& mesh, const Mat4& model, const Vec4f& tint, SDL_GPUTexture* texture, const TrMaterial& material,
-                                 bool cullBack) {
+                                 bool cullBack, int alphaMode, float alphaReference) {
     if (!mesh.vertices || mesh.indexCount == 0) return;
-    DrawItem item{&mesh, model, tint, true, texture ? texture : white_, false, nullptr, true, Vec4f{0, 0, 0, 0}, black_};
+    DrawItem item{&mesh, model, tint, true, texture ? texture : white_, alphaReference > 0.0f, nullptr, true, Vec4f{0, 0, 0, 0}, black_};
+    item.alphaReference = alphaReference;
     item.tr = material;
-    item.tr.flags.w = float(int(material.flags.w) | 0x10);
+    // trFlags.w: 0x10 fading forward; bits 0x1c0 = the alpha mode (SceneView ModelPiece::fadeAlphaMode) << 6.
+    item.tr.flags.w = float(int(material.flags.w) | 0x10 | ((alphaMode & 0x7) << 6));
     item.detail = material.slot1;                // as draw(): slot 1 / 2 maps on the detail (t2) and decal (t3) bindings
     item.decal = material.slot2;
     item.cullBlended = cullBack;

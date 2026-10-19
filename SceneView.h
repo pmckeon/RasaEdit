@@ -391,6 +391,11 @@ private:
         // TRDiffMapDiffMap* effect: in the game's distance fade band (SceneView::entityDistanceAlpha < 0.999) the piece is drawn with
         // the effect's one static forward technique (see "fade band" in queueDraws), which the fountain capture verifies.
         bool fadeForward = false;
+        // How the effect's preferred forward technique (FUN_005c1d40 / FUN_005c34b0: per RenderMode / TransformMode /
+        // TechniqueMode, highest ComplexityFactor first) writes alpha when the body fades (MatDiffuse.a = the fade): 1
+        // TRDiffMapDiffMap* lerp(diffuse.a, modifier.a, vertex.a) (no MatDiffuse), 2 diffuse.a x vertex.a x MatDiffuse.a, 3 diffuse.a
+        // x MatDiffuse.a, 4 vertex.a x MatDiffuse.a, 5 2 x diffuse.a x vertex.a x MatDiffuse.a; 0 = not decoded (drawn opaque).
+        int fadeAlphaMode = 0;
         bool lavaForward = false;              // TRLava: forward-only effect (no deferred technique), drawn after the composite - not in the light buffer
         // The material's stored Hue parameter (w = 1 when set): what a map entity's pieces keep when the entity is not hued.
         Vec4f materialHue = Vec4f{0, 0, 0, 0};

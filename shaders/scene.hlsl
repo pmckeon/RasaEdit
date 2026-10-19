@@ -408,7 +408,8 @@ float4 psMain(VertexOutput input) : SV_Target0
     // Specular (gloss map r = power, g = intensity), added untinted as trhdrcomposite adds its specular buffer.
     // TR materials: spec power = saturate(MatSpecular.x), intensity = MatSpecular.y (x detail.a / diffuse.a for the gloss
     // variants), from their vertex shaders (oT5 / oT7 = MatSpecular.x x 255, MatSpecular.y; the pixel shader clamps and / 255).
-    if (material.y > 0.5 || (trBits & 0x4))
+    // Not for fading (forward) pieces: the forward vertex-lit shaders add no specular (oT5 = 0).
+    if ((material.y > 0.5 || (trBits & 0x4)) && !(trBits & 0x10))
     {
         const float4 gloss = material.y > 0.5 ? glossTexture.Sample(glossSampler, input.uv)
                                               : float4(saturate(trSpecular.x), trSpecular.y * trGloss, 0, 0);
@@ -421,7 +422,15 @@ float4 psMain(VertexOutput input) : SV_Target0
                localSpecular(input.world, n, v, gloss.r, gloss.g, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner, localRotation, shadowAtlas, localShadowSlots, localShadowBase);
     }
     // Alpha: only translucent draws blend with it. Opaque draws keep it 1 - the viewport image is composited with alpha.
-    const float blendAlpha = (trBits & 0x10) ? fadeAlpha : base.a * texel.a;
+    // Fading forward pieces (trBits 0x10): the alpha the effect's preferred forward technique writes, mode in bits 0x1c0
+    // (SceneView ModelPiece::fadeAlphaMode); tint.a carries MatDiffuse.a = the fade x the material's alpha.
+    const uint fadeMode = (trBits >> 6) & 0x7;
+    const float fadeBlend = fadeMode == 2 ? texel.a * input.colour.a * tint.a
+                          : fadeMode == 3 ? texel.a * tint.a
+                          : fadeMode == 4 ? input.colour.a * tint.a
+                          : fadeMode == 5 ? 2.0 * texel.a * input.colour.a * tint.a
+                          : fadeAlpha;
+    const float blendAlpha = (trBits & 0x10) ? saturate(fadeBlend) : base.a * texel.a;
     return float4(applyFog(lit, length(view), fogColour, fogRange), options.y > 1.5 ? blendAlpha : 1.0);
 }
 

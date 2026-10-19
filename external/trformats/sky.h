@@ -148,10 +148,11 @@ struct PlacedLight {
 //   (UNVERIFIED endpoint order). LightID 0 is skipped (FUN_007df550). Range / cone / penumbra / back-colour modifiers
 //   exist in the exe but are not read here.
 struct LightModifierTrack {
-    enum class Kind : uint8_t { Intensity, Color, Rotation, Position, Other };
+    enum class Kind : uint8_t { Intensity, Color, Rotation, Position, Range, Other };
     Kind kind = Kind::Other;
     bool enabled = true;
     float intensity1 = 0, intensity2 = 0;
+    float range1 = 0, range2 = 0;     // RangeModifier: Range = Range1 + w (Range2 - Range1) (FUN_00458ce0, bound to "Range" by FUN_00458c10)
     Vec3 colour1, colour2;
     Vec3 axis{0, 1, 0};
     Vec3 offset1, offset2;

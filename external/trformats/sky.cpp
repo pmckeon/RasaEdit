@@ -640,6 +640,10 @@ std::vector<LightModifier> readLightModifiers(const Bytes& data) {
             } else if (cls == "RotationModifier") {
                 track.kind = LightModifierTrack::Kind::Rotation;
                 track.axis = vec3(p, "RotationAxis", Vec3{0, 1, 0});
+            } else if (cls == "RangeModifier") {
+                track.kind = LightModifierTrack::Kind::Range;
+                track.range1 = number(p, "Range1");
+                track.range2 = number(p, "Range2");
             } else if (cls == "PositionModifier") {
                 track.kind = LightModifierTrack::Kind::Position;
                 track.offset1 = vec3(p, "Offset1", Vec3{});
