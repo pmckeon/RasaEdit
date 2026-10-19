@@ -281,6 +281,11 @@ TrDescription trDescription(const std::string& effect) {
     } else if (is("trdiffglossmapenvmapvertcolor")) {
         d.envMode = 3;
         d.bits = 0x4;
+    } else if (is("trdiffmapvertcolorwave")) {
+        // psWaveDeferred[1] (disassembled 2026-10-20): diffuse x vertex colour x 2 + MatEmissive (0 on 310 of 313 shipped pieces),
+        // texkill diffuse.a < 0.25 (the piece's cut-out), oC1 = (0, 0, 0, 1): no specular. Its vertex sway (gSwayRate /
+        // gSwayAmplitude / gTime) is not reproduced.
+        d.bits = 0x0;
     } else if (is("trdiffmapvertcolor") || is("trdiffmapglowmapvertcolor") || is("trdiffmapglowmaphuevertcolor")) {
         d.bits = 0x4;                                        // diffuse (and glow map) only; specular from MatSpecular
     } else {
@@ -863,8 +868,11 @@ SceneLighting SceneView::lighting() const {
         const tr::Vec3 c{std::pow(light.colour.x, lightColourGamma), std::pow(light.colour.y, lightColourGamma), std::pow(light.colour.z, lightColourGamma)};
         l.localColour[i] = Vec4f{c.x * light.intensity, c.y * light.intensity, c.z * light.intensity,
                                  (1.0f - std::clamp(light.falloffPercent, 0.0f, 1.0f)) * light.range};
+        // w = 1: a deferred-only light (RenderMode 1) - forward pieces skip it (lighting.hlsli localLights).
+        // viewport_test RASA_FORWARDALLLIGHTS=1: every light reaches forward pieces (the rule before 2026-10-20).
+        static const bool forwardAllLights = [] { const char* v = std::getenv("RASA_FORWARDALLLIGHTS"); return v && *v == '1'; }();
         l.localBackColour[i] = Vec4f{light.backColour.x * light.intensity, light.backColour.y * light.intensity,
-                                     light.backColour.z * light.intensity, 0};
+                                     light.backColour.z * light.intensity, light.renderMode == 1 && !forwardAllLights ? 1.0f : 0.0f};
         if (light.kind == tr::PlacedLight::Kind::Spot) {
             const tr::Vec3 d = normalized(light.direction());
             const float outer = std::max(light.penumbraAngle, light.coneAngle) * 0.5f * 0.0174533f;   // full angles (UNVERIFIED)

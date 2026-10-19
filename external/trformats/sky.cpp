@@ -206,6 +206,7 @@ std::vector<PlacedLight> readLights(const Bytes& data, const std::map<std::strin
         light.enabled = flag(p, "Enabled", true);
         light.castsShadows = flag(p, "CastsShadows");
         light.isStatic = flag(p, "IsStatic", true);
+        if (p.count("RenderMode")) light.renderMode = uint32_t(std::strtoul(p.at("RenderMode").c_str(), nullptr, 10));
         light.shadowQuality = uint32_t(number(p, "ShadowQuality", 0));
         light.shadowOpacity = number(p, "ShadowOpacity", 1);
         light.shadowSoftness = number(p, "ShadowSoftness", 1);

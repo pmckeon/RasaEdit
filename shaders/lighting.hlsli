@@ -48,7 +48,7 @@ float3 skyLight(float3 n, SkyLighting s)
 // point light; spotInner: x cos(cone).
 #define MAX_LOCAL_LIGHTS 32
 // The slot buffer holds the shadow views (SceneLighting::maxLocalShadows), then one entry per placed light (view.rgb = its back colour x
-// intensity - plane lights).
+// intensity - plane lights; view.w = 1: a deferred-only light, RenderMode 1).
 #define MAX_LOCAL_SHADOWS 72
 
 // Sun shadow: 3x3 filtered comparisons in the sun's depth map, offset along the normal against acne; outside the map
@@ -233,11 +233,15 @@ float localShadowOf(float3 world, float3 lightPosition, float4 shadowBase, Struc
 float3 localLights(float3 world, float3 n, int count, float4 position[MAX_LOCAL_LIGHTS], float4 colour[MAX_LOCAL_LIGHTS],
                    float4 spot[MAX_LOCAL_LIGHTS], float4 spotInner[MAX_LOCAL_LIGHTS], float4 rotation[MAX_LOCAL_LIGHTS],
                    TextureCubeArray globes, SamplerState globeSampler, Texture2DArray cookies, SamplerState cookieSampler,
-                   Texture2D<float> atlas, StructuredBuffer<LocalShadowSlot> slots, float4 shadowBase[MAX_LOCAL_LIGHTS], float specPower)
+                   Texture2D<float> atlas, StructuredBuffer<LocalShadowSlot> slots, float4 shadowBase[MAX_LOCAL_LIGHTS], float specPower,
+                   bool forward = false)
 {
     float3 sum = float3(0, 0, 0);
     for (int i = 0; i < count; ++i)
     {
+        // Forward pieces (water, forward-phase pieces) are not lit by deferred-only lights (RenderMode 1: slot view.w = 1).
+        if (forward && slots[MAX_LOCAL_SHADOWS + i].view.w > 0.5)
+            continue;
         const float3 toLight = position[i].xyz - world;
         const float d = length(toLight);
         const float range = position[i].w;

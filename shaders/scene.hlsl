@@ -294,7 +294,7 @@ float4 psMain(VertexOutput input) : SV_Target0
             sf.hemiTop = hemiTop.rgb;
             sf.hemiBottom = hemiBottom.rgb;
             sf.sunVisibility = 1.0;
-            rgb *= skyLight(nf, sf) + localLights(input.world, nf, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner, localRotation, globeMaps, globeSampler, cookieMaps, cookieSampler, shadowAtlas, localShadowSlots, localShadowBase, 0.0);
+            rgb *= skyLight(nf, sf) + localLights(input.world, nf, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner, localRotation, globeMaps, globeSampler, cookieMaps, cookieSampler, shadowAtlas, localShadowSlots, localShadowBase, 0.0, true);
         }
         const float3 added = rgb * texel.a * input.colour.a * (options.z > 1.5 ? tint.a : 1.0);
         const float3 black = applyFog(added, length(cameraPosition.xyz - input.world), float4(0, 0, 0, fogColour.w), fogRange);
@@ -382,7 +382,7 @@ float4 psMain(VertexOutput input) : SV_Target0
     // The pixel's specular power as the G-buffer holds it (Pal: gloss map r; TR: saturate(MatSpecular.x); else 0) - it picks
     // TRPlaneLight's diffuse branch.
     const float specPower = material.y > 0.5 ? glossTexture.Sample(glossSampler, input.uv).r : (trBits & 0x4) ? saturate(trSpecular.x) : 0.0;
-    const float3 light = skyLight(n, s) + (forwardPiece ? float3(0, 0, 0) : extraSkyLight(n, extraTowards, extraFront, extraBack, false)) + localLights(input.world, n, localLightCount, localPosition, localColour, localSpot, localSpotInner, localRotation, globeMaps, globeSampler, cookieMaps, cookieSampler, shadowAtlas, localShadowSlots, localShadowBase, specPower);
+    const float3 light = skyLight(n, s) + (forwardPiece ? float3(0, 0, 0) : extraSkyLight(n, extraTowards, extraFront, extraBack, false)) + localLights(input.world, n, localLightCount, localPosition, localColour, localSpot, localSpotInner, localRotation, globeMaps, globeSampler, cookieMaps, cookieSampler, shadowAtlas, localShadowSlots, localShadowBase, specPower, forwardPiece);
     if (fogRange.z > 0.5)
     {
         // The game's light buffer holds deferred lights only: translucent (forward) pieces - the goo pool's distortion and other

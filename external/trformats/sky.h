@@ -111,6 +111,11 @@ struct PlacedLight {
     // FUN_0086a4d0 -> FUN_0084c190) writes + 0x339, the flag that adds TRasa::GraphicsUtil::DropActorsObjs to the shadow pass's
     // caster filter - so only a non-static light's shadow map holds characters.
     bool isStatic = true;
+    // RenderMode (lights.xml / .ltmp: 1 in 5,309 map lights, 2 in 575, 0 in 8). Mode 1 lights are deferred only: in the fountain
+    // trace (tabula_rasa.2.trace) the forward-drawn rocks 1105 / 1106, 7.5 m inside Light_31's 10 m range (mode 1), were drawn with
+    // no point light although their pass allows one - so mode-1 lights do not light forward pieces. Modes 0 / 2 are taken as
+    // forward too (UNVERIFIED).
+    uint32_t renderMode = 1;
     // Shadows (tabula_rasa.exe FUN_00809bf0 / FUN_00809690 and the lights' shadow variants, traced 2026-10-17): visibility =
     // 1 - ShadowOpacity x occlusion; g_ShadowSoftness = ShadowSoftness; map sizes by ShadowQuality (FUN_00808b70, see CLAUDE.md).
     uint32_t shadowQuality = 0;
