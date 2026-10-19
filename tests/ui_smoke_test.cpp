@@ -123,6 +123,32 @@ int main() {
         EditorContext& ctx = *editor.context_;
         ServerWorkspace& server = *editor.server_;
         frames(editor, device, 3);
+        // RASA_SMOKE_TEXTPATCH=1: an in-game check of the Text workspace's REAL save (not a test path) - writes data/rasaedit_text.zip
+        // and tabula_rasa.cfg's [Data] line in the settings' game folder. English "Luna Cavern" (uielementlanguage, a .py in the user's
+        // game.zip) -> "Luna Cavern EDITOR PATCH TEST", Initiation's name (missiontext 21132, a .pyo) -> "Initiation EDITOR PATCH TEST".
+        if (std::getenv("RASA_SMOKE_TEXTPATCH")) {
+            TextWorkspace& text = *editor.text_;
+            editor.setActive(editor.text_.get());
+            frames(editor, device, 2);
+            const std::string ui = "generated.client.language.english.uielementlanguage", mt = "generated.client.language.english.missiontextlanguage";
+            int64_t luna = -1;
+            for (const auto& e : ctx.gameData->global(ui, "lookup")->entries)
+                if (tr::py::length(e.first.get()) == 2 && tr::py::asInt(tr::py::item(e.first.get(), 1)) == 1 &&
+                    tr::py::asString(tr::py::item(e.second.get(), 0)) == "Luna Cavern")
+                    luna = tr::py::asInt(tr::py::item(e.first.get(), 0));
+            const bool edited = luna >= 0 && text.setText(ui, luna, 0, 0, "Luna Cavern EDITOR PATCH TEST") &&
+                                text.setText(mt, 21132, 0, 0, "Initiation EDITOR PATCH TEST");
+            const bool saved = edited && text.saveChanges();
+            std::printf("text patch: Luna Cavern id %lld, edited %s, saved %s - %s\n", static_cast<long long>(luna), edited ? "yes" : "NO",
+                        saved ? "yes" : "NO", ctx.statusText.c_str());
+            for (const std::string& path : ctx.gameData->archivePaths()) std::printf("  archive %s\n", path.c_str());
+            std::printf("  %s from %s; %s from %s; reads back \"%s\" / \"%s\"\n", ui.c_str(), ctx.gameData->moduleArchivePath(ui).c_str(),
+                        mt.c_str(), ctx.gameData->moduleArchivePath(mt).c_str(), ctx.gameData->missionText(21132, 1).c_str(),
+                        tr::py::asString(tr::py::item(tr::py::dictGetTuple(ctx.gameData->global(ui, "lookup"), {luna, 2}), 0)).c_str());
+            SDL_WaitForGPUIdle(device);
+            editor.releaseGpuResources();
+            return saved ? 0 : 1;
+        }
         check(ctx.map != nullptr, "map reopened from settings");
         check(editor.active_ == editor.server_.get(), "starts in the Server workspace (from settings)");
         check(dockspaceExists("ServerDockSpace"), "server layout built");
