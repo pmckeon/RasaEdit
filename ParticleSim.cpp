@@ -266,9 +266,20 @@ tr::ParticleValue ParticleInstance::evaluate(const tr::ParticleGenerator& g, flo
             v.w = evaluate(tr::generatorChild(g, 1), t).x;
             return v;
         }
-        case K::Geo:
-            ++unsupported_;
-            return tr::ParticleValue{};
+        case K::Geo: {
+            // pfxGeoGenerator (FUN_009dd080 / FUN_009dced0, traced 2026-10-20): a random piece of the model (its static and skinned
+            // pieces, GPCE / GSKN, FUN_009dcd00), then a random vertex of it - (random32 x count) >> 32 each - and that vertex's
+            // POSITION as stored (no bone or entity transform); the origin when the model or piece has nothing.
+            const std::vector<std::vector<tr::Vec3>>* pieces = geoPoints_ ? geoPoints_(g.geo) : nullptr;
+            if (!pieces || pieces->empty()) {
+                ++unsupported_;
+                return tr::ParticleValue{0, 0, 0, 1};
+            }
+            const std::vector<tr::Vec3>& piece = (*pieces)[std::min(size_t(random() * float(pieces->size())), pieces->size() - 1)];
+            if (piece.empty()) return tr::ParticleValue{0, 0, 0, 1};
+            const tr::Vec3& v = piece[std::min(size_t(random() * float(piece.size())), piece.size() - 1)];
+            return tr::ParticleValue{v.x, v.y, v.z, 1};
+        }
     }
     return tr::ParticleValue{};
 }
@@ -456,7 +467,7 @@ void ParticleInstance::apply(const tr::ParticleOperator& op, size_t group, float
             for (Particle& p : list) p.velocity = add(p.velocity, scaled(op.vector, dt));
             break;
         case K::AccelerateSpin:
-            for (Particle& p : list) p.spin += op.coefficient * dt;      // UNVERIFIED (not decompiled)
+            for (Particle& p : list) p.spin += op.coefficient * dt;      // pfxAccelerateSpin::Apply (FUN_00971640, particle + 0x48)
             break;
         case K::Gravity:
             for (Particle& p : list) {
@@ -465,9 +476,27 @@ void ParticleInstance::apply(const tr::ParticleOperator& op, size_t group, float
             }
             break;
         case K::Vortex: {
-            // UNVERIFIED (not decompiled): swirl about the axis through the centre.
-            const tr::Vec3 axis = normalized(op.axis);
-            for (Particle& p : list) p.velocity = add(p.velocity, scaled(cross(axis, subtract(p.position, op.vector)), op.coefficient * dt));
+            // pfxVortex::Apply (FUN_009b7e70, traced 2026-10-20) - the Particle System API's vortex: each particle's POSITION turns
+            // about the axis through the centre (the centre taken into world space for World / Hybrid groups; the axis as stored)
+            // by magnitude / (r^2 + 0.001) - per call, not x dt. offset = p - centre, n = offset / r, w = (n . axis) axis,
+            // u = n - w, v = axis x u; p = centre + (u cos a + v sin a + w) r, sin taken as +-sqrt(1 - cos^2), negative below 0
+            // and above pi.
+            const tr::Vec3 centre = system_->groups[group].referenceFrame == 0 ? op.vector : transformPoint(world_, op.vector);
+            for (Particle& p : list) {
+                const tr::Vec3 offset = subtract(p.position, centre);
+                const float r2 = dot(offset, offset);
+                if (r2 <= 0.0f) continue;
+                const float r = std::sqrt(r2);
+                const tr::Vec3 n = scaled(offset, 1.0f / r);
+                const tr::Vec3 w = scaled(op.axis, dot(n, op.axis));
+                const tr::Vec3 u = subtract(n, w);
+                const tr::Vec3 v = cross(op.axis, u);
+                const float angle = op.coefficient / (r2 + 0.001f);
+                const float c = std::cos(angle);
+                float sn = std::sqrt(std::max(0.0f, 1.0f - c * c));
+                if (angle < 0.0f || angle > 3.14159265f) sn = -sn;
+                p.position = add(centre, scaled(add(add(scaled(u, c), scaled(v, sn)), w), r));
+            }
             break;
         }
         case K::TargetColour: {

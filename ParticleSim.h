@@ -22,6 +22,8 @@
 #include "particles.h"
 
 #include <cstdint>
+#include <functional>
+#include <string>
 #include <vector>
 
 struct Particle {
@@ -38,12 +40,16 @@ struct Particle {
     float stretch = 0;
 };
 
+// Points of GEOG generators (pfxGeoGenerator): each piece's stored vertex positions of a model, by .geo name (nullptr when missing).
+using GeoPointSource = std::function<const std::vector<std::vector<tr::Vec3>>*(const std::string& geo)>;
+
 class ParticleInstance {
 public:
     // world: the system's frame (entity placement x contact point). seed: per-instance random sequence.
     ParticleInstance(const tr::ParticleSystem& system, const Mat4& world, uint32_t seed);
 
     void update(float dt);
+    void setGeoPoints(GeoPointSource source) { geoPoints_ = std::move(source); }
     size_t particleCount() const;
     // World-space bounding sphere of the live particles (positions, grown by the largest size); false when there are none.
     bool worldBounds(tr::Vec3& centre, float& radius) const;
@@ -51,7 +57,7 @@ public:
     const Mat4& world() const { return world_; }
     // Appends group g's quads as world-space triangles (6 vertices per particle).
     void buildQuads(size_t group, const tr::Vec3& cameraRight, const tr::Vec3& cameraUp, std::vector<MeshVertex>& out) const;
-    // Generators the simulation skips (GEOG points on a model) - for the status line.
+    // Generators the simulation could not evaluate (GEOG without a model) - for the status line.
     uint32_t unsupported() const { return unsupported_; }
 
 private:
@@ -80,4 +86,5 @@ private:
     std::vector<SlotState> slots_;
     std::vector<std::vector<Particle>> particles_;      // per group
     uint32_t unsupported_ = 0;
+    GeoPointSource geoPoints_;
 };

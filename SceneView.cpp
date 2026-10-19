@@ -2220,11 +2220,46 @@ bool SceneView::standaloneParticleBounds(tr::Vec3& centre, float& radius) const 
     return standalone_ && standalone_->worldBounds(centre, radius);
 }
 
+std::vector<std::string> SceneView::liveParticleList() const {
+    std::vector<std::string> out;
+    for (const LiveParticles& l : liveParticles_) {
+        const tr::Vec3 at = l.server ? serverPlacements_[l.placement].position : placements_[l.placement].centre;
+        char line[256];
+        std::snprintf(line, sizeof line, "%s %zu at %.1f %.1f %.1f: %zu particles", l.server ? "server" : "entity", l.placement, at.x, at.y,
+                      at.z, l.instance->particleCount());
+        out.push_back(line);
+    }
+    return out;
+}
+
+GeoPointSource SceneView::geoPointSource() {
+    return [this](const std::string& geo) -> const std::vector<std::vector<tr::Vec3>>* {
+        auto it = geoPoints_.find(geo);
+        if (it == geoPoints_.end()) {
+            std::vector<std::vector<tr::Vec3>> pieces;
+            try {
+                const tr::GeoModel model = tr::readGeo(assets_.read(geo));
+                for (const tr::GeoPiece& piece : model.pieces) {
+                    std::vector<tr::Vec3> points;
+                    points.reserve(piece.vertices.size());
+                    for (const tr::GeoVertex& v : piece.vertices) points.push_back(v.position);
+                    pieces.push_back(std::move(points));
+                }
+            } catch (const std::exception&) {
+            }
+            it = geoPoints_.emplace(geo, std::move(pieces)).first;
+        }
+        return &it->second;
+    };
+}
+
 void SceneView::advanceParticles(float dt) {
     if (!standaloneFile_.empty() && showParticles) {
         if (!standalone_)
-            if (const tr::ParticleSystem* system = particleSystem(standaloneFile_))
+            if (const tr::ParticleSystem* system = particleSystem(standaloneFile_)) {
                 standalone_ = std::make_unique<ParticleInstance>(*system, identityMatrix(), 1u);
+                standalone_->setGeoPoints(geoPointSource());
+            }
         if (standalone_ && animate) {
             const float step = std::clamp(dt, 0.0f, 0.1f);
             standalone_->update(step);
@@ -2267,6 +2302,7 @@ void SceneView::advanceParticles(float dt) {
             l.mount = m;
             l.server = true;
             l.instance = std::make_unique<ParticleInstance>(*system, multiply(s.world, frame), uint32_t(k * 6271u + m * 15485863u + 7u));
+            l.instance->setGeoPoints(geoPointSource());
             for (int step = 0; step < 90; ++step) l.instance->update(1.0f / 30.0f);
             liveParticles_.push_back(std::move(l));
         }
@@ -2294,6 +2330,7 @@ void SceneView::advanceParticles(float dt) {
                 l.body = int(b);
                 l.instance = std::make_unique<ParticleInstance>(*system, multiply(bodies[b].world, model.particles[m].local),
                                                                 uint32_t(k * 3571u + b * 7193u + m * 104729u + 11u));
+                l.instance->setGeoPoints(geoPointSource());
                 for (int step = 0; step < 90; ++step) l.instance->update(1.0f / 30.0f);
                 liveParticles_.push_back(std::move(l));
             }
@@ -2314,6 +2351,7 @@ void SceneView::advanceParticles(float dt) {
             l.placement = k;
             l.mount = m;
             l.instance = std::make_unique<ParticleInstance>(*system, multiply(p.world, p.model->particles[m].local), uint32_t(k * 7919u + m * 104729u + 1u));
+            l.instance->setGeoPoints(geoPointSource());
             // Warm-up: 3 s at 30 steps per second, so looping effects are already running (the files' own warm-up
             // fields are not understood).
             for (int step = 0; step < 90; ++step) l.instance->update(1.0f / 30.0f);

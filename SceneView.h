@@ -81,6 +81,8 @@ public:
     // frame). New ones are warmed up first so steady effects do not start empty.
     void advanceParticles(float dt);
     size_t liveParticleSystems() const { return liveParticles_.size(); }
+    // Each running system: map entity (or server placement) index, its file and particle count (viewport_test RASA_LISTLIVEPFX).
+    std::vector<std::string> liveParticleList() const;
     size_t liveParticles() const;
     size_t modelsLoaded() const { return modelsLoaded_; }
     size_t texturesLoaded() const;
@@ -754,6 +756,9 @@ private:
     std::vector<LiveParticles> liveParticles_;
     std::string standaloneFile_;
     std::unique_ptr<ParticleInstance> standalone_;
+    // GEOG particle generators: each model's pieces' stored vertex positions, read once per model.
+    std::map<std::string, std::vector<std::vector<tr::Vec3>>> geoPoints_;
+    GeoPointSource geoPointSource();
     float standaloneTime_ = 0;
     std::vector<MeshVertex> particleScratch_;
     std::deque<std::string> pending_;

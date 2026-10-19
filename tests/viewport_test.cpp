@@ -421,6 +421,12 @@ int main(int argc, char** argv) {
                                                                                                std::set<std::string>& kinds) {
                 if (op.kind == tr::ParticleOperatorKind::EmitFromParticle) kinds.insert(op.enabled ? "PEMT" : "PEMT (disabled)");
                 if (op.kind == tr::ParticleOperatorKind::Bounce) kinds.insert(op.enabled ? "BONC" : "BONC (disabled)");
+                if (op.kind == tr::ParticleOperatorKind::Vortex) kinds.insert("VORT");
+                std::function<void(const tr::ParticleGenerator&)> gens = [&](const tr::ParticleGenerator& g) {
+                    if (g.kind == tr::ParticleGeneratorKind::Geo) kinds.insert("GEOG");
+                    for (const tr::ParticleGenerator& c : g.children) gens(c);
+                };
+                for (const tr::ParticleGenerator* g : {&op.emitter.rate, &op.emitter.point, &op.emitter.velocity, &op.generator}) gens(*g);
                 for (const tr::ParticleOperator& c : op.children) walk(c, kinds);
             };
             for (const std::string& name : assets.namesWithExtension(".pfx")) {
@@ -486,6 +492,11 @@ int main(int argc, char** argv) {
                         if (op.kind == tr::ParticleOperatorKind::Sequence)
                             for (const tr::ParticleStage& st : op.stages) std::printf(" [%.2f -> %d]", st.time, st.child);
                         if (op.kind == tr::ParticleOperatorKind::ApplyAfter) std::printf(" after %.2f", op.time);
+                        if (op.kind == tr::ParticleOperatorKind::Vortex || op.kind == tr::ParticleOperatorKind::Gravity ||
+                            op.kind == tr::ParticleOperatorKind::Accelerate)
+                            std::printf(" vector %.2f %.2f %.2f axis %.2f %.2f %.2f coefficient %.4f", op.vector.x, op.vector.y, op.vector.z,
+                                        op.axis.x, op.axis.y, op.axis.z, op.coefficient);
+                        if (op.kind == tr::ParticleOperatorKind::Emit) std::printf(" point %s", gen(op.emitter.point).c_str());
                         if (op.kind == tr::ParticleOperatorKind::Bounce || op.kind == tr::ParticleOperatorKind::TerminateOutside)
                             std::printf(" friction %.3f resilience %.3f cutoff %.3f domain %d centre %.2f %.2f %.2f dim %.2f %.2f %.2f rot %.1f %.1f %.1f "
                                         "normal %.2f %.2f %.2f dist %.2f radius %.2f invert %d", op.friction, op.resilience, op.cutoff, int(op.domain.kind),
@@ -502,6 +513,23 @@ int main(int argc, char** argv) {
                     }
                 }
                 ParticleInstance instance(system, identityMatrix(), 12345u);
+                std::map<std::string, std::vector<std::vector<tr::Vec3>>> geoPoints;
+                instance.setGeoPoints([&](const std::string& geo) -> const std::vector<std::vector<tr::Vec3>>* {
+                    auto it = geoPoints.find(geo);
+                    if (it == geoPoints.end()) {
+                        std::vector<std::vector<tr::Vec3>> pieces;
+                        try {
+                            for (const tr::GeoPiece& piece : tr::readGeo(assets.read(geo)).pieces) {
+                                pieces.emplace_back();
+                                for (const tr::GeoVertex& v : piece.vertices) pieces.back().push_back(v.position);
+                            }
+                        } catch (const std::exception&) {
+                        }
+                        std::printf("  GEOG %s: %zu pieces\n", geo.c_str(), pieces.size());
+                        it = geoPoints.emplace(geo, std::move(pieces)).first;
+                    }
+                    return &it->second;
+                });
                 const float dt = 1.0f / 30.0f;
                 for (int step = 1; step <= int(seconds * 30.0f + 0.5f); ++step) {
                     instance.update(dt);
@@ -516,7 +544,18 @@ int main(int argc, char** argv) {
                             hi = std::max(hi, v.positionY);
                         }
                         std::printf("  %s %zu", system.groups[g].name.c_str(), quads.size() / 6);
-                        if (!quads.empty()) std::printf(" (y %.2f..%.2f)", lo, hi);
+                        if (!quads.empty()) {
+                            float edge = 0, alpha = 0;
+                            for (size_t q = 0; q + 6 <= quads.size(); q += 6) {
+                                const MeshVertex &a = quads[q], &b = quads[q + 1];
+                                edge += std::sqrt((a.positionX - b.positionX) * (a.positionX - b.positionX) +
+                                                  (a.positionY - b.positionY) * (a.positionY - b.positionY) +
+                                                  (a.positionZ - b.positionZ) * (a.positionZ - b.positionZ));
+                                alpha += float(a.colour >> 24);
+                            }
+                            const float n = float(quads.size() / 6);
+                            std::printf(" (y %.2f..%.2f, edge %.2f m, alpha %.0f, colour %08x)", lo, hi, edge / n, alpha / n, quads[0].colour);
+                        }
                     }
                     std::printf("\n");
                 }
@@ -2330,6 +2369,8 @@ int main(int argc, char** argv) {
         scene.advanceParticles(0.0f);
         for (float t = 0; t < particleSeconds; t += 1.0f / 30.0f) scene.advanceParticles(1.0f / 30.0f);
         std::printf("particle systems running: %zu, %zu particles\n", scene.liveParticleSystems(), scene.liveParticles());
+        if (envValue("RASA_LISTLIVEPFX"))
+            for (const std::string& line : scene.liveParticleList()) std::printf("  live %s\n", line.c_str());
         if (const char* pool = envValue("RASA_POOLFIGURES")) {   // <spawn pool index in the map's content>: its figures
             const std::vector<std::string> lines = scene.debugServerFigures(Selection{SelectionKind::SpawnPool, size_t(std::atoi(pool))});
             std::printf("spawn pool %s: %zu figures\n", pool, lines.size());
