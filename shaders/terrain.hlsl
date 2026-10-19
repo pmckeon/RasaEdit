@@ -42,6 +42,8 @@ cbuffer FragmentUniforms : register(b0, space3)
     float4 extraFront[MAX_EXTRA_DIRECTIONAL];
     float4 extraBack[MAX_EXTRA_DIRECTIONAL];
     float4 localShadowBase[MAX_LOCAL_LIGHTS];   // x first shadow view + 1, y view count, z shadow-light index
+    float4 forwardTowards;    // forward pieces' directional light (the engine's CombinedDirLight): towards it
+    float4 forwardColour;
     float4 tilings[32];       // metres per repeat for layers 0..127 (four per entry)
 };
 

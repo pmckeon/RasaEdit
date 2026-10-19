@@ -47,6 +47,8 @@ struct LightingUniforms {
     Vec4f extraFront[SceneLighting::maxExtraDirectional];
     Vec4f extraBack[SceneLighting::maxExtraDirectional];
     Vec4f localShadowBase[SceneLighting::maxLocalLights];   // x first shadow view + 1, y view count, z shadow-light index
+    Vec4f forwardTowards;          // the combined forward light (SceneLighting::forwardTowards / forwardColour)
+    Vec4f forwardColour;
 };
 
 // A placed-light shadow slot as lighting.hlsli's LocalShadowSlot reads it from the fragment storage buffer (localShadowBuffer_). Not
@@ -104,6 +106,9 @@ LightingUniforms lightingUniforms(const SceneLighting& l, const Vec4f& cameraPos
         u.extraBack[k] = used ? l.extraBack[k] : Vec4f{0, 0, 0, 0};
     }
     for (int k = 0; k < SceneLighting::maxLocalLights; ++k) u.localShadowBase[k] = l.localShadowBase[k];
+    const tr::Vec3 forward = normalized(l.forwardTowards);
+    u.forwardTowards = Vec4f{forward.x, forward.y, forward.z, 0};
+    u.forwardColour = l.forwardColour;
     u.hemiTop = l.hemiTop;
     u.hemiBottom = l.hemiBottom;
     u.fogColour = Vec4f{l.fogColour.x, l.fogColour.y, l.fogColour.z, l.fog ? 1.0f : 0.0f};
@@ -1240,7 +1245,7 @@ void Renderer::recordWater(SDL_GPUCommandBuffer*& commands) {
     struct WaterFragmentUniforms {
         Vec4f hemiTop, hemiBottom, dirColour, dirDirection, fogColour, matSpecular, matRefractColour, params, screen, eye;
     };
-    const tr::Vec3 towards = normalized(lighting_.towardsLight);
+    const tr::Vec3 towards = normalized(lighting_.forwardTowards);
     for (const WaterItem& item : waterDraws_) {
         if (reserveDescriptors(commands, pass, 7, 0)) SDL_BindGPUGraphicsPipeline(pass, waterPipeline_);
         SDL_GPUBufferBinding vertexBinding = {item.mesh->vertices, 0};
@@ -1257,10 +1262,10 @@ void Renderer::recordWater(SDL_GPUCommandBuffer*& commands) {
         for (int k = 0; k < 8; ++k) v.transform[k] = m.transform[k];
         SDL_PushGPUVertexUniformData(commands, 0, &v, sizeof v);
         WaterFragmentUniforms u{};
-        // The forward lights (gHemiLight, gDirLight[0]): the sky's hemi light and its main directional light (Color only).
+        // The forward lights (gHemiLight, gDirLight[0]): the sky's hemi light and the combined directional light (Color only).
         u.hemiTop = lighting_.hemiTop;
         u.hemiBottom = lighting_.hemiBottom;
-        u.dirColour = lighting_.sunFront;
+        u.dirColour = lighting_.forwardColour;
         u.dirDirection = Vec4f{-towards.x, -towards.y, -towards.z, 0};
         u.fogColour = Vec4f{lighting_.fogColour.x, lighting_.fogColour.y, lighting_.fogColour.z, 1};
         u.matSpecular = m.matSpecular;

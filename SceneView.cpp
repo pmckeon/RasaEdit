@@ -1131,6 +1131,7 @@ SceneLighting SceneView::skyLightingAt() const {
     l.sunBack = Vec4f{0, 0, 0, 1};
     struct Directional { tr::Vec3 towards; tr::Vec3 front; tr::Vec3 back; float shadowOpacity; bool castsShadows; };
     std::vector<Directional> directional;
+    std::vector<Directional> unlit;        // directional lights black at this time: they still join the forward light's combination
     for (const SkyWeight& w : weights)
     for (const tr::SkyLayer& layer : skies_[w.index].sky.layers) {
         if (!layer.enabled || !showSun) continue;
@@ -1138,9 +1139,9 @@ SceneLighting SceneView::skyLightingAt() const {
             if (light.hemi || !light.active) continue;
             const tr::Vec3 front = scaled(tr::skyLightColour(light, 3, t), w.weight);
             const tr::Vec3 back = scaled(tr::skyLightColour(light, 4, t), w.weight);
-            if (luminance(front) <= 0.0f && luminance(back) <= 0.0f) continue;
             const tr::Vec3 travel = tr::skyLayerDirection(layer, light.orientation, t);
-            directional.push_back(Directional{normalized(tr::Vec3{-travel.x, -travel.y, -travel.z}), front, back, tr::skyLightShadowOpacity(light, t), light.castsShadows});
+            const Directional d{normalized(tr::Vec3{-travel.x, -travel.y, -travel.z}), front, back, tr::skyLightShadowOpacity(light, t), light.castsShadows};
+            (luminance(front) <= 0.0f && luminance(back) <= 0.0f ? unlit : directional).push_back(d);
         }
     }
     std::stable_sort(directional.begin(), directional.end(), [&](const Directional& a, const Directional& b) { return luminance(a.front) > luminance(b.front); });
@@ -1153,9 +1154,32 @@ SceneLighting SceneView::skyLightingAt() const {
             if (g.hemi || g.renderMode == 0 || !g.active) continue;
             const tr::Vec3 front = scaled(tr::skyLightColour(g, 3, t), w.weight);
             const tr::Vec3 back = scaled(tr::skyLightColour(g, 4, t), w.weight);
-            if (luminance(front) <= 0.0f && luminance(back) <= 0.0f) continue;
-            directional.push_back(Directional{normalized(tr::Vec3{-g.orientation.x, -g.orientation.y, -g.orientation.z}), front, back, 0.0f, false});
+            const Directional d{normalized(tr::Vec3{-g.orientation.x, -g.orientation.y, -g.orientation.z}), front, back, 0.0f, false};
+            (luminance(front) <= 0.0f && luminance(back) <= 0.0f ? unlit : directional).push_back(d);
         }
+    // The forward light (gDirLight[0] of water, forward-phase pieces and billboards) is one TRasa::CombinedDirLight per frame
+    // (LightCombiner::AddLight FUN_00883340, add FUN_00883040, finish FUN_00883120; traced 2026-10-20): it starts at colour 0 and
+    // direction (0, -1, 0) (0x00c2b50c = -1); each light adds its Color to the colour, then its direction of travel (the +z axis of its
+    // rotation, FUN_004f4490) x the luminance 0.3 |r| + 0.59 |g| + 0.11 |b| (FUN_00675aa0) of the colour summed SO FAR; the
+    // direction is normalised at the end. Black lights count too - after a lit one they carry its weight. VERIFIED on
+    // tabula_rasa.7.trace (Alia Das, .skytime 12:00, water draw 31402441): the sun (1.669 1.613 1.437, travel (-0.7068 -0.7071
+    // -0.0221) as in the shadow pass) followed by _tranz's black second layer light gives (-0.5703 -0.8212 -0.0178) against the
+    // game's gDirLight[0].Direction (-0.5698 -0.8216 -0.0180) - 55 degrees up where the sun is at 45. The order the engine adds the
+    // lights in is NOT traced: brightest first, then the black ones (the order that fits that frame).
+    {
+        tr::Vec3 colour{0, 0, 0}, travel{0, -1, 0};
+        auto combine = [&](const Directional& d) {
+            colour = add(colour, d.front);
+            const float weight = 0.3f * std::fabs(colour.x) + 0.59f * std::fabs(colour.y) + 0.11f * std::fabs(colour.z);
+            travel = add(travel, scaled(d.towards, -weight));
+        };
+        std::vector<Directional> lit = directional;
+        std::stable_sort(lit.begin(), lit.end(), [&](const Directional& a, const Directional& b) { return luminance(a.front) > luminance(b.front); });
+        for (const Directional& d : lit) combine(d);
+        for (const Directional& d : unlit) combine(d);
+        l.forwardTowards = normalized(tr::Vec3{-travel.x, -travel.y, -travel.z});
+        l.forwardColour = vec4(colour);
+    }
     for (size_t k = 0; k < directional.size(); ++k) {
         const Directional& d = directional[k];
         if (k == 0) {
@@ -2646,14 +2670,14 @@ void SceneView::queueBillboards(const Model& model, const Mat4& placementWorld, 
             const tr::Vec3 up = normalized(cross(toCamera, right));
             const tr::Vec3 p = add(add(add(centre, scaled(right, gv.position.x)), scaled(toCamera, gv.position.y)), scaled(up, -gv.position.z));
             const tr::Vec3& n = gv.normal;
-            const float facing = std::clamp(dot(n, light.towardsLight), 0.0f, 1.0f);
+            const float facing = std::clamp(dot(n, normalized(light.forwardTowards)), 0.0f, 1.0f);
             const float h = (n.y + 1.0f) * 0.5f;
             auto channel = [&](float diffuse, float sun, float top, float bottom, float ambient, float emissive) {
                 return std::clamp(diffuse * sun * facing + ambient * (bottom + (top - bottom) * h) + emissive, 0.0f, 1.0f);
             };
-            const float r = channel(bb.diffuse.x, light.sunFront.x, light.hemiTop.x, light.hemiBottom.x, bb.ambient.x, bb.emissive.x);
-            const float g = channel(bb.diffuse.y, light.sunFront.y, light.hemiTop.y, light.hemiBottom.y, bb.ambient.y, bb.emissive.y);
-            const float b = channel(bb.diffuse.z, light.sunFront.z, light.hemiTop.z, light.hemiBottom.z, bb.ambient.z, bb.emissive.z);
+            const float r = channel(bb.diffuse.x, light.forwardColour.x, light.hemiTop.x, light.hemiBottom.x, bb.ambient.x, bb.emissive.x);
+            const float g = channel(bb.diffuse.y, light.forwardColour.y, light.hemiTop.y, light.hemiBottom.y, bb.ambient.y, bb.emissive.y);
+            const float b = channel(bb.diffuse.z, light.forwardColour.z, light.hemiTop.z, light.hemiBottom.z, bb.ambient.z, bb.emissive.z);
             MeshVertex v{};
             v.positionX = p.x; v.positionY = p.y; v.positionZ = p.z;
             v.normalX = toCamera.x; v.normalY = toCamera.y; v.normalZ = toCamera.z;

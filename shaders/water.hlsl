@@ -38,6 +38,7 @@ struct VertexOutput
     float3 tangent  : TEXCOORD4;          // world space, not normalised (the pixel shader normalises the sum)
     float3 binormal : TEXCOORD5;
     float3 normal   : TEXCOORD6;
+    float3 view     : TEXCOORD7;          // normalize(eye - vertex) PER VERTEX, interpolated and not renormalised (the game's o6)
 };
 
 float2 transformUv(float2 uv, int slot)
@@ -59,6 +60,7 @@ VertexOutput vsWater(VertexInput input)
     o.tangent = mul((float3x3)normalMatrix, input.tangent);
     o.binormal = mul((float3x3)normalMatrix, input.binormal);
     o.normal = mul((float3x3)normalMatrix, input.normal);
+    o.view = normalize(eyePosition.xyz - world.xyz);
     return o;
 }
 
@@ -124,8 +126,11 @@ float4 psWater(VertexOutput input) : SV_Target
     const float3 light = lerp(hemiBottom.rgb, hemiTop.rgb, (n.y + 1.0) * 0.5) + dirColour.rgb * max(ndl, 0.0);
     const float3 behind = (useStraight ? straight : refracted) * matRefractColour.rgb;
     float3 colour = lerp(behind, 2.0 * body.rgb * light, body.a);
-    // Specular of the directional light: pow(N.H, MatPower), H = normalize(V - direction).
-    const float3 v = normalize(eye.xyz - input.world);
+    // Specular of the directional light: pow(N.H, MatPower), H = normalize(V - direction). V is the vertex shader's per-vertex
+    // view direction, interpolated and used as it comes (traced 2026-10-20, tabula_rasa.7.trace call 31402441: vs o6 =
+    // normalize(gWorldEyePos - world), ps "add r3, -c10, v4; nrm") - on a 9-vertex 64 m pond this is far from the per-pixel
+    // direction and decides where the MatPower 500 sparkles fall.
+    const float3 v = input.view;
     const float ndh = dot(n, normalize(v - dirDirection.xyz));
     if (params.x != 0.0 && ndh > 0.0 && ndl > 0.0)
         colour += pow(ndh, params.x) * dirColour.rgb * matSpecular.rgb;

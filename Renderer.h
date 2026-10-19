@@ -155,6 +155,11 @@ struct SceneLighting {
     // sky_foreas_wilderness_default_tranz.sky, orange at dawn / dusk, ShadowOpacity 0). Drawn without the shadow map
     // (exact for ShadowOpacity 0; UNVERIFIED for others).
     static constexpr int maxExtraDirectional = 3;
+    // The forward light (gDirLight[0] of forward-drawn pieces: water, forward-phase pieces, billboards): the engine combines every
+    // directional light into one TRasa::CombinedDirLight (FUN_00883040 / FUN_00883120) - colour = their sum, direction =
+    // normalize((0, -1, 0) + sum of each light's travel direction x the luminance of the colour summed so far). See SceneView::lighting.
+    tr::Vec3 forwardTowards{-0.35f, 0.85f, -0.4f};
+    Vec4f forwardColour{0.65f, 0.65f, 0.65f, 1};
     int extraDirectionalCount = 0;
     tr::Vec3 extraTowards[maxExtraDirectional];
     Vec4f extraFront[maxExtraDirectional] = {};

@@ -65,6 +65,8 @@ cbuffer FragmentUniforms : register(b0, space3)
     float4 extraFront[MAX_EXTRA_DIRECTIONAL];
     float4 extraBack[MAX_EXTRA_DIRECTIONAL];
     float4 localShadowBase[MAX_LOCAL_LIGHTS];   // x first shadow view + 1, y view count, z shadow-light index
+    float4 forwardTowards;    // forward pieces' directional light (the engine's CombinedDirLight): towards it
+    float4 forwardColour;
     float4 specular;          // aniso additive: MatSpecular
     float4 layers;            // x detail on UV set 1, y decal on UV set 1, z has detail, w has decal (aniso additive and
                               // forward-phase pieces; w = 2: a Pal*Dec* decal map in t3 on uv2, lerped into the deferred albedo)
@@ -286,13 +288,13 @@ float4 psMain(VertexOutput input) : SV_Target0
         {
             const float3 nf = normalize(input.normal);
             SkyLighting sf;
-            sf.towardsLight = normalize(lightDirection.xyz);
-            sf.sunFront = sunFront.rgb;
-            sf.sunBack = float3(0, 0, 0);       // forward gDirLight: Color only
+            sf.towardsLight = forwardTowards.xyz;   // forward gDirLight[0]: the combined directional light, Color only
+            sf.sunFront = forwardColour.rgb;
+            sf.sunBack = float3(0, 0, 0);
             sf.hemiTop = hemiTop.rgb;
             sf.hemiBottom = hemiBottom.rgb;
             sf.sunVisibility = 1.0;
-            rgb *= skyLight(nf, sf) + extraSkyLight(nf, extraTowards, extraFront, extraBack, true) + localLights(input.world, nf, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner, localRotation, globeMaps, globeSampler, cookieMaps, cookieSampler, shadowAtlas, localShadowSlots, localShadowBase, 0.0);
+            rgb *= skyLight(nf, sf) + localLights(input.world, nf, (int)localCount.x, localPosition, localColour, localSpot, localSpotInner, localRotation, globeMaps, globeSampler, cookieMaps, cookieSampler, shadowAtlas, localShadowSlots, localShadowBase, 0.0);
         }
         const float3 added = rgb * texel.a * input.colour.a * (options.z > 1.5 ? tint.a : 1.0);
         const float3 black = applyFog(added, length(cameraPosition.xyz - input.world), float4(0, 0, 0, fogColour.w), fogRange);
@@ -363,10 +365,12 @@ float4 psMain(VertexOutput input) : SV_Target0
         const float3 scale = (trBits & 0x2) ? input.colour.rgb * tint.rgb + trEmissive.rgb * tint.rgb * 0.5 : input.colour.rgb * tint.rgb;
         base.rgb = a * scale;
     }
+    // Translucent and fading pieces are forward pieces: lit by the combined directional light (gDirLight[0], Color only).
+    const bool forwardPiece = options.y > 1.5 || (trBits & 0x10);
     SkyLighting s;
-    s.towardsLight = normalize(lightDirection.xyz);
-    s.sunFront = sunFront.rgb;
-    s.sunBack = options.y > 1.5 ? float3(0, 0, 0) : sunBack.rgb;   // translucent = forward pieces: no back colour
+    s.towardsLight = forwardPiece ? forwardTowards.xyz : normalize(lightDirection.xyz);
+    s.sunFront = forwardPiece ? forwardColour.rgb : sunFront.rgb;
+    s.sunBack = forwardPiece ? float3(0, 0, 0) : sunBack.rgb;
     s.hemiTop = hemiTop.rgb;
     s.hemiBottom = hemiBottom.rgb;
     // Glow maps add after lighting (the game's glow buffer, added in trhdrcomposite before fog).
@@ -378,7 +382,7 @@ float4 psMain(VertexOutput input) : SV_Target0
     // The pixel's specular power as the G-buffer holds it (Pal: gloss map r; TR: saturate(MatSpecular.x); else 0) - it picks
     // TRPlaneLight's diffuse branch.
     const float specPower = material.y > 0.5 ? glossTexture.Sample(glossSampler, input.uv).r : (trBits & 0x4) ? saturate(trSpecular.x) : 0.0;
-    const float3 light = skyLight(n, s) + extraSkyLight(n, extraTowards, extraFront, extraBack, options.y > 1.5) + localLights(input.world, n, localLightCount, localPosition, localColour, localSpot, localSpotInner, localRotation, globeMaps, globeSampler, cookieMaps, cookieSampler, shadowAtlas, localShadowSlots, localShadowBase, specPower);
+    const float3 light = skyLight(n, s) + (forwardPiece ? float3(0, 0, 0) : extraSkyLight(n, extraTowards, extraFront, extraBack, false)) + localLights(input.world, n, localLightCount, localPosition, localColour, localSpot, localSpotInner, localRotation, globeMaps, globeSampler, cookieMaps, cookieSampler, shadowAtlas, localShadowSlots, localShadowBase, specPower);
     if (fogRange.z > 0.5)
     {
         // The game's light buffer holds deferred lights only: translucent (forward) pieces - the goo pool's distortion and other
