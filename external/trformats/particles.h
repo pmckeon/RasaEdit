@@ -97,8 +97,10 @@ struct ParticleEmitter {
     uint32_t roundingMode = 0;              // 0 Randomize, 1 Accumulate
 };
 
-// Domain of TOUT / BONC: BOXS box (centre, rotation, dimension, invert), HALF half space (normal, distance), SPHE
-// sphere (centre, radius, invert).
+// Domain of TOUT / BONC (pfxBox / pfxHalfSpace / pfxSphere, traced 2026-10-20): BOXS box (invert, centre, dimension, rotation in
+// degrees - x pitch, y yaw, z roll, D3DXQuaternionRotationYawPitchRoll), HALF half space (normal, distance: inside where
+// n . p + distance >= 0), SPHE sphere (centre, radius - stored squared -, v2: invert). Inside tests (TOUT) ignore invert; the
+// bounce hit test uses it (see ParticleSim).
 struct ParticleDomain {
     enum class Kind : uint8_t { Box, HalfSpace, Sphere };
     Kind kind = Kind::Box;
@@ -116,7 +118,7 @@ enum class ParticleOperatorKind : uint8_t {
     Sequence,           // "SEQ ": stages (time, optional operator in children)
     ApplyAfter,         // APAF: the child, once more than time seconds have passed
     Emit,               // EMIT
-    EmitFromParticle,   // PEMT (not simulated)
+    EmitFromParticle,   // PEMT: emits at the particles of the PREVIOUS group of the system (ParticleSim)
     Move,               // MOVE
     Drag,               // DRAG: velocity += |velocity| * coefficient * dt * velocity
     Accelerate,         // ACCL: velocity += vector * dt
@@ -129,7 +131,7 @@ enum class ParticleOperatorKind : uint8_t {
     SetColour, SetGrowth, SetPosition, SetRotation, SetSize, SetVelocity, SetStretch, SetSpin,   // SETC SETG SETP SETR SETS SETV SEST SESP
     AlignToVelocity,    // ALTV: previous position = position + velocity (aligned sprites point along the velocity)
     TerminateOutside,   // TOUT: kills particles outside the domain
-    Bounce,             // BONC (not simulated)
+    Bounce,             // BONC (ParticleSim)
     Dummy,              // DUMM
 };
 
@@ -153,16 +155,16 @@ struct ParticleOperator {
     float unknown = 0;                      // ApplyAfter: second float (UNKNOWN)
     ParticleValue target;                   // TargetColour; TargetAlpha in w
     std::vector<ParticleKey> keys;          // KeyColour
-    float friction = 0, resilience = 0, cutoff = 0;   // Bounce
+    float friction = 0, resilience = 0, cutoff = 0;   // Bounce, as stored: tangential factor, normal factor, squared-speed cutoff
     ParticleDomain domain;                  // TerminateOutside, Bounce
     uint32_t stateSlot = 0;
 };
 
 struct ParticleGroup {
     uint32_t version = 0;
-    bool enabled = true;
+    bool enabled = true;                    // as stored (Enabled, group + 0x154); the system's reset sets it at start
     std::string name;
-    uint32_t zBias = 0;                     // reading UNVERIFIED (the field the reader stores before MaxParticles)
+    uint32_t zBias = 0;                     // ZBias (group + 0x13c): draw sort key = depth x (1 - zBias x 1e-5), FUN_0066f650
     uint32_t maxParticles = 0;
     uint8_t primitive = 2;                  // 0 Point, 1 Line, 2 Sprite, 3 Aligned Sprite, 4 Oriented Sprite
     uint8_t referenceFrame = 0;             // 0 Object, 1 World, 2 Hybrid
@@ -173,7 +175,7 @@ struct ParticleGroup {
     std::string texture;
     uint32_t billboard = 3;                 // X 0, Y 1, Z 2, Camera 3: the sprite's plane is across that axis
     bool sorted = false;                    // PGRS
-    uint8_t sortOrder = 0;
+    uint8_t sortOrder = 0;                  // PGRS: particles kept in emission order; 0 newest drawn first, 1 oldest first
     ParticleOperator op;
 };
 

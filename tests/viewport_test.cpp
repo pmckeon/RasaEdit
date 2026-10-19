@@ -3,6 +3,7 @@
 //   viewport_test <game root> <game.zip> <map> <out.rgba> <width> <height> <eye x y z> <target x y z>
 #include "Avatar.h"
 #include "SceneView.h"
+#include "ParticleSim.h"
 #include "PvsBuilder.h"
 #include "UiCanvas.h"
 #include "UiSchema.h"
@@ -21,7 +22,9 @@
 #include <fstream>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <map>
+#include <set>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -402,6 +405,124 @@ int main(int argc, char** argv) {
             }
             std::printf("pkg scan: %zu packages, %zu failed; %zu accessories, %zu particle attaches, %zu lights\n", packages, failed,
                         accessories, particles, lights);
+        }
+        // RASA_PFXSCAN=1: how often the particle features the simulator lacks are used - groups by primitive, sorted groups (by sort
+        // order), zBias values, groups with emit-from-particle (PEMT) / bounce (BONC) operators - with a few example files each.
+        if (envValue("RASA_PFXSCAN")) {
+            size_t files = 0, groups = 0;
+            std::map<std::string, size_t> counts;
+            std::map<std::string, std::vector<std::string>> examples;
+            auto note = [&](const std::string& what, const std::string& file) {
+                ++counts[what];
+                auto& list = examples[what];
+                if ((list.size() < 4 || std::string(envValue("RASA_PFXSCAN")) == "all") && std::find(list.begin(), list.end(), file) == list.end()) list.push_back(file);
+            };
+            std::function<void(const tr::ParticleOperator&, std::set<std::string>&)> walk = [&](const tr::ParticleOperator& op,
+                                                                                               std::set<std::string>& kinds) {
+                if (op.kind == tr::ParticleOperatorKind::EmitFromParticle) kinds.insert(op.enabled ? "PEMT" : "PEMT (disabled)");
+                if (op.kind == tr::ParticleOperatorKind::Bounce) kinds.insert(op.enabled ? "BONC" : "BONC (disabled)");
+                for (const tr::ParticleOperator& c : op.children) walk(c, kinds);
+            };
+            for (const std::string& name : assets.namesWithExtension(".pfx")) {
+                ++files;
+                try {
+                    const tr::ParticleSystem system = tr::readParticleSystem(assets.read(name));
+                    for (const tr::ParticleGroup& g : system.groups) {
+                        ++groups;
+                        static const char* kPrimitives[] = {"point", "line", "sprite", "aligned sprite", "oriented sprite"};
+                        note(std::string("primitive ") + (g.primitive < 5 ? kPrimitives[g.primitive] : "other"), name);
+                        if (g.sorted) note("sorted, order " + std::to_string(g.sortOrder), name);
+                        if (g.zBias) note("zBias " + std::to_string(g.zBias), name);
+                        note(std::string("enabled ") + (g.enabled ? "yes" : "no") + ", flag " + std::to_string(g.unknownFlag) + ", v" + std::to_string(g.version), name);
+                        if (!g.enabled) note("stored disabled", name);
+                        std::set<std::string> kinds;
+                        walk(g.op, kinds);
+                        for (const std::string& k : kinds) note("group with " + k, name);
+                        if (kinds.count("PEMT")) note(std::string("PEMT in ") + (&g == &system.groups.front() ? "the first group" : "a later group"), name);
+                    }
+                } catch (const std::exception& e) {
+                    note("FAILED", name);
+                }
+            }
+            std::printf("pfx scan: %zu files, %zu groups\n", files, groups);
+            for (const auto& [what, n] : counts) {
+                std::printf("  %-28s %5zu  e.g.", what.c_str(), n);
+                for (const std::string& f : examples[what]) std::printf(" %s", f.c_str());
+                std::printf("\n");
+            }
+        }
+        // RASA_PFXRUN=<file.pfx>[,seconds]: run one particle system on its own (identity frame, 30 steps a second) and print each
+        // group's particle count and extent every half second - checks emit-from-particle (a group fed by the previous one), bounce
+        // and terminate-outside domains.
+        if (const char* spec = envValue("RASA_PFXRUN")) {
+            std::string file = spec;
+            float seconds = 3.0f;
+            if (const size_t comma = file.find(','); comma != std::string::npos) {
+                seconds = std::strtof(file.c_str() + comma + 1, nullptr);
+                file = file.substr(0, comma);
+            }
+            try {
+                const tr::ParticleSystem system = tr::readParticleSystem(assets.read(file));
+                // RASA_PFXTREE=1: the operator trees first (kind, enabled, emitter rate / domain details).
+                if (envValue("RASA_PFXTREE")) {
+                    auto tag = [](uint32_t t) { return std::string{char(t >> 24), char(t >> 16), char(t >> 8), char(t)}; };
+                    std::function<std::string(const tr::ParticleGenerator&)> gen = [&](const tr::ParticleGenerator& g) {
+                        std::string out = tag(g.tag);
+                        if (g.kind == tr::ParticleGeneratorKind::Constant) out += "(" + std::to_string(g.value.x) + ")";
+                        if (g.kind == tr::ParticleGeneratorKind::Uniform) out += "(" + std::to_string(g.minimum) + ".." + std::to_string(g.maximum) + ")";
+                        if (g.kind == tr::ParticleGeneratorKind::Keys)
+                            for (const tr::ParticleKey& k : g.keys) out += " [" + std::to_string(k.time) + ":" + std::to_string(k.value.x) + "]";
+                        if (!g.children.empty()) {
+                            out += "{";
+                            for (const tr::ParticleGenerator& c : g.children) out += gen(c) + " ";
+                            out += "}";
+                        }
+                        return out;
+                    };
+                    std::function<void(const tr::ParticleOperator&, int)> tree = [&](const tr::ParticleOperator& op, int depth) {
+                        std::printf("%*s%s%s", depth * 2, "", tag(op.tag).c_str(), op.enabled ? "" : " (off)");
+                        if (op.kind == tr::ParticleOperatorKind::Emit || op.kind == tr::ParticleOperatorKind::EmitFromParticle)
+                            std::printf(" rate %s lifetime %s", gen(op.emitter.rate).c_str(), gen(op.emitter.lifetime).c_str());
+                        if (op.kind == tr::ParticleOperatorKind::Sequence)
+                            for (const tr::ParticleStage& st : op.stages) std::printf(" [%.2f -> %d]", st.time, st.child);
+                        if (op.kind == tr::ParticleOperatorKind::ApplyAfter) std::printf(" after %.2f", op.time);
+                        if (op.kind == tr::ParticleOperatorKind::Bounce || op.kind == tr::ParticleOperatorKind::TerminateOutside)
+                            std::printf(" friction %.3f resilience %.3f cutoff %.3f domain %d centre %.2f %.2f %.2f dim %.2f %.2f %.2f rot %.1f %.1f %.1f "
+                                        "normal %.2f %.2f %.2f dist %.2f radius %.2f invert %d", op.friction, op.resilience, op.cutoff, int(op.domain.kind),
+                                        op.domain.centre.x, op.domain.centre.y, op.domain.centre.z, op.domain.dimension.x, op.domain.dimension.y,
+                                        op.domain.dimension.z, op.domain.rotation.x, op.domain.rotation.y, op.domain.rotation.z, op.domain.normal.x,
+                                        op.domain.normal.y, op.domain.normal.z, op.domain.distance, op.domain.radius, int(op.domain.invert));
+                        std::printf("\n");
+                        for (const tr::ParticleOperator& c : op.children) tree(c, depth + 1);
+                    };
+                    for (const tr::ParticleGroup& g : system.groups) {
+                        std::printf("group %s (stored enabled %d, frame %d, max %u, zBias %u%s)\n", g.name.c_str(), int(g.enabled), g.referenceFrame, g.maxParticles, g.zBias,
+                                    g.sorted ? g.sortOrder ? ", sorted 1" : ", sorted 0" : "");
+                        tree(g.op, 1);
+                    }
+                }
+                ParticleInstance instance(system, identityMatrix(), 12345u);
+                const float dt = 1.0f / 30.0f;
+                for (int step = 1; step <= int(seconds * 30.0f + 0.5f); ++step) {
+                    instance.update(dt);
+                    if (step % 15) continue;
+                    std::printf("%5.1f s:", step * dt);
+                    for (size_t g = 0; g < system.groups.size(); ++g) {
+                        std::vector<MeshVertex> quads;
+                        instance.buildQuads(g, tr::Vec3{1, 0, 0}, tr::Vec3{0, 1, 0}, quads);
+                        float lo = 1e30f, hi = -1e30f;
+                        for (const MeshVertex& v : quads) {
+                            lo = std::min(lo, v.positionY);
+                            hi = std::max(hi, v.positionY);
+                        }
+                        std::printf("  %s %zu", system.groups[g].name.c_str(), quads.size() / 6);
+                        if (!quads.empty()) std::printf(" (y %.2f..%.2f)", lo, hi);
+                    }
+                    std::printf("\n");
+                }
+            } catch (const std::exception& e) {
+                std::printf("pfx run: %s\n", e.what());
+            }
         }
         // RASA_TEXTWRITETEST=<folder>: every language module written as Python source (tr::moduleSource) and read back
         // (tr::evaluateSource) must give the same values; the sources are left in the folder (for a check with Python itself). Then

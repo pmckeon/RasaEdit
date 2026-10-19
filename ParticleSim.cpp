@@ -32,6 +32,137 @@ tr::Vec3 transformDirection(const Mat4& m, const tr::Vec3& d) {
 
 uint8_t unitByte(float v) { return uint8_t(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f); }
 
+// Inverse of an affine matrix (upper 3 x 3 and translation).
+Mat4 affineInverse(const Mat4& m) {
+    const Mat4 it = inverseTranspose3(m);
+    Mat4 r;
+    r.row0 = {it.row0.x, it.row1.x, it.row2.x, 0};
+    r.row1 = {it.row0.y, it.row1.y, it.row2.y, 0};
+    r.row2 = {it.row0.z, it.row1.z, it.row2.z, 0};
+    r.row3 = {0, 0, 0, 1};
+    const tr::Vec3 t{m.row0.w, m.row1.w, m.row2.w};
+    const tr::Vec3 moved = transformDirection(r, t);
+    r.row0.w = -moved.x;
+    r.row1.w = -moved.y;
+    r.row2.w = -moved.z;
+    return r;
+}
+
+// D3DXQuaternionRotationYawPitchRoll (radians), as Wine's d3dx9 computes it.
+tr::Quat yawPitchRoll(float yaw, float pitch, float roll) {
+    const float cy = std::cos(yaw * 0.5f), sy = std::sin(yaw * 0.5f), cp = std::cos(pitch * 0.5f), sp = std::sin(pitch * 0.5f);
+    const float cr = std::cos(roll * 0.5f), sr = std::sin(roll * 0.5f);
+    tr::Quat q;
+    q.x = cy * sp * cr + sy * cp * sr;
+    q.y = sy * cp * cr - cy * sp * sr;
+    q.z = cy * cp * sr - sy * sp * cr;
+    q.w = cy * cp * cr + sy * sp * sr;
+    return q;
+}
+
+// A particle domain (pfxBox / pfxHalfSpace / pfxSphere, traced 2026-10-20) placed in the particles' space: its own frame (box: centre
+// and rotation, sphere: centre) times `world` when given - pfxBounce::Apply (FUN_009ca910) sets the system's world transform each
+// frame for World / Hybrid groups and none for Object groups; pfxTerminateOutside (FUN_00999060) never sets one, so its domain stays
+// as loaded (no transform).
+struct PlacedDomain {
+    const tr::ParticleDomain* domain = nullptr;
+    Mat4 frame, inverse;
+    tr::Vec3 normal;              // half space, in the particles' space
+    float offset = 0;             // half space: inside where normal . p + offset >= 0
+};
+
+PlacedDomain placeDomain(const tr::ParticleDomain& d, const Mat4* world) {
+    PlacedDomain pd;
+    pd.domain = &d;
+    using Kind = tr::ParticleDomain::Kind;
+    if (d.kind == Kind::HalfSpace) {
+        // FUN_009d5270: without a transform the stored normal and distance; with one, the normal through the matrix and the offset
+        // -(n' . p0') of a point of the plane (p0 = -distance n).
+        pd.normal = d.normal;
+        pd.offset = d.distance;
+        if (world) {
+            pd.normal = transformDirection(*world, d.normal);
+            const tr::Vec3 p0 = transformPoint(*world, scaled(d.normal, -d.distance));
+            pd.offset = -dot(pd.normal, p0);
+        }
+        return pd;
+    }
+    const float degrees = 0.0174532925f;
+    const tr::Quat q = d.kind == Kind::Box ? yawPitchRoll(d.rotation.y * degrees, d.rotation.x * degrees, d.rotation.z * degrees) : tr::Quat{};
+    pd.frame = placementMatrix(d.centre, q, 1.0f);
+    if (world) pd.frame = multiply(*world, pd.frame);
+    pd.inverse = affineInverse(pd.frame);
+    return pd;
+}
+
+// Inside test (domain vtable slot 29; TOUT): box within +-|dimension| / 2 of its frame, sphere within the radius, half space
+// n . p + offset >= 0. The invert flag is not read here.
+bool domainInside(const PlacedDomain& pd, const tr::Vec3& p) {
+    const tr::ParticleDomain& d = *pd.domain;
+    using Kind = tr::ParticleDomain::Kind;
+    if (d.kind == Kind::HalfSpace) return dot(pd.normal, p) + pd.offset >= 0.0f;
+    const tr::Vec3 q = transformPoint(pd.inverse, p);
+    if (d.kind == Kind::Sphere) return dot(q, q) <= d.radius * d.radius;
+    return std::fabs(q.x) <= std::fabs(d.dimension.x) * 0.5f && std::fabs(q.y) <= std::fabs(d.dimension.y) * 0.5f &&
+           std::fabs(q.z) <= std::fabs(d.dimension.z) * 0.5f;
+}
+
+// Hit test of the step from `from` to `to` (domain vtable slot 30; BONC): the surface normal there, pointing along the crossing.
+// Half space (FUN_009d5380): the ends on opposite sides; the plane normal. Sphere (FUN_009bc7b0): one end inside, the other not; the
+// normal at the crossing point (negated when inverted), kept only when the step runs along it. Box (FUN_009c7230): a particle leaving
+// (or, inverted, entering) - every face whose plane it crosses, within 0.1 m (0x00c2b4d0 / 0x00c2bd40), moving outward (inward),
+// adds its outward (inward) axis; the sum normalised. Normals are turned into the particles' space by the frame's rotation.
+bool domainHit(const PlacedDomain& pd, const tr::Vec3& from, const tr::Vec3& to, tr::Vec3& normal) {
+    const tr::ParticleDomain& d = *pd.domain;
+    using Kind = tr::ParticleDomain::Kind;
+    if (d.kind == Kind::HalfSpace) {
+        if ((dot(pd.normal, to) + pd.offset) * (dot(pd.normal, from) + pd.offset) >= 0.0f) return false;
+        normal = pd.normal;
+        return true;
+    }
+    const tr::Vec3 a = transformPoint(pd.inverse, from), b = transformPoint(pd.inverse, to);
+    tr::Vec3 n{0, 0, 0};
+    if (d.kind == Kind::Sphere) {
+        const float r2 = d.radius * d.radius;
+        if ((dot(a, a) <= r2) == (dot(b, b) <= r2)) return false;
+        const tr::Vec3 step = subtract(b, a);
+        const float qa = dot(step, step), qb = 2.0f * dot(a, step), qc = dot(a, a) - r2;
+        const float disc = qb * qb - 4.0f * qa * qc;
+        if (qa <= 0.0f || disc < 0.0f) return false;
+        const float root = std::sqrt(disc);
+        float t = (-qb - root) / (2.0f * qa);
+        if (t < 0.0f || t > 1.0f) t = (-qb + root) / (2.0f * qa);
+        const tr::Vec3 at = add(a, scaled(step, std::clamp(t, 0.0f, 1.0f)));
+        if (dot(at, at) <= 0.0f) return false;
+        tr::Vec3 c = normalized(at);
+        if (d.invert) c = scaled(c, -1.0f);
+        if (dot(subtract(a, b), c) <= 0.0f) n = c;
+    } else {
+        const tr::Vec3 h{std::fabs(d.dimension.x) * 0.5f, std::fabs(d.dimension.y) * 0.5f, std::fabs(d.dimension.z) * 0.5f};
+        auto in = [&](const tr::Vec3& v) { return std::fabs(v.x) <= h.x && std::fabs(v.y) <= h.y && std::fabs(v.z) <= h.z; };
+        const bool inA = in(a), inB = in(b);
+        const float e = 0.1f;
+        const float da[3] = {a.x, a.y, a.z}, db[3] = {b.x, b.y, b.z}, hh[3] = {h.x, h.y, h.z};
+        float out[3] = {0, 0, 0};
+        if (d.invert ? (!inA && inB) : (inA && !inB)) {
+            for (int k = 0; k < 3; ++k) {
+                const float back = da[k] - db[k];          // (from - to) along the axis
+                if (!d.invert) {
+                    if (db[k] + hh[k] <= e && da[k] + hh[k] >= -e && -back <= 0.0f) out[k] -= 1.0f;   // out through the - face
+                    if (db[k] - hh[k] >= -e && da[k] - hh[k] <= e && back <= 0.0f) out[k] += 1.0f;    // out through the + face
+                } else {
+                    if (db[k] + hh[k] >= -e && da[k] + hh[k] <= e && back <= 0.0f) out[k] += 1.0f;    // in through the - face
+                    if (db[k] - hh[k] <= e && da[k] - hh[k] >= -e && -back <= 0.0f) out[k] -= 1.0f;   // in through the + face
+                }
+            }
+        }
+        n = tr::Vec3{out[0], out[1], out[2]};
+    }
+    if (dot(n, n) <= 0.0f) return false;
+    normal = normalized(transformDirection(pd.frame, normalized(n)));
+    return true;
+}
+
 }  // namespace
 
 ParticleInstance::ParticleInstance(const tr::ParticleSystem& system, const Mat4& world, uint32_t seed)
@@ -142,12 +273,98 @@ tr::ParticleValue ParticleInstance::evaluate(const tr::ParticleGenerator& g, flo
     return tr::ParticleValue{};
 }
 
+void ParticleInstance::remove(size_t group, size_t index) {
+    std::vector<Particle>& list = particles_[group];
+    if (system_->groups[group].sorted) {
+        list.erase(list.begin() + std::ptrdiff_t(index));
+    } else {
+        list[index] = list.back();             // the engine's array moves the last particle into the slot
+        list.pop_back();
+    }
+}
+
+// pfxEmitFromParticle::Apply (FUN_009aae30, traced 2026-10-20): new particles at the particles of the PREVIOUS group of the system
+// (the system numbers its groups, group + 0x138, FUN_00583920; the first group emits nothing). Skipped when this group is off, or
+// when it is in Object space and the source is not. rate x dt per source particle: the whole part each, the fraction by chance per
+// source (Randomize) or accumulated once a call (Accumulate); at most up to MaxParticles. A new particle starts at its source's
+// position (taken into world space when the source is in Object space and this group is not), with the velocity, colour, size,
+// growth, rotation, spin, stretch and lifetime generators at the emitter's time (velocity turned by the system for Hybrid) - the
+// source's own velocity is not inherited - and has already lived a random part of dt, as pfxEmit's.
+void ParticleInstance::emitFromParticles(const tr::ParticleOperator& op, size_t group, float dt) {
+    SlotState& s = slots_[op.stateSlot];
+    s.time += dt;
+    const tr::ParticleGroup& g = system_->groups[group];
+    if (group == 0) return;                     // Enabled: set by the system's reset (see emit)
+    const size_t source = group - 1;
+    const tr::ParticleGroup& sg = system_->groups[source];
+    if (g.referenceFrame == 0 && sg.referenceFrame != 0) return;
+    const tr::ParticleEmitter& e = op.emitter;
+    const float wanted = evaluate(e.rate, s.time).x * dt;
+    int32_t whole = int32_t(std::floor(wanted));
+    const float fraction = wanted - float(whole);
+    if (e.roundingMode == 1) {
+        s.accumulator += fraction;
+        if (s.accumulator > 1.0f) {
+            ++whole;
+            s.accumulator -= 1.0f;
+        }
+    }
+    const bool toWorld = sg.referenceFrame == 0 && (g.referenceFrame == 1 || g.referenceFrame == 2);
+    std::vector<Particle>& list = particles_[group];
+    const size_t sources = particles_[source].size();
+    for (size_t k = 0; k < sources; ++k) {
+        int32_t n = whole;
+        if (e.roundingMode == 0 && random() < fraction) ++n;
+        n = std::min<int32_t>(n, int32_t(g.maxParticles) - int32_t(list.size()));
+        const tr::Vec3 at = particles_[source][k].position;
+        for (int32_t m = 0; m < n; ++m) {
+            Particle p;
+            p.position = toWorld ? transformPoint(world_, at) : at;
+            p.previous = p.position;
+            p.velocity = point(evaluate(e.velocity, s.time));
+            if (g.referenceFrame == 2) p.velocity = transformDirection(world_, p.velocity);
+            p.colour = evaluate(e.colour, s.time);
+            const float life = evaluate(e.lifetime, s.time).x;
+            p.inverseLife = life < 100000.0f && life != 0.0f ? 1.0f / life : 0.0f;
+            p.size = evaluate(e.size, s.time).x;
+            p.growth = evaluate(e.growth, s.time).x;
+            p.rotation = evaluate(e.rotation, s.time).x;
+            p.spin = evaluate(e.spin, s.time).x;
+            p.stretch = evaluate(e.stretch, s.time).x;
+            const float f = random() * dt;
+            p.position = add(p.position, scaled(p.velocity, f));
+            p.age += p.inverseLife * f;
+            p.size += p.growth * f;
+            p.rotation += p.spin * f;
+            list.push_back(p);
+        }
+    }
+}
+
+// pfxBounce::Apply (FUN_009ca910, traced 2026-10-20) - the Particle System API's bounce: a particle whose next step (position +
+// velocity x dt) hits the domain gets its velocity split along the surface normal into vn and vt, then v = vt x friction -
+// vn x resilience when |vt|^2 > cutoff, else vt - vn x resilience (the three floats as stored, in that order). Positions are left
+// to Move. The domain takes the system's world transform for World / Hybrid groups.
+void ParticleInstance::bounce(const tr::ParticleOperator& op, size_t group, float dt) {
+    const tr::ParticleGroup& g = system_->groups[group];
+    const PlacedDomain pd = placeDomain(op.domain, g.referenceFrame == 0 ? nullptr : &world_);
+    for (Particle& p : particles_[group]) {
+        tr::Vec3 n;
+        if (!domainHit(pd, p.position, add(p.position, scaled(p.velocity, dt)), n)) continue;
+        const tr::Vec3 vn = scaled(n, dot(n, p.velocity));
+        const tr::Vec3 vt = subtract(p.velocity, vn);
+        p.velocity = dot(vt, vt) > op.cutoff ? subtract(scaled(vt, op.friction), scaled(vn, op.resilience))
+                                             : subtract(vt, scaled(vn, op.resilience));
+    }
+}
+
 void ParticleInstance::emit(const tr::ParticleOperator& op, size_t group, float dt) {
     // pfxEmit::Apply (FUN_009e2a50).
     SlotState& s = slots_[op.stateSlot];
     s.time += dt;
     const tr::ParticleGroup& g = system_->groups[group];
-    if (!g.enabled) return;
+    // The group's Enabled flag (group + 0x154) is set by the system's reset when it starts (FUN_005834b0 -> each group's
+    // FUN_0066cb30), whatever the file stores (0 in 2,544 of 4,788 shipped groups) - so every group emits.
     const tr::ParticleEmitter& e = op.emitter;
     const float wanted = evaluate(e.rate, s.time).x * dt;
     int32_t n = int32_t(std::floor(wanted));
@@ -219,8 +436,8 @@ void ParticleInstance::apply(const tr::ParticleOperator& op, size_t group, float
             if (s.time > op.time && !op.children.empty()) apply(op.children.front(), group, dt);
             break;
         case K::Emit: emit(op, group, dt); break;
-        case K::EmitFromParticle:
-        case K::Bounce: ++unsupported_; break;
+        case K::EmitFromParticle: emitFromParticles(op, group, dt); break;
+        case K::Bounce: bounce(op, group, dt); break;
         case K::Move:
             for (size_t k = 0; k < list.size();) {
                 Particle& p = list[k];
@@ -228,12 +445,8 @@ void ParticleInstance::apply(const tr::ParticleOperator& op, size_t group, float
                 p.age += p.inverseLife * dt;
                 p.size += p.growth * dt;
                 p.rotation += p.spin * dt;
-                if (p.age < 1.0f) {
-                    ++k;
-                } else {
-                    p = list.back();             // the engine removes by moving the last particle into the slot
-                    list.pop_back();
-                }
+                if (p.age < 1.0f) ++k;
+                else remove(group, k);
             }
             break;
         case K::Drag:
@@ -297,21 +510,13 @@ void ParticleInstance::apply(const tr::ParticleOperator& op, size_t group, float
             for (Particle& p : list) p.previous = add(p.position, p.velocity);
             break;
         case K::TerminateOutside: {
-            // UNVERIFIED domain conventions (13 uses): box axis-aligned with full dimensions, half space n.p >= distance.
-            const tr::ParticleDomain& d = op.domain;
-            auto inside = [&](const tr::Vec3& p) {
-                switch (d.kind) {
-                    case tr::ParticleDomain::Kind::Box: {
-                        const tr::Vec3 q = subtract(p, d.centre);
-                        const bool in = std::fabs(q.x) <= d.dimension.x * 0.5f && std::fabs(q.y) <= d.dimension.y * 0.5f && std::fabs(q.z) <= d.dimension.z * 0.5f;
-                        return in != d.invert;
-                    }
-                    case tr::ParticleDomain::Kind::HalfSpace: return dot(d.normal, p) >= d.distance;
-                    case tr::ParticleDomain::Kind::Sphere: return (length(subtract(p, d.centre)) <= d.radius) != d.invert;
-                }
-                return true;
-            };
-            list.erase(std::remove_if(list.begin(), list.end(), [&](const Particle& p) { return !inside(p.position); }), list.end());
+            // pfxTerminateOutside::Apply (FUN_00999060): removes the particles the domain's inside test rejects; the domain is never
+            // transformed (compared with the positions as they are) and its invert flag is not read.
+            const PlacedDomain pd = placeDomain(op.domain, nullptr);
+            for (size_t k = 0; k < list.size();) {
+                if (domainInside(pd, list[k].position)) ++k;
+                else remove(group, k);
+            }
             break;
         }
         case K::Dummy: break;
@@ -319,7 +524,8 @@ void ParticleInstance::apply(const tr::ParticleOperator& op, size_t group, float
 }
 
 void ParticleInstance::update(float dt) {
-    if (!system_->enabled || dt <= 0.0f) return;
+    // The system's Enabled flag, like its groups', is set by its reset at start (FUN_005834b0 -> FUN_005845d0(system, 1)).
+    if (dt <= 0.0f) return;
     for (size_t g = 0; g < system_->groups.size(); ++g) apply(system_->groups[g].op, g, dt);
 }
 
@@ -358,7 +564,11 @@ void ParticleInstance::buildQuads(size_t group, const tr::Vec3& cameraRight, con
     static const float cornerU[4] = {0, 0, 1, 1};
     static const float cornerV[4] = {0, 1, 0, 1};
     static const int order[6] = {0, 1, 2, 2, 1, 3};
-    for (const Particle& p : particles_[group]) {
+    // Sorted groups: emission order, newest first for sort order 0 (new particles at the list's head), oldest first for 1.
+    const std::vector<Particle>& list = particles_[group];
+    const bool newestFirst = g.sorted && g.sortOrder == 0;
+    for (size_t index = 0; index < list.size(); ++index) {
+        const Particle& p = list[newestFirst ? list.size() - 1 - index : index];
         const tr::Vec3 centre = objectFrame ? transformPoint(world_, p.position) : p.position;
         tr::Vec3 a, b;                      // world-space directions of u and v
         if (g.primitive == 4) {

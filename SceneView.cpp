@@ -3423,7 +3423,10 @@ void SceneView::queueDraws(const Selection& selection) {
     if (standalone_ && showParticles) {
         const tr::Vec3 right = camera_.right(), up = camera_.up();
         const tr::ParticleSystem& system = standalone_->system();
-        for (size_t g = 0; g < system.groups.size(); ++g) {
+        std::vector<size_t> order(system.groups.size());
+        for (size_t g = 0; g < order.size(); ++g) order[g] = g;
+        std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return system.groups[a].zBias < system.groups[b].zBias; });
+        for (size_t g : order) {
             particleScratch_.clear();
             standalone_->buildQuads(g, right, up, particleScratch_);
             if (particleScratch_.empty()) continue;
@@ -3431,23 +3434,37 @@ void SceneView::queueDraws(const Selection& selection) {
             renderer_->drawParticles(particleScratch_, showTextures && !group.texture.empty() ? texture(group.texture) : nullptr, tr::particleBlendType(group));
         }
     }
-    // Particle systems (camera-facing sprites need the view's axes).
+    // Particle systems (camera-facing sprites need the view's axes), drawn far to near by the engine's sort key for a group
+    // (FUN_0066f650, traced 2026-10-20): depth x (1 - ZBias x 1e-5) - so of the groups of one system, those with a higher ZBias
+    // draw later, on top. The depth is taken as the distance from the eye to the system's origin (which depth the engine stores
+    // at + 0x60 is NOT traced); equal keys keep the system's group order.
     if (showEntities && showParticles) {
         const tr::Vec3 right = camera_.right(), up = camera_.up();
+        struct GroupDraw {
+            const ParticleInstance* instance;
+            size_t group;
+            float key;
+        };
+        std::vector<GroupDraw> draws;
         for (const LiveParticles& l : liveParticles_) {
             // In view by where its particles are (columns and beams reach far above their emitter - the control-point flag's
             // beam vanished when looking up past the pole).
             tr::Vec3 centre;
             float radius = 0;
             if (!l.instance->worldBounds(centre, radius) || !visible(centre, radius)) continue;
+            const Mat4& w = l.instance->world();
+            const float depth = length(subtract(tr::Vec3{w.row0.w, w.row1.w, w.row2.w}, camera_.position));
             const tr::ParticleSystem& system = l.instance->system();
-            for (size_t g = 0; g < system.groups.size(); ++g) {
-                particleScratch_.clear();
-                l.instance->buildQuads(g, right, up, particleScratch_);
-                if (particleScratch_.empty()) continue;
-                const tr::ParticleGroup& group = system.groups[g];
-                renderer_->drawParticles(particleScratch_, showTextures && !group.texture.empty() ? texture(group.texture) : nullptr, tr::particleBlendType(group));
-            }
+            for (size_t g = 0; g < system.groups.size(); ++g)
+                draws.push_back(GroupDraw{l.instance.get(), g, depth * (1.0f - float(system.groups[g].zBias) * 1e-5f)});
+        }
+        std::stable_sort(draws.begin(), draws.end(), [](const GroupDraw& a, const GroupDraw& b) { return a.key > b.key; });
+        for (const GroupDraw& d : draws) {
+            particleScratch_.clear();
+            d.instance->buildQuads(d.group, right, up, particleScratch_);
+            if (particleScratch_.empty()) continue;
+            const tr::ParticleGroup& group = d.instance->system().groups[d.group];
+            renderer_->drawParticles(particleScratch_, showTextures && !group.texture.empty() ? texture(group.texture) : nullptr, tr::particleBlendType(group));
         }
     }
 

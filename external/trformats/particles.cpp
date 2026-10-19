@@ -166,12 +166,15 @@ public:
     ParticleDomain domain() {
         const Chunk c = readChunk(r_);
         ParticleDomain d;
+        // Layouts from the unserializers (traced 2026-10-20): pfxBox FUN_009c7950 reads the invert byte FIRST, then centre (+ 8),
+        // dimension (+ 0x14) and rotation (+ 0x20, degrees: x pitch, y yaw, z roll); pfxSphere (v1 / v2) stores the radius SQUARED
+        // (the reader keeps its square root, rcpss(rsqrtss)) and v2 adds the invert byte; pfxHalfSpace normal then distance.
         if (c.tag == fourcc("BOXS")) {
             d.kind = ParticleDomain::Kind::Box;
-            d.centre = r_.vec3();
-            d.rotation = r_.vec3();
-            d.dimension = r_.vec3();
             d.invert = r_.u8() != 0;
+            d.centre = r_.vec3();
+            d.dimension = r_.vec3();
+            d.rotation = r_.vec3();
         } else if (c.tag == fourcc("HALF")) {
             d.kind = ParticleDomain::Kind::HalfSpace;
             d.normal = r_.vec3();
@@ -179,8 +182,8 @@ public:
         } else if (c.tag == fourcc("SPHE")) {
             d.kind = ParticleDomain::Kind::Sphere;
             d.centre = r_.vec3();
-            d.radius = r_.f32();
-            d.invert = r_.u8() != 0;
+            d.radius = std::sqrt(std::max(r_.f32(), 0.0f));
+            if (c.version >= 2) d.invert = r_.u8() != 0;
         } else {
             throw FormatError("unknown particle domain " + tagName(c.tag));
         }

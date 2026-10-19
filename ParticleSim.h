@@ -12,7 +12,10 @@
 //   Oriented: N = the velocity's direction ((0, 1, 0) when |v|^2 < 1e-4), T = normalize(N x (0, 1, 0)) ((1, 0, 0)
 //             when degenerate): X -> (N, N x T), Y -> (T, N), Z -> (T, N x T), Camera -> T, N used as view-space
 //             vectors (as the shader does).
-// Points and lines (primitives 0 and 1, rare) are not drawn.
+// Points and lines (primitives 0 and 1) are not drawn - no shipped .pfx uses them (viewport_test RASA_PFXSCAN).
+// Sorted groups (PGRS, pfxParticleGroupSorted) keep their particles in emission order (a linked list: removal unlinks) and
+// draw the newest first (sort order 0, new particles at the head) or last (1, at the tail); other groups keep an array where a
+// removed particle is replaced by the last one (traced 2026-10-20, FUN_0067f730 / FUN_0067f7e0 / FUN_0067fa40).
 
 #include "GpuMath.h"
 #include "Renderer.h"
@@ -48,7 +51,7 @@ public:
     const Mat4& world() const { return world_; }
     // Appends group g's quads as world-space triangles (6 vertices per particle).
     void buildQuads(size_t group, const tr::Vec3& cameraRight, const tr::Vec3& cameraUp, std::vector<MeshVertex>& out) const;
-    // Operators the simulation skips (PEMT, BONC, GEOG points) - for the status line.
+    // Generators the simulation skips (GEOG points on a model) - for the status line.
     uint32_t unsupported() const { return unsupported_; }
 
 private:
@@ -67,6 +70,9 @@ private:
     tr::ParticleValue evaluate(const tr::ParticleGenerator& g, float t);
     void apply(const tr::ParticleOperator& op, size_t group, float dt);
     void emit(const tr::ParticleOperator& op, size_t group, float dt);
+    void emitFromParticles(const tr::ParticleOperator& op, size_t group, float dt);
+    void bounce(const tr::ParticleOperator& op, size_t group, float dt);
+    void remove(size_t group, size_t index);      // as the group's container does (sorted: in order; else the last moves in)
 
     const tr::ParticleSystem* system_;
     Mat4 world_;
