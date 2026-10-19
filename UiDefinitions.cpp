@@ -566,9 +566,6 @@ void UiWorkspace::drawReferences(tr::UiSection section, const std::string& id) {
 
 void UiWorkspace::drawDefinitionsPanel() {
     if (focusDefinitions_) ImGui::SetWindowFocus("Definitions###UI.Definitions");
-    // Docked with the Element panel on its first appearance.
-    if (const ImGuiWindow* element = ImGui::FindWindowByName("Element###UI.Element"); element && element->DockId)
-        ImGui::SetNextWindowDockID(element->DockId, ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("Definitions###UI.Definitions")) {
         ImGui::End();
         return;

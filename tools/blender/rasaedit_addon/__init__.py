@@ -8,12 +8,22 @@ Stage 1:
   shared-skeleton check.
 - File > Import / Export > Tabula Rasa model (RasaEdit, .gltf): import with the settings RasaEdit expects; export as glTF Separate with
   custom properties, after checking the game's limits (Check for Tabula Rasa, also in the sidebar).
+
+Stage 2 (panels.py, schema.py): Properties-editor panels for the RasaEdit data - Material tab: the effect (searchable, from the
+schema) and its parameters by type, texture slots with a search over the game's textures; Data tab: the piece's group, name, swap
+set and user data; Object tab (empties): contact point id, connection point (prefix + a name the engine knows), lsys / psys with
+searches over the light templates and particle systems. The schema (rasaedit_schema.json) is written by RasaEdit's Blender panel.
+
+Stage 3: a game-like material preview (preview.py; sidebar / import option), taken out for every glTF export (pre / post export
+hooks); collision tools (collision.py: make collision from the selection - hull, copy, simplified, box, sphere fitted in a bone's frame -
+or mark meshes as collision); animation markers (markers.py: an animation's .mkr markers as the action's pose markers, written back on
+every glTF export; RasaEdit writes the .mkr).
 """
 
 bl_info = {
     "name": "RasaEdit Tabula Rasa models",
     "author": "RasaEdit",
-    "version": (0, 1, 0),
+    "version": (0, 2, 0),
     "blender": (4, 2, 0),
     "location": "File > Import / Export > Tabula Rasa model (RasaEdit); 3D view sidebar > RasaEdit",
     "description": "Import and export Tabula Rasa models exchanged with RasaEdit (glTF)",
@@ -25,6 +35,8 @@ import json
 import bpy
 from bpy.props import BoolProperty, StringProperty
 from bpy_extras.io_utils import ExportHelper, ImportHelper
+
+from . import collision, markers, panels, preview, schema
 
 LOW_DETAIL = "Low detail"
 COLLISION = "Collision"
@@ -186,11 +198,36 @@ class glTF2ImportUserExtension:
             _pending_exclusions.append((blender_scene.name, collection.name))
         if not bpy.app.background:
             bpy.app.timers.register(apply_pending_exclusions, first_interval=0.0)
+        # The panels' data, from the RasaEdit JSON on the imported blocks; the schema beside the file, when there is one.
+        panels.populate_all(objects)
+        markers.import_markers(blender_scene)
+        path = getattr(gltf, "filename", None) or (getattr(gltf, "import_settings", None) or {}).get("filepath")
+        found = schema.find_beside(path) if path else None
+        if found:
+            blender_scene["rasaSchemaPath"] = found
         # The rest pose as imported, for the shared-skeleton check on export.
         for obj in objects:
             if obj.type == 'ARMATURE':
                 rest = {b.name: [round(x, 6) for row in b.matrix_local for x in row] for b in obj.data.bones}
                 obj["rasaRestPose"] = json.dumps(rest)
+
+
+class glTF2ExportUserExtension:
+    """Every glTF export (this add-on's or File > Export > glTF) writes the importer's material setup, not the preview."""
+
+    def __init__(self):
+        self.restore = []
+
+    def pre_export_hook(self, export_settings):
+        self.restore = preview.take_out_all()
+        markers.export_markers(bpy.context.scene)
+
+    def post_export_hook(self, export_settings):
+        if self.restore:
+            for scene in bpy.data.scenes:
+                if getattr(scene, "rasa_preview", False):
+                    preview.apply(scene, True)
+        self.restore = []
 
 
 # ---- checks ----
@@ -219,6 +256,9 @@ def check_scene(scene):
     if has_actions and (scene.render.fps != GAME_FPS or scene.render.fps_base != 1.0):
         warnings.append("scene runs at %.3g fps: animations are sampled at that rate (the game keys at %d - set the frame rate to %d)" %
                         (scene.render.fps / scene.render.fps_base, GAME_FPS, GAME_FPS))
+    sch = schema.load(bpy.context)
+    if sch is None:
+        notes.append("no RasaEdit schema found: effects and parameters are not checked")
     armatures = [o for o in objects if o.type == 'ARMATURE']
     if len(armatures) > 1:
         warnings.append("%d armatures: RasaEdit uses the first skin a mesh uses" % len(armatures))
@@ -244,8 +284,21 @@ def check_scene(scene):
             elif rasa_data(material, "rasaMaterial") is None:
                 effect = material.get("rasaEffect", "TRDiffMapVertColor.fx")
                 notes.append("material %s: new material, effect %s" % (material.name, effect))
+                if sch is not None and schema.effect(sch, effect) is None:
+                    warnings.append("material %s: effect %s is used by no shipped model (RasaEdit cannot copy its parameters)" % (material.name, effect))
+            elif sch is not None:
+                rm = rasa_data(material, "rasaMaterial")
+                effect = rm.get("effect", "")
+                known = {k: t for k, t, _v, _n in schema.effect_parameters(sch, effect)}
+                if not known:
+                    warnings.append("material %s: effect %s is used by no shipped model" % (material.name, effect))
+                for entry in rm.get("parameters", []):
+                    if len(entry) >= 2 and entry[0] in known and int(entry[1]) != int(known[entry[0]]):
+                        warnings.append("material %s: %s has type %s, the shipped pieces %s" % (material.name, entry[0], entry[1], known[entry[0]]))
         if "rasaPiece" in o.data.keys() and rasa_data(o.data, "rasaPiece") is None:
             errors.append("mesh %s: its rasaPiece property is not valid JSON" % o.data.name)
+        if len(o.data.vertices) > 65535:
+            notes.append("%s: %d vertices - RasaEdit splits it into pieces of at most 65,535" % (o.name, len(o.data.vertices)))
         arm, deform = deform_bone_names(o)
         if arm is not None:
             group_names = {g.index: g.name for g in o.vertex_groups}
@@ -280,6 +333,25 @@ def check_scene(scene):
         if moved:
             warnings.append("%s: %d bone(s) changed their rest pose (%s%s). A shared skeleton's other animations follow the original bones - "
                             "check this is meant" % (arm.name, len(moved), ", ".join(moved[:4]), "..." if len(moved) > 4 else ""))
+    notes += collision.collision_notes(scene)
+    written, problems = markers.export_markers(scene)
+    warnings += problems
+    if written:
+        notes.append("%d animation marker(s) go back to RasaEdit" % written)
+    for o in objects:
+        if o.type != 'EMPTY' or "rasaContactPoint" not in o.keys():
+            continue
+        cp = rasa_data(o, "rasaContactPoint")
+        if cp is None:
+            errors.append("%s: its rasaContactPoint property is not valid JSON" % o.name)
+            continue
+        names = [p[1] for p in cp.get("values", []) if len(p) == 2 and str(p[0]).lower() == "cpname"]
+        if not names:
+            warnings.append("%s: a contact point without cpName (the engine finds points by it)" % o.name)
+        elif sch is not None:
+            prefix, name = panels.split_cp_name(names[0])
+            if not prefix or not panels.known_connection_point(sch, name):
+                warnings.append("%s: cpName %s is not a connection point the engine knows" % (o.name, names[0]))
     return errors, warnings, notes
 
 
@@ -324,7 +396,7 @@ class RASAEDIT_OT_export(bpy.types.Operator, ExportHelper):
             return {'CANCELLED'}
         # Every collection is exported (hidden Low detail / Collision included); custom properties carry RasaEdit's data.
         bpy.ops.export_scene.gltf(filepath=self.filepath, export_format='GLTF_SEPARATE', export_extras=True, export_animations=True,
-                                  export_skins=True, export_yup=True, use_selection=False, use_visible=False, use_renderable=False,
+                                  export_skins=True, export_yup=True, export_attributes=True, use_selection=False, use_visible=False, use_renderable=False,
                                   use_active_collection=False)
         self.report({'INFO'}, "Exported %s (%d warning(s))" % (self.filepath, len(warnings)))
         return {'FINISHED'}
@@ -336,12 +408,25 @@ class RASAEDIT_OT_import(bpy.types.Operator, ImportHelper):
     bl_label = "Import Tabula Rasa model (RasaEdit)"
     filename_ext = ".gltf"
     filter_glob: StringProperty(default="*.gltf;*.glb", options={'HIDDEN'})
+    game_preview: BoolProperty(name="Game-like preview", default=True,
+                               description="Material nodes closer to the game's shaders (vertex colour x 2, hue, detail and decal maps, "
+                                           "additive glow); taken out for every glTF export")
 
     def execute(self, context):
         # No bone shapes: with Bone Dir "Blender" the importer draws every bone as an icosphere scaled to it, shown in front of the
         # mesh (white balls all over a character).
         bpy.ops.import_scene.gltf(filepath=self.filepath, import_scene_as_collection=True, disable_bone_shape=True)
         apply_pending_exclusions()
+        found = schema.find_beside(self.filepath)
+        if found:
+            context.scene["rasaSchemaPath"] = found
+        import os
+        context.scene["rasaModelFolder"] = os.path.dirname(os.path.abspath(self.filepath))
+        if self.game_preview:
+            if context.scene.rasa_preview:
+                preview.apply(context.scene, True)      # the new materials (the property is on already)
+            else:
+                context.scene.rasa_preview = True
         # The timeline covers the armature's active animation (the importer leaves the scene's own range, e.g. 1-250).
         import math
         for obj in context.scene.objects:
@@ -366,6 +451,13 @@ class RASAEDIT_PT_panel(bpy.types.Panel):
         layout.operator(RASAEDIT_OT_check.bl_idname, text="Check")
         layout.operator(RASAEDIT_OT_export.bl_idname, text="Export model")
         scene = context.scene
+        layout.prop(scene, "rasa_preview")
+        row = layout.row(align=True)
+        row.operator(collision.RASAEDIT_OT_make_collision.bl_idname, text="Make collision")
+        row.operator(collision.RASAEDIT_OT_mark_collision.bl_idname, text="Mark as collision")
+        layout.operator(markers.RASAEDIT_OT_add_marker.bl_idname, text="Add animation marker")
+        data = schema.load(context)
+        layout.label(text="Schema: %s" % (schema.loaded_path() if data else "not found"), icon='CHECKMARK' if data else 'ERROR')
         layout.label(text="Frame rate: %.3g fps%s" % (scene.render.fps / scene.render.fps_base,
                                                       "" if scene.render.fps == GAME_FPS else " (game: %d)" % GAME_FPS))
         if "rasaCheck" in scene.keys():
@@ -389,12 +481,28 @@ def menu_export(self, context):
     self.layout.operator(RASAEDIT_OT_export.bl_idname, text="Tabula Rasa model (RasaEdit, .gltf)")
 
 
-classes = (RASAEDIT_OT_check, RASAEDIT_OT_export, RASAEDIT_OT_import, RASAEDIT_PT_panel)
+class RASAEDIT_AP_preferences(bpy.types.AddonPreferences):
+    bl_idname = __package__
+    schema_path: StringProperty(name="Schema", subtype='FILE_PATH',
+                                description="rasaedit_schema.json, written by the Blender panel of RasaEdit (empty: beside the imported "
+                                            "file, then Documents/RasaEdit/Blender)")
+
+    def draw(self, context):
+        self.layout.prop(self, "schema_path")
+        data = schema.load(context)
+        self.layout.label(text="In use: %s" % (schema.loaded_path() if data else "none found"))
+
+
+classes = (RASAEDIT_OT_check, RASAEDIT_OT_export, RASAEDIT_OT_import, RASAEDIT_PT_panel, RASAEDIT_AP_preferences)
 
 
 def register():
     for c in classes:
         bpy.utils.register_class(c)
+    panels.register()
+    preview.register()
+    collision.register()
+    markers.register()
     bpy.types.TOPBAR_MT_file_import.append(menu_import)
     bpy.types.TOPBAR_MT_file_export.append(menu_export)
 
@@ -402,5 +510,9 @@ def register():
 def unregister():
     bpy.types.TOPBAR_MT_file_export.remove(menu_export)
     bpy.types.TOPBAR_MT_file_import.remove(menu_import)
+    markers.unregister()
+    collision.unregister()
+    preview.unregister()
+    panels.unregister()
     for c in reversed(classes):
         bpy.utils.unregister_class(c)

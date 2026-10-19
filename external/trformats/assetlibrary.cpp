@@ -165,10 +165,58 @@ void AssetLibrary::indexLooseDirectory(uint32_t directoryIndex) {
     }
 }
 
-std::optional<AssetLocation> AssetLibrary::locate(const std::string& name) const {
+std::optional<AssetLocation> AssetLibrary::locateLocked(const std::string& name) const {
     const auto it = index_.find(toLowerAscii(name));
     if (it == index_.end()) return std::nullopt;
     return it->second;
+}
+
+std::optional<AssetLocation> AssetLibrary::locate(const std::string& name) const {
+    std::shared_lock<std::shared_mutex> lock(mountMutex_);
+    return locateLocked(name);
+}
+
+void AssetLibrary::rebuildIndex() {
+    // As the constructor builds it: archives in mount order, first registration winning, then the indexed loose directories.
+    index_.clear();
+    for (uint32_t a = 0; a < archives_.size(); ++a) {
+        if (!archives_[a].archive) continue;
+        for (const GlmEntry& entry : archives_[a].archive->entries()) {
+            AssetLocation location;
+            location.inArchive = true;
+            location.archiveIndex = a;
+            location.entry = &entry;
+            index_.emplace(toLowerAscii(entry.name), location);
+        }
+    }
+    for (uint32_t k = 0; k < loose_.size(); ++k)
+        if (loose_[k].indexed) indexLooseDirectory(k);
+}
+
+void AssetLibrary::rewriteArchive(const std::string& path, const std::function<void()>& write) {
+    std::unique_lock<std::shared_mutex> lock(mountMutex_);
+    const auto key = [](const std::string& p) { return toLowerAscii(fs::path(p).lexically_normal().generic_string()); };
+    int32_t mounted = -1;
+    for (size_t a = 0; a < archives_.size(); ++a)
+        if (archives_[a].archive && key(archives_[a].archive->path()) == key(path)) mounted = int32_t(a);
+    if (mounted < 0) {
+        write();
+        return;
+    }
+    archives_[size_t(mounted)].archive.reset();                       // closes the file
+    std::exception_ptr failure;
+    try {
+        write();
+    } catch (...) {
+        failure = std::current_exception();
+    }
+    try {
+        archives_[size_t(mounted)].archive = std::make_unique<GlmArchive>(path);
+    } catch (const std::exception& e) {
+        warnings_.push_back(path + ": not mounted again: " + e.what());
+    }
+    rebuildIndex();
+    if (failure) std::rethrow_exception(failure);
 }
 
 void AssetLibrary::setOverride(const std::string& name, Bytes data) {
@@ -199,7 +247,8 @@ Bytes AssetLibrary::read(const std::string& name) const {
         std::lock_guard<std::mutex> lock(overridesMutex_);
         if (auto it = overrides_.find(toLowerAscii(name)); it != overrides_.end()) return it->second.second;
     }
-    const auto location = locate(name);
+    std::shared_lock<std::shared_mutex> lock(mountMutex_);
+    const auto location = locateLocked(name);
     if (!location) throw FormatError("asset not found: " + name);
     if (location->inArchive) return archives_[location->archiveIndex].archive->read(*location->entry);
     return readFile(location->filePath);
@@ -213,7 +262,8 @@ bool AssetLibrary::tryRead(const std::string& name, Bytes& out) const {
             return true;
         }
     }
-    const auto location = locate(name);
+    std::shared_lock<std::shared_mutex> lock(mountMutex_);
+    const auto location = locateLocked(name);
     if (!location) return false;
     out = location->inArchive ? archives_[location->archiveIndex].archive->read(*location->entry) : readFile(location->filePath);
     return true;
@@ -222,6 +272,7 @@ bool AssetLibrary::tryRead(const std::string& name, Bytes& out) const {
 std::vector<std::string> AssetLibrary::namesWithExtension(const std::string& extension) const {
     const std::string ext = toLowerAscii(extension);
     std::vector<std::string> names;
+    std::shared_lock<std::shared_mutex> lock(mountMutex_);
     for (const auto& item : index_)
         if (item.first.size() >= ext.size() && item.first.compare(item.first.size() - ext.size(), ext.size(), ext) == 0)
             names.push_back(item.second.inArchive ? item.second.entry->name : fs::path(item.second.filePath).filename().string());

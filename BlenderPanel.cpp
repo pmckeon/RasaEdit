@@ -33,6 +33,15 @@ std::string defaultExportRoot() {
     return utf8(base / "RasaEdit" / "Blender");
 }
 
+// Where the add-on's schema goes for an export folder: the default root for the default <root>/<model> folders, else the folder.
+std::string schemaPathFor(const std::string& exportFolder) {
+    const fs::path folder = fs::u8path(exportFolder);
+    std::error_code ec;
+    const bool underRoot = fs::equivalent(folder.parent_path(), fs::u8path(defaultExportRoot()), ec) ||
+                           lower(utf8(folder.parent_path())) == lower(defaultExportRoot());
+    return utf8((underRoot ? folder.parent_path() : folder) / blenderSchemaFileName());
+}
+
 void openFolder(const std::string& folder) {
     const auto generic = fs::u8path(folder).generic_u8string();
     const std::string url = "file:///" + std::string(generic.begin(), generic.end());
@@ -77,10 +86,14 @@ void BlenderPanel::draw(EditorContext& ctx, const char* title, const std::string
     }
     if (ImGui::CollapsingHeader("How it works")) {
     ImGui::TextWrapped("Models go to Blender as glTF (.gltf + .bin + PNG textures). Blender: File > Import > glTF 2.0. Back: File > Export > glTF 2.0, "
-                       "format glTF Separate, with Include > Custom Properties on (it carries the game's material and piece settings).");
-    ImGui::TextWrapped("Easier: the RasaEdit add-on for Blender (tools/blender/rasaedit_addon; make the zip with tools/blender/make_addon_zip.py, then "
+                       "format glTF Separate, with Include > Custom Properties on (it carries the game's material and piece settings) and Data > Mesh > "
+                       "Attributes on (billboard sprite centres).");
+    ImGui::TextWrapped("Easier: the RasaEdit add-on for Blender (blender/rasaedit_addon.zip in the RasaEdit folder, or tools/blender/make_addon_zip.py; "
                        "Blender: Edit > Preferences > Add-ons > Install from Disk). It adds File > Import / Export > Tabula Rasa model, keeps "
-                       "low-detail pieces and collision in hidden collections on every trip, sets 30 fps and checks the game's limits.");
+                       "low-detail pieces and collision in hidden collections on every trip, sets 30 fps and checks the game's limits; its "
+                       "panels edit the material effect and parameters, piece settings and contact points, it has a game-like material "
+                       "preview and collision tools. The panels read %s, which an export writes beside the model folders when it is missing.",
+                       blenderSchemaFileName().c_str());
     }
     if (ImGui::CollapsingHeader("Export a model", ImGuiTreeNodeFlags_DefaultOpen)) drawExport(ctx, selectedModel, links);
     if (ImGui::CollapsingHeader("Import from Blender", ImGuiTreeNodeFlags_DefaultOpen)) drawImport(ctx, showAsset);
@@ -188,6 +201,14 @@ void BlenderPanel::drawExport(EditorContext& ctx, const std::string& selectedMod
             const std::string out = utf8(fs::u8path(exportFolder_) / (stemOf(model) + ".gltf"));
             const ModelExchangeReport report = exportModelGltf(*ctx.assets, model, exportAnimations_, out, options);
             exportLog_.push_back("Wrote " + out + " (" + std::to_string(report.written.size()) + " files)");
+            // The add-on's schema, once: beside the model folders (the add-on looks in the file's folder and the one above it).
+            const std::string schema = schemaPathFor(exportFolder_);
+            std::error_code ec;
+            if (!fs::exists(fs::u8path(schema), ec)) {
+                std::string error;
+                exportLog_.push_back(writeBlenderSchema(*ctx.assets, schema, error) ? "Wrote the add-on schema " + schema
+                                                                                     : "warning: " + error);
+            }
             for (const std::string& w : report.warnings) exportLog_.push_back("warning: " + w);
             ctx.setStatus("Exported " + model + " for Blender: " + out, false);
         } catch (const std::exception& e) {
@@ -199,6 +220,19 @@ void BlenderPanel::drawExport(EditorContext& ctx, const std::string& selectedMod
     ImGui::SameLine();
     ImGui::BeginDisabled(!exportFolder_[0]);
     if (ImGui::Button("Open folder##export")) openFolder(exportFolder_);
+    ImGui::SameLine();
+    if (ImGui::Button("Rewrite the add-on schema")) {
+        const std::string schema = schemaPathFor(exportFolder_);
+        std::string error;
+        BlenderSchemaStats stats;
+        if (writeBlenderSchema(*ctx.assets, schema, error, &stats))
+            exportLog_.push_back("Wrote " + schema + " (" + std::to_string(stats.effects) + " effects from " + std::to_string(stats.models) +
+                                 " models)");
+        else
+            exportLog_.push_back("warning: " + error);
+    }
+    ImGui::SetItemTooltip("The effects, parameters, connection points and names the Blender add-on's panels offer, from the game's files "
+                          "(written by the first export; rewrite after the game's models change).");
     ImGui::EndDisabled();
     for (const std::string& line : exportLog_) ImGui::TextWrapped("%s", line.c_str());
 }
@@ -273,7 +307,7 @@ void BlenderPanel::drawImport(EditorContext& ctx, const std::function<void(const
     ImGui::SameLine();
     if (ImGui::Button("Add to the patch archive")) {
         try {
-            log_.push_back(addToPatchArchive(ctx.gameRoot, imported_->files));
+            log_.push_back(addToPatchArchive(ctx.gameRoot, imported_->files, ctx.assets.get()));
             ctx.setStatus(log_.back(), false);
         } catch (const std::exception& e) {
             log_.push_back(std::string("Writing the patch archive failed: ") + e.what());

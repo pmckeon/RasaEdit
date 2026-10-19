@@ -226,6 +226,7 @@ int main(int argc, char** argv) {
                 ModelImportOptions options;
                 if (const char* src = envValue("RASA_GLTFSOURCE")) options.source = src;
                 if (const char* name = envValue("RASA_GLTFMODELNAME")) options.modelName = name;
+                options.renameChangedTextures = envValue("RASA_GLTFRENAME") != nullptr;   // changed textures as <model>_<texture>
                 const ModelImportResult result = importModelGltf(assets, envValue("RASA_GLTFIMPORT"), options);
                 for (const ImportedFile& f : result.files) assets.setOverride(f.name, f.data);
                 for (const std::string& w : result.warnings) std::printf("gltf import warning: %s\n", w.c_str());
@@ -510,13 +511,19 @@ int main(int argc, char** argv) {
         }
         // RASA_MKRSCAN=1: parse every animation marker file; markers per type, files whose markers lie past their animation's end.
         if (envValue("RASA_MKRSCAN")) {
-            size_t files = 0, failed = 0, markers = 0, withAnim = 0, inside = 0;
+            size_t files = 0, failed = 0, markers = 0, withAnim = 0, inside = 0, rewritten = 0;
             std::map<int, size_t> byType;
             for (const std::string& name : assets.namesWithExtension(".mkr")) {
                 ++files;
                 try {
-                    const tr::AnimationMarkers m = tr::readAnimationMarkers(assets.read(name));
+                    const tr::Bytes data = assets.read(name);
+                    const tr::AnimationMarkers m = tr::readAnimationMarkers(data);
+                    if (tr::writeAnimationMarkers(m, tr::Bytes(data.begin(), data.begin() + 8)) == data) ++rewritten;
+                    else if (++failed <= 5) std::printf("mkr %s: rewrite differs\n", name.c_str());
                     markers += m.markers.size();
+                    // RASA_MKRLIST=<prefix>: lists the files with markers whose names start with it.
+                    if (envValue("RASA_MKRLIST") && name.rfind(envValue("RASA_MKRLIST"), 0) == 0 && !m.markers.empty())
+                        std::printf("mkr %s: %zu markers\n", name.c_str(), m.markers.size());
                     for (const tr::AnimMarker& k : m.markers) ++byType[k.type];
                     const std::string anim = name.substr(0, name.size() - 4) + ".anm";
                     if (assets.exists(anim)) {
@@ -530,8 +537,8 @@ int main(int argc, char** argv) {
                     if (++failed <= 5) std::printf("mkr %s: %s\n", name.c_str(), e.what());
                 }
             }
-            std::printf("mkr scan: %zu files, %zu failed, %zu markers; %zu with an .anm, %zu of them with every marker inside it\n", files, failed,
-                        markers, withAnim, inside);
+            std::printf("mkr scan: %zu files, %zu failed, %zu markers; %zu with an .anm, %zu of them with every marker inside it; %zu rewritten "
+                        "byte-identical\n", files, failed, markers, withAnim, inside, rewritten);
             for (const auto& [type, count] : byType) std::printf("  %2d %-20s %zu\n", type, tr::animMarkerTypeName(type), count);
         }
         // RASA_CONSTANTS=<module>: a game data module's integer constants (GameData::moduleConstants).
@@ -693,6 +700,16 @@ int main(int argc, char** argv) {
                         "largest decoded difference in the others %.6f\n",
                         animIdentical, anims, animFailed, tracksReencoded, tracks, maxKeyError);
         }
+        // RASA_BLENDERSCHEMA=<file.json>: writes the Blender add-on's schema (every effect's parameters, connection points, ...).
+        if (const char* where = envValue("RASA_BLENDERSCHEMA")) {
+            const auto t0 = std::chrono::steady_clock::now();
+            std::string error;
+            BlenderSchemaStats stats;
+            const bool ok = writeBlenderSchema(assets, where, error, &stats);
+            std::printf("blender schema: %s - %zu models, %zu pieces, %zu effects, %.1f s%s%s\n", ok ? "written" : "FAILED", stats.models,
+                        stats.pieces, stats.effects, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
+                        error.empty() ? "" : ": ", error.c_str());
+        }
         // RASA_GLTFEXPORT=<model.geo>[,<anim.anm>...] with RASA_GLTFOUT=<file.gltf>: exports the model (and the animations; none
         // named = the model's own) with ModelExchange.
         if (const char* what = envValue("RASA_GLTFEXPORT")) {
@@ -769,12 +786,26 @@ int main(int argc, char** argv) {
                 // RASA_GLTFMODELNAME: write the model under this name (e.g. an existing map entity's model, to see a new model in
                 // place); RASA_GLTFPREVIEW=1: the imported files override the archives' for this run (AssetLibrary::setOverride).
                 if (const char* name = envValue("RASA_GLTFMODELNAME")) options.modelName = name;
+                options.renameChangedTextures = envValue("RASA_GLTFRENAME") != nullptr;
                 const auto start = std::chrono::steady_clock::now();
                 const ModelImportResult result = importModelGltf(assets, importPath, options);
                 std::printf("gltf import: %zu file(s) in %.2f s\n", result.files.size(),
                             std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
                 for (const ImportedFile& f : result.files) std::printf("  %s (%zu bytes): %s\n", f.name.c_str(), f.data.size(), f.note.c_str());
                 for (const std::string& w : result.warnings) std::printf("gltf import warning: %s\n", w.c_str());
+                // RASA_GLTFPATCH=1: the imported files into the game's patch archive (data/rasaedit_patch.glm), registered in
+                // tabula_rasa.cfg - what the Blender panel's two buttons do. Changes the game folder.
+                if (envValue("RASA_GLTFPATCH") && !result.files.empty()) {
+                    std::printf("patch archive: %s\n", addToPatchArchive(argv[1], result.files, &assets).c_str());
+                    std::printf("tabula_rasa.cfg: %s\n", registerPatchArchive(argv[1]).c_str());
+                    // The library re-mounted the archive: reads in this process see the new files.
+                    size_t same = 0;
+                    for (const ImportedFile& f : result.files) {
+                        tr::Bytes back;
+                        same += assets.tryRead(f.name, back) && back == f.data ? 1 : 0;
+                    }
+                    std::printf("patch archive: %zu of %zu files read back equal in this session\n", same, result.files.size());
+                }
                 if (const char* dump = envValue("RASA_GLTFIMPORTDIR"))
                     for (const ImportedFile& f : result.files) {
                         std::ofstream o(std::filesystem::path(dump) / f.name, std::ios::binary);
@@ -807,7 +838,10 @@ int main(int argc, char** argv) {
                                 const tr::GeoVertex* nearest = sameOrder ? &b.vertices[vi] : nullptr;
                                 if (sameOrder) {
                                     const float dx = va.position.x - nearest->position.x, dy = va.position.y - nearest->position.y, dz = va.position.z - nearest->position.z;
-                                    best = dx * dx + dy * dy + dz * dz;
+                                    // Billboard centres (POSITION1) count too.
+                                    const float cx = va.position1.x - nearest->position1.x, cy = va.position1.y - nearest->position1.y,
+                                                cz = va.position1.z - nearest->position1.z;
+                                    best = dx * dx + dy * dy + dz * dz + cx * cx + cy * cy + cz * cz;
                                 }
                                 static const std::vector<tr::GeoVertex> none;
                                 const std::vector<tr::GeoVertex>& candidates = sameOrder ? none : b.vertices;
@@ -886,7 +920,13 @@ int main(int argc, char** argv) {
                                                     vb[0].vertices.size(), va[0].indices.size() / 3, vb[0].indices.size() / 3);
                                 }
                             }
-                            for (const tr::GeoFileBone& bb : fb.bones) withB += bb.boundingVolume.empty() ? 0 : 1;
+                            for (const tr::GeoFileBone& bb : fb.bones) {
+                                withB += bb.boundingVolume.empty() ? 0 : 1;
+                                for (const tr::GeoBoneVolume& v : tr::readBoneVolumes(bb.boundingVolume))
+                                    std::printf("  imported collision on %s: %s centre (%.4f %.4f %.4f) half (%.4f %.4f %.4f) sphere %.4f, %zu vertices, "
+                                                "%zu triangles\n", bb.name.c_str(), tr::tagName(v.kind).c_str(), v.centre.x, v.centre.y, v.centre.z,
+                                                v.halfExtents.x, v.halfExtents.y, v.halfExtents.z, v.sphereRadius, v.vertices.size(), v.indices.size() / 3);
+                            }
                             std::printf("compare: collision on %zu / %zu bones, %zu byte-identical, largest point difference %.5f m, radius %.5f\n", withA, withB, same,
                                         worst, worstRadius);
                         }

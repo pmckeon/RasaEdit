@@ -3,6 +3,7 @@
 #include "Json.h"
 #include "assetlibrary.h"
 #include "geofile.h"
+#include "trformats.h"
 #include "image.h"
 #include "ModelMath.h"
 
@@ -576,12 +577,22 @@ ModelExchangeReport exportModelGltf(tr::AssetLibrary& assets, const std::string&
                 hasColour = hasColour || (e.usage == 10 && e.usageIndex == 0);
                 if (e.usage == 5 && e.usageIndex < 4) hasUv[e.usageIndex] = true;
             }
-            std::vector<float> positions, normals, uvs[4];
+            // Billboard sprites (TRSphBillboard): POSITION is the corner's offset from the sprite centre, POSITION1 the centre. glTF
+            // gets the corner placed at centre + offset (the sprites show in place in Blender) and the centre as _POSITION1 (a custom
+            // attribute Blender keeps), from which the import takes both back.
+            bool billboard = false;
+            for (const tr::VertexElement& e : piece.vertices.layout) billboard = billboard || (e.usage == 0 && e.usageIndex == 1);
+            std::vector<float> positions, centres, normals, uvs[4];
             std::vector<uint8_t> colours, joints;
             std::vector<float> weights;
             for (const tr::GeoVertex& v : decoded.vertices) {
-                const tr::Vec3 p = mirror(v.position);
+                const tr::Vec3 p = billboard ? mirror(tr::Vec3{v.position1.x + v.position.x, v.position1.y + v.position.y, v.position1.z + v.position.z})
+                                             : mirror(v.position);
                 positions.insert(positions.end(), {p.x, p.y, p.z});
+                if (billboard) {
+                    const tr::Vec3 c = mirror(v.position1);
+                    centres.insert(centres.end(), {c.x, c.y, c.z});
+                }
                 if (hasNormal) {
                     tr::Vec3 n = mirror(v.normal);
                     const float len = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
@@ -631,6 +642,7 @@ ModelExchangeReport exportModelGltf(tr::AssetLibrary& assets, const std::string&
             if (piece.skinned && file.bones.size() > 256) report.warnings.push_back("more than 256 bones: joint indices clipped");
             JsonValue attributes = jsonObject();
             attributes.set("POSITION", jsonInteger(int64_t(g.floats(positions, 3, "VEC3", 34962, true))));
+            if (billboard) attributes.set("_POSITION1", jsonInteger(int64_t(g.floats(centres, 3, "VEC3", 34962))));
             if (hasNormal) attributes.set("NORMAL", jsonInteger(int64_t(g.floats(normals, 3, "VEC3", 34962))));
             for (int s = 0; s < 4; ++s)
                 if (hasUv[s]) attributes.set("TEXCOORD_" + std::to_string(s), jsonInteger(int64_t(g.floats(uvs[s], 2, "VEC2", 34962))));
@@ -903,6 +915,29 @@ ModelExchangeReport exportModelGltf(tr::AssetLibrary& assets, const std::string&
         ra.set("tracks", std::move(trackInfo));
         ra.set("materialTracks", std::move(materialTracks));
         ra.set("otherTracks", std::move(otherTracks));
+        // Animation markers (<anim>.mkr: footsteps, strikes ... at milliseconds) as [type, ms, the engine's name]; the add-on shows them as
+        // timeline markers and the import writes the .mkr back when they changed.
+        {
+            const std::string mkrName = animName.substr(0, animName.size() - 4) + ".mkr";
+            tr::Bytes mkr;
+            if (lower(animName).size() > 4 && assets.tryRead(mkrName, mkr)) {
+                try {
+                    const tr::AnimationMarkers markers = tr::readAnimationMarkers(mkr);
+                    JsonValue list = jsonArray();
+                    for (const tr::AnimMarker& m : markers.markers) {
+                        JsonValue e = jsonArray();
+                        e.push(jsonInteger(m.type));
+                        e.push(jsonInteger(m.timeMs));
+                        e.push(jsonString(tr::animMarkerTypeName(m.type)));
+                        list.push(std::move(e));
+                    }
+                    ra.set("markers", std::move(list));
+                    ra.set("markerFile", jsonString(mkrName));
+                } catch (const std::exception& e) {
+                    report.warnings.push_back(mkrName + ": " + e.what());
+                }
+            }
+        }
         JsonValue extras = jsonObject();
         extras.set("rasaAnimation", jsonString(writeJson(ra)));
         a.set("extras", std::move(extras));
@@ -940,4 +975,200 @@ ModelExchangeReport exportModelGltf(tr::AssetLibrary& assets, const std::string&
         report.written.push_back(gltfPath.string());
     }
     return report;
+}
+
+// ---- the Blender add-on's schema ----
+
+std::string blenderSchemaFileName() { return "rasaedit_schema.json"; }
+
+bool writeBlenderSchema(tr::AssetLibrary& assets, const std::string& path, std::string& error, BlenderSchemaStats* stats) {
+    namespace fs = std::filesystem;
+    struct ParameterUse {
+        int32_t type = 0;
+        size_t pieces = 0;
+        std::map<std::string, size_t> values;          // the value as JSON text -> pieces
+    };
+    struct EffectUse {
+        std::string name;                              // the first spelling seen
+        size_t pieces = 0, skinned = 0;
+        std::vector<std::string> order;                // parameter keys in first-seen order
+        std::map<std::string, ParameterUse> parameters;
+    };
+    std::map<std::string, EffectUse> effects;          // by lower-case name
+    std::map<std::string, size_t> groups, userDataKeys, contactKeys, cpNames;
+    size_t models = 0, pieces = 0, maxFloats = 0;
+    for (const std::string& model : assets.namesWithExtension(".geo")) {
+        tr::Bytes data;
+        if (!assets.tryRead(model, data)) continue;
+        tr::GeoFile file;
+        try {
+            file = tr::readGeoFile(data);
+        } catch (const std::exception&) {
+            continue;                                   // Molder_Anchor.geo, vfx_sunbeam01.geo
+        }
+        ++models;
+        for (const tr::GeoFilePiece& piece : file.pieces) {
+            ++pieces;
+            EffectUse& e = effects[lower(piece.effect.text)];
+            if (e.name.empty()) e.name = piece.effect.text;
+            ++e.pieces;
+            if (piece.skinned) ++e.skinned;
+            for (const tr::GeoFileParameter& p : piece.parameters) {
+                auto [it, added] = e.parameters.try_emplace(p.key);
+                if (added) {
+                    e.order.push_back(p.key);
+                    it->second.type = p.type;
+                }
+                ++it->second.pieces;
+                ++it->second.values[writeJson(parameterJson(p).items[2])];
+                if (p.type == 3) maxFloats = std::max(maxFloats, p.floats.size());
+            }
+            if (!piece.group.empty()) ++groups[piece.group];
+            for (const tr::GeoParameter& u : piece.userData) ++userDataKeys[u.key];
+        }
+        for (const tr::GeoFileContactPoint& cp : file.contactPoints)
+            for (const tr::GeoParameter& v : cp.point.values) {
+                ++contactKeys[v.key];
+                if (lower(v.key) == "cpname") ++cpNames[v.value];
+            }
+    }
+    const auto counted = [](const std::map<std::string, size_t>& m, size_t limit) {
+        std::vector<std::pair<std::string, size_t>> v(m.begin(), m.end());
+        std::stable_sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+        if (v.size() > limit) v.resize(limit);
+        JsonValue a = jsonArray();
+        for (const auto& [k, n] : v) {
+            JsonValue pair = jsonArray();
+            pair.push(jsonString(k));
+            pair.push(jsonInteger(int64_t(n)));
+            a.push(std::move(pair));
+        }
+        return a;
+    };
+    const auto names = [&](const char* extension) {
+        std::vector<std::string> v = assets.namesWithExtension(extension);
+        std::sort(v.begin(), v.end(), [](const std::string& a, const std::string& b) { return lower(a) < lower(b); });
+        JsonValue a = jsonArray();
+        for (const std::string& n : v) a.push(jsonString(n));
+        return a;
+    };
+    const auto pair = [](JsonValue a, JsonValue b) {
+        JsonValue p = jsonArray();
+        p.push(std::move(a));
+        p.push(std::move(b));
+        return p;
+    };
+
+    JsonValue root = jsonObject();
+    root.set("schemaVersion", jsonInteger(1));
+    root.set("writer", jsonString("RasaEdit"));
+    root.set("models", jsonInteger(int64_t(models)));
+    {
+        JsonValue limits = jsonObject();
+        limits.set("gameFps", jsonInteger(30));
+        limits.set("bonesPerVertex", jsonInteger(3));              // BLENDWEIGHT FLOAT2 + the derived third
+        limits.set("palette", jsonInteger(28));                    // the largest shipped palette; RasaEdit splits larger pieces
+        limits.set("pieceVertices", jsonInteger(65535));
+        limits.set("collisionVertices", jsonInteger(65535));
+        limits.set("maxFloats", jsonInteger(int64_t(maxFloats)));
+        root.set("limits", std::move(limits));
+    }
+    {
+        // Parameter types as the .geo stores them (MRAP): 1 bool, 2 int, 3 floats, 4 string, 5 / 8 texture, others raw.
+        JsonValue types = jsonObject();
+        types.set("1", jsonString("bool"));
+        types.set("2", jsonString("int"));
+        types.set("3", jsonString("floats"));
+        types.set("4", jsonString("string"));
+        types.set("5", jsonString("texture"));
+        types.set("8", jsonString("texture"));
+        root.set("parameterTypes", std::move(types));
+    }
+    {
+        std::vector<const EffectUse*> list;
+        for (const auto& [k, e] : effects) list.push_back(&e);
+        std::sort(list.begin(), list.end(), [](const EffectUse* a, const EffectUse* b) { return lower(a->name) < lower(b->name); });
+        JsonValue all = jsonArray();
+        for (const EffectUse* e : list) {
+            JsonValue ej = jsonObject();
+            ej.set("name", jsonString(e->name));
+            ej.set("pieces", jsonInteger(int64_t(e->pieces)));
+            ej.set("skinned", jsonInteger(int64_t(e->skinned)));
+            JsonValue params = jsonArray();
+            for (const std::string& key : e->order) {
+                const ParameterUse& u = e->parameters.at(key);
+                const auto most = std::max_element(u.values.begin(), u.values.end(),
+                                                   [](const auto& a, const auto& b) { return a.second < b.second; });
+                JsonValue value;
+                std::string ignored;
+                parseJson(most->first, value, ignored);
+                JsonValue pj = jsonArray();                       // [key, type, most common value, pieces with it]
+                pj.push(jsonString(key));
+                pj.push(jsonInteger(u.type));
+                pj.push(std::move(value));
+                pj.push(jsonInteger(int64_t(u.pieces)));
+                params.push(std::move(pj));
+            }
+            ej.set("parameters", std::move(params));
+            all.push(std::move(ej));
+        }
+        root.set("effects", std::move(all));
+    }
+    {
+        // generated.client.connectionpoint (the table at 0x00d02b10 in tabula_rasa.exe) and the cpName prefixes.
+        JsonValue cps = jsonArray();
+        for (uint32_t id = 0; id < 256; ++id) {
+            const std::string n = tr::connectionPointIdName(id);
+            if (!n.empty()) cps.push(pair(jsonInteger(id), jsonString(n)));
+        }
+        root.set("connectionPoints", std::move(cps));
+        JsonValue prefixes = jsonArray();
+        prefixes.push(pair(jsonString("HPS_"), jsonString("socket on a body (special-FX events; where accessories attach)")));
+        prefixes.push(pair(jsonString("HPP_"), jsonString("plug on an accessory")));
+        prefixes.push(pair(jsonString("PPS_"), jsonString("type 2 socket")));
+        prefixes.push(pair(jsonString("PPP_"), jsonString("type 2 plug")));
+        prefixes.push(pair(jsonString("SPS_"), jsonString("type 3 socket")));
+        prefixes.push(pair(jsonString("SPP_"), jsonString("type 3 plug")));
+        prefixes.push(pair(jsonString("DPS_"), jsonString("type 4 socket")));
+        prefixes.push(pair(jsonString("DPP_"), jsonString("type 4 plug")));
+        root.set("cpPrefixes", std::move(prefixes));
+    }
+    {
+        // equipmentdata swapset (CLAUDE.md "Avatar swap sets"); 0 = not swapped, 99 the low-detail stand-in.
+        JsonValue swaps = jsonArray();
+        const std::pair<int, const char*> swapNames[] = {{0, "none"},        {1, "Torso"},  {2, "Legs"},    {3, "Boots"},
+                                                         {4, "Skin / Face"}, {5, "Hair / Helm"}, {6, "Gloves"}, {7, "Face Hi"},
+                                                         {8, "Face Lo"},     {99, "low-detail stand-in"}};
+        for (const auto& [id, n] : swapNames) swaps.push(pair(jsonInteger(id), jsonString(n)));
+        root.set("swapSets", std::move(swaps));
+    }
+    {
+        // The engine's animation marker types (tabula_rasa.exe 0x00820e00; tr::animMarkerTypeName).
+        JsonValue types = jsonArray();
+        for (int t = 0; t <= 60; ++t) types.push(pair(jsonInteger(t), jsonString(tr::animMarkerTypeName(t))));
+        root.set("markerTypes", std::move(types));
+    }
+    root.set("pieceGroups", counted(groups, 200));
+    root.set("pieceUserDataKeys", counted(userDataKeys, 50));
+    root.set("contactPointKeys", counted(contactKeys, 100));
+    root.set("contactPointNames", counted(cpNames, 400));
+    root.set("lightTemplates", names(".ltmp"));
+    root.set("particleSystems", names(".pfx"));
+    root.set("textures", names(".dds"));
+
+    std::error_code ec;
+    fs::create_directories(fs::u8path(path).parent_path(), ec);
+    std::ofstream out(fs::u8path(path), std::ios::binary);
+    if (!out) {
+        error = "cannot write " + path;
+        return false;
+    }
+    const std::string text = writeJson(root);
+    out.write(text.data(), std::streamsize(text.size()));
+    if (!out) {
+        error = "writing " + path + " failed";
+        return false;
+    }
+    if (stats) *stats = BlenderSchemaStats{models, pieces, effects.size()};
+    return true;
 }

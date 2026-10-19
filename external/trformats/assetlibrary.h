@@ -16,9 +16,11 @@
 
 #include "trformats.h"
 
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <shared_mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -82,6 +84,12 @@ public:
     bool hasOverride(const std::string& name) const;
     std::vector<std::string> overrideNames() const;
 
+    // Rewrites an archive the library may have mounted (the patch archive): the archive is closed first - Windows will not replace
+    // an open file - then `write` runs, and the archive is mounted again with the index rebuilt (its entries moved), so reads see
+    // the new contents. Reads wait meanwhile (all of them take the mount lock). A path the library has not mounted just runs
+    // `write`. If `write` throws, the file as it then is is mounted again and the exception passed on.
+    void rewriteArchive(const std::string& path, const std::function<void()>& write);
+
     // Maps.
     std::vector<std::string> mapNames() const;                       // folder names under the Maps directory
     std::string mapFolder(const std::string& mapName) const;         // "" if absent; case-insensitive
@@ -93,6 +101,8 @@ private:
     std::string resolve(const std::string& relative) const;
     void mountSection(const ConfigFile& cfg, const std::string& name);
     void indexLooseDirectory(uint32_t directoryIndex);
+    std::optional<AssetLocation> locateLocked(const std::string& name) const;
+    void rebuildIndex();
 
     std::string root_;
     std::unique_ptr<ConfigFile> config_;
@@ -100,6 +110,7 @@ private:
     std::vector<LooseDirectory> loose_;
     std::unordered_map<std::string, AssetLocation> index_;          // lower-case name -> location
     std::vector<std::string> warnings_;
+    mutable std::shared_mutex mountMutex_;                           // archives_ / index_: shared by reads, exclusive while rewriting
     mutable std::mutex overridesMutex_;
     std::unordered_map<std::string, std::pair<std::string, Bytes>> overrides_;   // lower-case name -> (name, data)
 };

@@ -1991,6 +1991,28 @@ AnimationMarkers readAnimationMarkers(const Bytes& data) {
     return result;
 }
 
+Bytes writeAnimationMarkers(const AnimationMarkers& markers, const Bytes& header) {
+    Bytes out;
+    if (header.size() == 8) out = header;
+    else {
+        const char* h = "CHNKBLXX";
+        out.assign(h, h + 8);
+    }
+    auto u32 = [&](uint32_t v) {
+        for (int k = 0; k < 4; ++k) out.push_back(uint8_t(v >> (8 * k)));
+    };
+    u32(fourcc("AMRK"));
+    u32(uint32_t(4 + 5 * markers.markers.size()));
+    u32(markers.version ? markers.version : 1);
+    u32(0);
+    u32(uint32_t(markers.markers.size()));
+    for (const AnimMarker& m : markers.markers) {
+        out.push_back(m.type);
+        u32(m.timeMs);
+    }
+    return out;
+}
+
 const char* animMarkerTypeName(int type) {
     // tabula_rasa.exe 0x00820e00: switch over 0..60 (jump table 0x00821238), each case one name.
     static const char* const names[61] = {

@@ -29,16 +29,17 @@ void UiWorkspace::buildDefaultLayout(ImGuiID dockspace) {
     ImGui::DockBuilderAddNode(dockspace, ImGuiDockNodeFlags_DockSpace);
     ImGui::DockBuilderSetNodeSize(dockspace, ImGui::GetMainViewport()->WorkSize);
     // Every split first, then the windows into the leaf nodes (a node that is split afterwards cannot hold its windows).
-    ImGuiID left = 0, centre = 0, right = 0, leftBottom = 0, bottom = 0;
+    ImGuiID left = 0, centre = 0, right = 0, rightBottom = 0, leftBottom = 0, bottom = 0;
     ImGui::DockBuilderSplitNode(dockspace, ImGuiDir_Left, 0.22f, &left, &centre);
-    ImGui::DockBuilderSplitNode(centre, ImGuiDir_Right, 0.26f, &right, &centre);
+    ImGui::DockBuilderSplitNode(centre, ImGuiDir_Right, 0.30f, &right, &centre);
+    ImGui::DockBuilderSplitNode(right, ImGuiDir_Down, 0.55f, &rightBottom, &right);   // Definitions in view, not behind Element
     ImGui::DockBuilderSplitNode(left, ImGuiDir_Down, 0.35f, &leftBottom, &left);
     ImGui::DockBuilderSplitNode(centre, ImGuiDir_Down, 0.22f, &bottom, &centre);
     ImGui::DockBuilderDockWindow("Widgets###UI.Widgets", left);
     ImGui::DockBuilderDockWindow("Toolbox###UI.Toolbox", leftBottom);
     ImGui::DockBuilderDockWindow("Canvas###UI.Canvas", centre);
     ImGui::DockBuilderDockWindow("Element###UI.Element", right);
-    ImGui::DockBuilderDockWindow("Definitions###UI.Definitions", right);
+    ImGui::DockBuilderDockWindow("Definitions###UI.Definitions", rightBottom);
     ImGui::DockBuilderDockWindow("Problems###UI.Problems", bottom);
     ImGui::DockBuilderFinish(dockspace);
 }

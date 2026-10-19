@@ -437,7 +437,7 @@ void AssetsWorkspace::drawPending() {
     ImGui::SameLine();
     if (ImGui::Button("Add to the patch archive")) {
         try {
-            log_ = {addToPatchArchive(ctx_.gameRoot, pending_)};
+            log_ = {addToPatchArchive(ctx_.gameRoot, pending_, ctx_.assets.get())};
             ctx_.setStatus(log_.back(), false);
         } catch (const std::exception& e) {
             log_ = {std::string("Writing the patch archive failed: ") + e.what()};

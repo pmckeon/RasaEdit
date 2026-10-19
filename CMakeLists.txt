@@ -168,7 +168,7 @@ install(FILES "LICENSE" DESTINATION . RENAME "LICENSE.txt")
 
 # The Blender add-on as blender/rasaedit_addon.zip (Blender: Edit > Preferences > Add-ons > Install from Disk): the add-on folder's
 # files at the zip's top level (the extension format; tools/blender/make_addon_zip.py makes the same zip).
-file(GLOB RASAEDIT_ADDON_FILES RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}/tools/blender/rasaedit_addon"
+file(GLOB RASAEDIT_ADDON_FILES CONFIGURE_DEPENDS RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}/tools/blender/rasaedit_addon"
      "${CMAKE_CURRENT_SOURCE_DIR}/tools/blender/rasaedit_addon/*.py" "${CMAKE_CURRENT_SOURCE_DIR}/tools/blender/rasaedit_addon/*.toml")
 install(CODE "
     set(addon_out \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/blender\")

@@ -103,7 +103,8 @@ void Editor::drawUi() {
     drawMenuBar();
     drawUnsavedPrompt();
     const ImGuiID dockspace = ImGui::GetID(active_->dockspaceName());
-    if (ImGui::DockBuilderGetNode(dockspace) == nullptr) active_->buildDefaultLayout(dockspace);   // first use: no saved layout
+    if (resetLayout_ || ImGui::DockBuilderGetNode(dockspace) == nullptr) active_->buildDefaultLayout(dockspace);   // first use, or View > Reset
+    resetLayout_ = false;
     ImGui::DockSpaceOverViewport(dockspace, ImGui::GetMainViewport());
     active_->drawPanels();
 }
@@ -160,6 +161,11 @@ void Editor::drawMenuBar() {
     }
     if (ImGui::BeginMenu("Edit")) {
         active_->drawEditMenu();
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("View")) {
+        if (ImGui::MenuItem("Reset panel layout")) resetLayout_ = true;
+        ImGui::SetItemTooltip("Put this workspace's panels back where they start (shown, docked); the other workspaces keep theirs.");
         ImGui::EndMenu();
     }
     if (server_->hasUnsavedChanges()) {

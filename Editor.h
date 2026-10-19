@@ -54,4 +54,5 @@ private:
     std::string promptTarget_;
     bool skipUnsavedCheck_ = false;
     bool quitApproved_ = false;
+    bool resetLayout_ = false;      // View > Reset panel layout: rebuild the active workspace's default layout next frame
 };

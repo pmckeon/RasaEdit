@@ -263,7 +263,8 @@ void flipWinding(std::vector<uint32_t>& indices, size_t first) {
 // ---- building the model ----
 
 struct BuiltVertex {
-    tr::Vec3 position;
+    tr::Vec3 position;                                // billboard sprites: the corner's offset from position1
+    tr::Vec3 position1;                               // billboard sprites: the centre (POSITION1)
     tr::Vec3 normal{0, 1, 0};
     tr::Vec2 uv[4];
     float colour[4] = {0.5f, 0.5f, 0.5f, 1.0f};        // r g b a, 0..1 (128 grey: the game's neutral vertex colour)
@@ -326,7 +327,8 @@ tr::GeoFileVertices encodeVertices(const std::vector<tr::VertexElement>& layoutI
             float in[4] = {0, 0, 0, 0};
             switch (e.usage) {
                 case 0:
-                    if (e.usageIndex != 0) continue;   // POSITION1 (billboard centres) is not built
+                    if (e.usageIndex == 1) { in[0] = bv.position1.x; in[1] = bv.position1.y; in[2] = bv.position1.z; in[3] = 1; break; }
+                    if (e.usageIndex != 0) continue;
                     in[0] = bv.position.x; in[1] = bv.position.y; in[2] = bv.position.z; in[3] = 1;
                     break;
                 case 1: in[0] = bv.weights[0]; in[1] = bv.weights[1]; in[2] = bv.weights[2]; break;
@@ -875,8 +877,9 @@ ModelImportResult importModelGltf(tr::AssetLibrary& assets, const std::string& p
             const JsonValue* attributes = prim.member("attributes");
             if (!attributes || !attributes->member("POSITION")) continue;
             const Accessor pos = readAccessor(g, integer(attributes->member("POSITION")));
-            std::optional<Accessor> nrm, col, jnt, wgt, uv[4];
+            std::optional<Accessor> nrm, col, jnt, wgt, uv[4], centre;
             if (attributes->member("NORMAL")) nrm = readAccessor(g, integer(attributes->member("NORMAL")));
+            if (attributes->member("_POSITION1")) centre = readAccessor(g, integer(attributes->member("_POSITION1")));
             if (attributes->member("COLOR_0")) col = readAccessor(g, integer(attributes->member("COLOR_0")));
             if (attributes->member("JOINTS_0")) jnt = readAccessor(g, integer(attributes->member("JOINTS_0")));
             if (attributes->member("WEIGHTS_0")) wgt = readAccessor(g, integer(attributes->member("WEIGHTS_0")));
@@ -906,6 +909,11 @@ ModelImportResult importModelGltf(tr::AssetLibrary& assets, const std::string& p
                 BuiltVertex& v = verts[i];
                 tr::Vec3 p{float(pos.get(i, 0)), float(pos.get(i, 1)), float(pos.get(i, 2))};
                 v.position = mirror(transformPoint(toPiece, p));
+                if (centre) {
+                    // Billboard: the export placed the corner at centre + offset; the game stores the offset and the centre.
+                    v.position1 = mirror(transformPoint(toPiece, tr::Vec3{float(centre->get(i, 0)), float(centre->get(i, 1)), float(centre->get(i, 2))}));
+                    v.position = tr::Vec3{v.position.x - v.position1.x, v.position.y - v.position1.y, v.position.z - v.position1.z};
+                }
                 if (nrm) v.normal = mirror(transformNormal(toPiece, tr::Vec3{float(nrm->get(i, 0)), float(nrm->get(i, 1)), float(nrm->get(i, 2))}));
                 for (uint32_t s = 0; s < 4; ++s)
                     if (uv[s]) v.uv[s] = tr::Vec2{float(uv[s]->get(i, 0)), float(uv[s]->get(i, 1))};
@@ -958,7 +966,8 @@ ModelImportResult importModelGltf(tr::AssetLibrary& assets, const std::string& p
             const std::string effectLower = lower(m.effect.text);
             const bool needsTangents = effectLower.rfind("paldiff", 0) == 0 || effectLower.rfind("trhair", 0) == 0 || effectLower.rfind("trrefract", 0) == 0;
             if (layout.empty()) layout = defaultLayout(skinned, needsTangents, std::max(uvSets, needsTangents ? 2u : 1u));
-            if (layoutHas(layout, 0, 1)) warn("mesh " + text(mesh.member("name")) + ": billboard sprite centres (POSITION1) are not rebuilt - the sprites collapse");
+            if (layoutHas(layout, 0, 1) && !centre)
+                warn("mesh " + text(mesh.member("name")) + ": a billboard piece without _POSITION1 (sprite centres) - the sprites collapse");
             if (layoutHas(layout, 6, 0)) {
                 std::vector<tr::Vec3> p(verts.size()), n(verts.size()), t, b;
                 std::vector<tr::Vec2> u(verts.size());
@@ -1574,6 +1583,35 @@ ModelImportResult importModelGltf(tr::AssetLibrary& assets, const std::string& p
                 warn("animation " + file + " does not read back: " + e.what());
             }
             result.files.push_back(std::move(f));
+            // Its markers ([type, ms, ...] from the export, edited as timeline markers in Blender): <anim>.mkr when they differ from the game's.
+            if (const JsonValue* markers = ra ? ra->member("markers") : nullptr) {
+                tr::AnimationMarkers m;
+                m.version = 1;
+                for (const JsonValue& e : markers->items) {
+                    if (e.items.size() < 2) continue;
+                    int64_t type = 0, ms = 0;
+                    e.items[0].integer(type);
+                    e.items[1].integer(ms);
+                    if (type < 0 || type > 255 || ms < 0) {
+                        warn("animation " + file + ": marker (" + std::to_string(type) + ", " + std::to_string(ms) + " ms) left out");
+                        continue;
+                    }
+                    m.markers.push_back(tr::AnimMarker{uint8_t(type), uint32_t(ms)});
+                }
+                const std::string mkrName = file.substr(0, file.size() - 4) + ".mkr";
+                tr::Bytes original;
+                const bool had = assets.tryRead(mkrName, original);
+                tr::Bytes header;
+                if (had && original.size() >= 8) header.assign(original.begin(), original.begin() + 8);
+                const tr::Bytes data = tr::writeAnimationMarkers(m, header);
+                if ((had && data != original) || (!had && !m.markers.empty())) {
+                    ImportedFile mf;
+                    mf.name = mkrName;
+                    mf.data = data;
+                    mf.note = "animation markers: " + std::to_string(m.markers.size());
+                    result.files.push_back(std::move(mf));
+                }
+            }
         }
     }
     // A model plays the animation its `anim` property names (CLAUDE.md "A model names its animation"). A new model with animations
@@ -1600,7 +1638,7 @@ ModelImportResult importModelGltf(tr::AssetLibrary& assets, const std::string& p
 
 std::string patchArchivePath(const std::string& gameRoot) { return (fs::u8path(gameRoot) / "data" / "rasaedit_patch.glm").string(); }
 
-std::string addToPatchArchive(const std::string& gameRoot, const std::vector<ImportedFile>& files) {
+std::string addToPatchArchive(const std::string& gameRoot, const std::vector<ImportedFile>& files, tr::AssetLibrary* library) {
     const std::string path = patchArchivePath(gameRoot);
     std::vector<tr::GlmSource> sources;
     std::set<std::string> names;
@@ -1627,7 +1665,8 @@ std::string addToPatchArchive(const std::string& gameRoot, const std::vector<Imp
         }
     }
     const size_t added = names.size();
-    tr::writeGlmArchive(path, std::move(sources));
+    if (library) library->rewriteArchive(path, [&] { tr::writeGlmArchive(path, std::move(sources)); });
+    else tr::writeGlmArchive(path, std::move(sources));
     return "wrote " + path + ": " + std::to_string(added) + " file(s) added or replaced, " + std::to_string(kept) + " kept";
 }
 

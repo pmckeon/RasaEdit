@@ -90,10 +90,23 @@ void computeTangentFrames(const std::vector<tr::Vec3>& positions, const std::vec
 // into the archive (replacing entries of the same name); registerPatchArchive adds the [Paths] line once (first save keeps
 // tabula_rasa.cfg.rasaedit-original). Both return a description of what they did.
 std::string patchArchivePath(const std::string& gameRoot);
-std::string addToPatchArchive(const std::string& gameRoot, const std::vector<ImportedFile>& files);
+// `library`: the editor's asset library, which has the archive mounted once tabula_rasa.cfg names it - it is released for the
+// rewrite and mounted again (tr::AssetLibrary::rewriteArchive), so a second add in one session works and reads see the new files.
+std::string addToPatchArchive(const std::string& gameRoot, const std::vector<ImportedFile>& files, tr::AssetLibrary* library = nullptr);
 std::string registerPatchArchive(const std::string& gameRoot);
 bool patchArchiveRegistered(const std::string& gameRoot);
 
 // The animations a model plays: its `anim` property (the object animation the engine plays), X.anm for X.geo when present, and
 // (for avatar skeletons) none - creatures' animations come from animationdata families, chosen by the caller.
 std::vector<std::string> modelOwnAnimations(tr::AssetLibrary& assets, const std::string& geoName);
+
+// The schema the Blender add-on reads (tools/blender/rasaedit_addon; its material, piece and contact point panels): every
+// effect the shipped models use with the parameters its pieces carry (type, how many pieces, the most common value), the
+// connection point names, the keys contact points and pieces use, the light / particle / texture names they can name, the
+// limits the add-on checks. Built from the archives (every .geo read once) and written as JSON to `path`; false with `error`
+// set when it cannot be written.
+struct BlenderSchemaStats {
+    size_t models = 0, pieces = 0, effects = 0;
+};
+bool writeBlenderSchema(tr::AssetLibrary& assets, const std::string& path, std::string& error, BlenderSchemaStats* stats = nullptr);
+std::string blenderSchemaFileName();                  // "rasaedit_schema.json"

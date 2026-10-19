@@ -493,129 +493,185 @@ void ViewportPanel::draw(EditorContext& ctx, const char* title, Selection& selec
     SceneView& scene = *ctx.scene;
     const bool editing = hooks && hooks->editable();
 
-    // Toolbar.
-    ImGui::Checkbox("Textures", &ctx.view.showTextures);
-    ImGui::SameLine();
-    ImGui::Checkbox("Terrain", &ctx.view.showTerrain);
-    ImGui::SameLine();
-    ImGui::Checkbox(serverControls_ ? "Map entities" : "Entities", &ctx.view.showEntities);
-    ImGui::SameLine();
-    ImGui::Checkbox("Effects", &ctx.view.showEffects);
-    ImGui::SameLine();
-    ImGui::Checkbox("Particles", &ctx.view.showParticles);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Particle systems (.pfx) on models' contact points, within %.0f m: %zu running, %zu particles", scene.particleDistance,
-                          scene.liveParticleSystems(), scene.liveParticles());
-    ImGui::SameLine();
-    ImGui::Checkbox("Animation", &ctx.view.animate);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Play the world's animation: moving objects (holograms, rotating lights, water), creatures' idles, light\n"
-                          "flicker and particles. Off stops everything where it is.");
-    ImGui::SameLine();
-    ImGui::Checkbox("Clutter", &ctx.view.showClutter);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Terrain clutter (grass, ferns, flowers, debris) from the terrain's tribble sets, placed as the game does,\n"
-                          "in the 7 x 7 cells of 32 m around the camera: %zu instances, %zu drawn", scene.clutterInstances(), scene.drawnClutter());
-    ImGui::SameLine();
-    ImGui::Checkbox("Game distances", &ctx.view.gameDistances);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Hide map entities beyond the game's draw distance for their culling layer (layer 3: 100 m, layer 2: 300 m,\n"
-                          "at most 250 m), as tabula_rasa.exe does at View Distance 100 and full quality. Off: everything within the\n"
-                          "editor's draw distance.");
-    ImGui::SameLine();
-    ImGui::Checkbox("Placeholders", &ctx.view.showPlaceholders);
-    if (!serverControls_) {
-        ImGui::SameLine();
-        ImGui::Checkbox("Light markers", &ctx.view.lightMarkers);
-        ImGui::SameLine();
-        ImGui::Checkbox("Sound markers", &ctx.view.soundMarkers);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("The map's sound emitters (audioemitters.xml) as small pink boxes: click one to select it; the selected one\n"
-                              "shows its MinDistance and MaxDistance as spheres.");
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("The map's lights (lights.xml) as small white boxes: click one to select it; the selected light shows\n"
-                              "its reach (point: range circles, spot: its axis, plane: the box it lights). Lights on models and\n"
-                              "special-FX packages are not listed.");
-    }
-    if (serverControls_) {
-        ImGui::SameLine();
-        ImGui::Checkbox("Server", &options.showServer);
-        ImGui::SameLine();
-        ImGui::Checkbox("Mission areas", &options.showMissionAreas);
-        ImGui::SameLine();
-        ImGui::Checkbox("Regions", &options.showRegions);
-        if (hooks) {
-            ImGui::SameLine();
-            ImGui::Checkbox("Snap to ground", &hooks->snapToGround());
+    // Toolbar: the layer and lighting switches in dropdowns (their labels say what is off), the controls used most in the row
+    // itself; the row wraps where the panel is too narrow, so nothing runs out of view.
+    bool firstItem = true;
+    const auto place = [&](float width) {                   // SameLine when the next item fits, else a new line
+        if (firstItem) {
+            firstItem = false;
+            return;
         }
-    }
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9);
-    ImGui::SliderFloat("##distance", &ctx.view.drawDistance, 100.0f, 4000.0f, "draw %.0f m");
-    ImGui::SameLine();
-    const bool canFocus = isSelected(selection);
-    if (!canFocus) ImGui::BeginDisabled();
-    if (ImGui::Button("Focus (F)")) scene.focusOn(selection);
-    if (!canFocus) ImGui::EndDisabled();
-
-    // Second row: sky lighting (the region's .sky), its time of day, fog and the map's placed lights.
-    ImGui::Checkbox("Sky", &ctx.view.skyLighting);
-    ImGui::SameLine();
-    ImGui::Checkbox("Dome", &ctx.view.skyDome);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("The sky's layer models, as the game draws them behind everything: dome, sun and moon, stars, clouds,\n"
-                          "distant mountains. Rotated and coloured by the time of day.");
-    ImGui::SameLine();
-    if (!ctx.view.skyLighting || scene.skies().empty()) ImGui::BeginDisabled();
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16);
-    const auto skyLabel = [&](size_t k) {
-        const SceneView::SkyChoice& c = scene.skies()[k];
-        std::string regions;
-        for (int32_t r : c.regions) regions += (regions.empty() ? "" : ", ") + std::to_string(r);
-        return c.name + "  (region " + regions + ")" + (c.loaded ? "" : "  - not usable");
+        const float spacing = ImGui::GetStyle().ItemSpacing.x;
+        const float right = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
+        if (ImGui::GetItemRectMax().x + spacing + width <= right) ImGui::SameLine();
     };
-    const std::string comboLabel = scene.skies().empty() ? std::string("no region skies")
-                                 : scene.skyFromRegion() ? "by region: " + skyLabel(std::min(scene.activeSkyIndex(), scene.skies().size() - 1))
-                                                         : skyLabel(std::min(scene.skyIndex, scene.skies().size() - 1));
-    if (ImGui::BeginCombo("##sky", comboLabel.c_str())) {
-        if (ImGui::Selectable("By region (server regions at the camera)", scene.skyByRegion)) scene.skyByRegion = true;
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("As the game: the highest-priority region the camera is in that has a sky.\nNeeds the server's map_region volumes (a loaded World database).");
-        for (size_t k = 0; k < scene.skies().size(); ++k) {
-            if (ImGui::Selectable(skyLabel(k).c_str(), !scene.skyByRegion && k == scene.skyIndex)) {
-                scene.skyIndex = k;
-                scene.skyByRegion = false;
+    const auto comboWidth = [](const std::string& preview) {
+        return ImGui::CalcTextSize(preview.c_str()).x + ImGui::GetFrameHeight() + ImGui::GetStyle().FramePadding.x * 2.0f + 2.0f;
+    };
+    const auto checkboxWidth = [](const char* label) {
+        return ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x + ImGui::CalcTextSize(label).x;
+    };
+    const auto tip = [](const char* text) {
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", text);
+    };
+
+    // Layers.
+    {
+        int off = 0;
+        for (bool on : {ctx.view.showTextures, ctx.view.showTerrain, ctx.view.showEntities, ctx.view.showClutter, ctx.view.showEffects,
+                        ctx.view.showParticles})
+            off += on ? 0 : 1;
+        if (serverControls_)
+            for (bool on : {options.showServer, options.showMissionAreas, options.showRegions}) off += on ? 0 : 1;
+        const std::string preview = off ? "Layers (" + std::to_string(off) + " off)" : std::string("Layers");
+        place(comboWidth(preview));
+        ImGui::SetNextItemWidth(comboWidth(preview));
+        if (ImGui::BeginCombo("##layers", preview.c_str(), ImGuiComboFlags_HeightLargest)) {
+            ImGui::SeparatorText("World");
+            ImGui::Checkbox("Textures", &ctx.view.showTextures);
+            ImGui::Checkbox("Terrain", &ctx.view.showTerrain);
+            ImGui::Checkbox("Map entities", &ctx.view.showEntities);
+            ImGui::Checkbox("Clutter", &ctx.view.showClutter);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Terrain clutter (grass, ferns, flowers, debris) from the terrain's tribble sets, placed as the game does,\n"
+                                  "in the 7 x 7 cells of 32 m around the camera: %zu instances, %zu drawn", scene.clutterInstances(), scene.drawnClutter());
+            ImGui::Checkbox("Effects", &ctx.view.showEffects);
+            tip("Additive and effect geometry: holograms, glow strips, light cones, mist planes, waterfalls.");
+            ImGui::Checkbox("Particles", &ctx.view.showParticles);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Particle systems (.pfx) on models' contact points, within %.0f m: %zu running, %zu particles", scene.particleDistance,
+                                  scene.liveParticleSystems(), scene.liveParticles());
+            ImGui::Checkbox("Placeholders", &ctx.view.showPlaceholders);
+            tip("Boxes for entities without a drawable model (stand-ins, effect-only models).");
+            if (!serverControls_) {
+                ImGui::SeparatorText("Markers");
+                ImGui::Checkbox("Light markers", &ctx.view.lightMarkers);
+                tip("The map's lights (lights.xml) as small white boxes: click one to select it; the selected light shows\n"
+                    "its reach (point: range circles, spot: its axis, plane: the box it lights). Lights on models and\n"
+                    "special-FX packages are not listed.");
+                ImGui::Checkbox("Sound markers", &ctx.view.soundMarkers);
+                tip("The map's sound emitters (audioemitters.xml) as small pink boxes: click one to select it; the selected one\n"
+                    "shows its MinDistance and MaxDistance as spheres.");
+            } else {
+                ImGui::SeparatorText("Server");
+                ImGui::Checkbox("Server objects", &options.showServer);
+                tip("The World database's objects on this map: spawn pools, teleporters, objects, control points, ...");
+                ImGui::Checkbox("Mission areas", &options.showMissionAreas);
+                ImGui::Checkbox("Regions", &options.showRegions);
             }
-            if (!scene.skies()[k].loaded && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", scene.skies()[k].error.c_str());
+            ImGui::EndCombo();
         }
-        ImGui::EndCombo();
+        tip("What the 3D view draws");
     }
-    ImGui::SameLine();
-    float hours = scene.timeOfDay * 24.0f;
-    const int minutes = int(hours * 60.0f + 0.5f) % (24 * 60);
-    char timeText[16];
-    std::snprintf(timeText, sizeof timeText, "%02d:%02d", minutes / 60, minutes % 60);
-    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
-    if (ImGui::SliderFloat("##time", &hours, 0.0f, 24.0f, timeText)) scene.timeOfDay = std::clamp(hours / 24.0f, 0.0f, 1.0f);
-    if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) scene.timeOfDay = scene.startTimeOfDay();
-    if (ImGui::IsItemHovered()) {
-        const int start = int(scene.startTimeOfDay() * 24.0f * 60.0f + 0.5f) % (24 * 60);
-        ImGui::SetTooltip("Time of day; the map starts at %02d:%02d (right-click to reset)", start / 60, start % 60);
+
+    // Lighting: the sky (the region's .sky) and its parts, fog, the map's placed lights.
+    const bool skyUsable = ctx.view.skyLighting && !scene.skies().empty();
+    {
+        int off = 0;
+        for (bool on : {ctx.view.skyLighting, ctx.view.skyDome, ctx.view.sun, ctx.view.shadows, ctx.view.fog, ctx.view.mapLights}) off += on ? 0 : 1;
+        const std::string preview = off ? "Lighting (" + std::to_string(off) + " off)" : std::string("Lighting");
+        place(comboWidth(preview));
+        ImGui::SetNextItemWidth(comboWidth(preview));
+        if (ImGui::BeginCombo("##lighting", preview.c_str(), ImGuiComboFlags_HeightLargest)) {
+            ImGui::SeparatorText("Sky");
+            ImGui::Checkbox("Sky lighting", &ctx.view.skyLighting);
+            tip("Light, fog and background from the region's sky (.sky). Off: a plain neutral light.");
+            if (!skyUsable) ImGui::BeginDisabled();
+            const auto skyLabel = [&](size_t k) {
+                const SceneView::SkyChoice& c = scene.skies()[k];
+                std::string regions;
+                for (int32_t r : c.regions) regions += (regions.empty() ? "" : ", ") + std::to_string(r);
+                return c.name + "  (region " + regions + ")" + (c.loaded ? "" : "  - not usable");
+            };
+            const std::string skyPreview = scene.skies().empty() ? std::string("no region skies")
+                                         : scene.skyFromRegion() ? "by region: " + skyLabel(std::min(scene.activeSkyIndex(), scene.skies().size() - 1))
+                                                                 : skyLabel(std::min(scene.skyIndex, scene.skies().size() - 1));
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 24);
+            if (ImGui::BeginCombo("##sky", skyPreview.c_str())) {
+                if (ImGui::Selectable("By region (server regions at the camera)", scene.skyByRegion)) scene.skyByRegion = true;
+                tip("As the game: the highest-priority region the camera is in that has a sky.\nNeeds the server's map_region volumes (a loaded World database).");
+                for (size_t k = 0; k < scene.skies().size(); ++k) {
+                    if (ImGui::Selectable(skyLabel(k).c_str(), !scene.skyByRegion && k == scene.skyIndex)) {
+                        scene.skyIndex = k;
+                        scene.skyByRegion = false;
+                    }
+                    if (!scene.skies()[k].loaded && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", scene.skies()[k].error.c_str());
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::Checkbox("Dome", &ctx.view.skyDome);
+            tip("The sky's layer models, as the game draws them behind everything: dome, sun and moon, stars, clouds,\n"
+                "distant mountains. Rotated and coloured by the time of day.");
+            ImGui::Checkbox("Sun", &ctx.view.sun);
+            tip("The sky's sun or moon (caves get their own sky by region).");
+            ImGui::Checkbox("Shadows", &ctx.view.shadows);
+            tip("Sun shadows, fitted to the camera as the game does, and the placed lights' shadow maps.");
+            ImGui::Checkbox("Fog", &ctx.view.fog);
+            if (!skyUsable) ImGui::EndDisabled();
+            ImGui::SeparatorText("Map");
+            ImGui::Checkbox("Placed lights", &ctx.view.mapLights);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("The map's placed lights (lights.xml) and lights on models: %zu in lights.xml, those in view used%s%s", scene.mapLights().size(),
+                                  scene.mapLightsError().empty() ? "" : "\n", scene.mapLightsError().c_str());
+            ImGui::EndCombo();
+        }
+        if (ImGui::IsItemHovered() && !scene.skies().empty())
+            ImGui::SetTooltip("Sky: %s", scene.skies()[std::min(scene.skyFromRegion() ? scene.activeSkyIndex() : scene.skyIndex, scene.skies().size() - 1)].name.c_str());
     }
-    ImGui::SameLine();
-    ImGui::Checkbox("Fog", &ctx.view.fog);
-    ImGui::SameLine();
-    ImGui::Checkbox("Sun", &ctx.view.sun);
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("The sky's sun or moon (caves get their own sky by region).");
-    ImGui::SameLine();
-    ImGui::Checkbox("Shadows", &ctx.view.shadows);
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Sun shadows within 120 m of the camera; like the game they block 64%% of the sun.");
-    if (!ctx.view.skyLighting || scene.skies().empty()) ImGui::EndDisabled();
-    ImGui::SameLine();
-    ImGui::Checkbox("Lights", &ctx.view.mapLights);
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("The map's placed lights (lights.xml): %zu, up to 16 nearest the camera are used%s%s", scene.mapLights().size(),
-                          scene.mapLightsError().empty() ? "" : "\n", scene.mapLightsError().c_str());
-    ImGui::SameLine();
+
+    // Time of day (used often: in the row).
+    {
+        const float width = ImGui::GetFontSize() * 9;
+        place(width);
+        if (!skyUsable) ImGui::BeginDisabled();
+        float hours = scene.timeOfDay * 24.0f;
+        const int minutes = int(hours * 60.0f + 0.5f) % (24 * 60);
+        char timeText[24];
+        std::snprintf(timeText, sizeof timeText, "time %02d:%02d", minutes / 60, minutes % 60);
+        ImGui::SetNextItemWidth(width);
+        if (ImGui::SliderFloat("##time", &hours, 0.0f, 24.0f, timeText)) scene.timeOfDay = std::clamp(hours / 24.0f, 0.0f, 1.0f);
+        if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) scene.timeOfDay = scene.startTimeOfDay();
+        if (ImGui::IsItemHovered()) {
+            const int start = int(scene.startTimeOfDay() * 24.0f * 60.0f + 0.5f) % (24 * 60);
+            ImGui::SetTooltip("Time of day; the map starts at %02d:%02d (right-click to reset)", start / 60, start % 60);
+        }
+        if (!skyUsable) ImGui::EndDisabled();
+    }
+
+    // View: how far the editor draws.
+    {
+        const std::string preview = ctx.view.gameDistances ? "View" : "View (all distances)";
+        place(comboWidth(preview));
+        ImGui::SetNextItemWidth(comboWidth(preview));
+        if (ImGui::BeginCombo("##view", preview.c_str(), ImGuiComboFlags_HeightLargest)) {
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12);
+            ImGui::SliderFloat("##distance", &ctx.view.drawDistance, 100.0f, 4000.0f, "draw distance %.0f m");
+            ImGui::Checkbox("Game distances", &ctx.view.gameDistances);
+            tip("Hide map entities beyond the game's draw distance for their culling layer (layer 3: 100 m, layer 2: 300 m,\n"
+                "at most 250 m), as tabula_rasa.exe does at View Distance 100 and full quality. Off: everything within the\n"
+                "editor's draw distance.");
+            ImGui::EndCombo();
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Draw distance %.0f m%s", ctx.view.drawDistance, ctx.view.gameDistances ? ", game distances" : "");
+    }
+
+    place(checkboxWidth("Animation"));
+    ImGui::Checkbox("Animation", &ctx.view.animate);
+    tip("Play the world's animation: moving objects (holograms, rotating lights, water), creatures' idles, light\n"
+        "flicker and particles. Off stops everything where it is.");
+    if (serverControls_ && hooks) {
+        place(checkboxWidth("Snap to ground"));
+        ImGui::Checkbox("Snap to ground", &hooks->snapToGround());
+        tip("Dragged objects follow the first surface under the cursor (terrain or architecture).");
+    }
+    {
+        const bool canFocus = isSelected(selection);
+        place(ImGui::CalcTextSize("Focus (F)").x + ImGui::GetStyle().FramePadding.x * 2.0f);
+        if (!canFocus) ImGui::BeginDisabled();
+        if (ImGui::Button("Focus (F)")) scene.focusOn(selection);
+        if (!canFocus) ImGui::EndDisabled();
+    }
+    place(ImGui::CalcTextSize("Legend").x);
     drawMarkerLegend();
     applyOptions(ctx.view, scene);
 

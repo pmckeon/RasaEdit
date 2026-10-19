@@ -739,6 +739,9 @@ struct AnimationMarkers {
 };
 
 AnimationMarkers readAnimationMarkers(const Bytes& data);
+// The inverse: "CHNKBLXX" (or `header`, the first 8 bytes of a file read), AMRK chunk { u32 count, count x (u8 type, u32 ms) }.
+// Byte-identical on every shipped .mkr (viewport_test RASA_MKRSCAN).
+Bytes writeAnimationMarkers(const AnimationMarkers& markers, const Bytes& header = {});
 const char* animMarkerTypeName(int type);   // the engine's names ("Strike", "Footstep1", ...); "unknown" outside 0-60
 const AnimTrack* findTrack(const Animation& animation, const std::string& boneName);
 // Interpolated key at time (clamped to the track's range): linear scale/translation, normalised lerp rotation.
