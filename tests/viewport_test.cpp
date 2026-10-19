@@ -2691,6 +2691,210 @@ int main(int argc, char** argv) {
                             static_cast<long long>(d.actionId), static_cast<long long>(d.scenarioId), static_cast<long long>(d.stepId), d.code.c_str(),
                             d.message.c_str());
         }
+        // RASA_INGAMENEWMISSION=<giver creature>,<receiver creature> (with RASA_DB): an in-game check of a brand-new mission made with the
+        // editor's own code - the World database's mission tables (WorldDatabase::saveTables, as the Missions panel saves) get a new
+        // mission (the next id after the database's largest that the client's mission tables do not use, revision "rasaedit_test",
+        // optional): one objective "talk to the receiver" (a conversation trigger on the receiver's NPC package, player flag 1) whose
+        // transition grants a small reward; given by the giver, handed in to the receiver. The client's tables (missionconversation types
+        // 1-4 and 6, missionobjective, objectiveconversation (mission, 1, package, 1, completion)) and new English missiontextlanguage texts
+        // go into game.zip as the Text workspace saves them (stored .py source). Then the editor's server checks run on the saved content.
+        // Writes IN PLACE: the database is copied to <db>.before-newmission and game.zip to game.zip.before-newmission first.
+        if (const char* spec = envValue("RASA_INGAMENEWMISSION"); spec && database) {
+            namespace fs = std::filesystem;
+            try {
+                const int64_t giver = std::strtoll(spec, nullptr, 10);
+                const char* comma = std::strchr(spec, ',');
+                const int64_t receiver = comma ? std::strtoll(comma + 1, nullptr, 10) : giver;
+                const DbTable packages = database->loadTable("npc_package");
+                int64_t package = -1;
+                for (const auto& row : packages.rows)
+                    if (row[packages.column("id")].asInt() == receiver) package = row[packages.column("package_id")].asInt();
+                if (package < 0) throw std::runtime_error("the receiver has no npc_package row");
+                const std::string conv = "generated.client.missionconversation", objectives = "generated.client.missionobjective",
+                                  objConv = "generated.client.objectiveconversation",
+                                  textModule = "generated.client.language.english.missiontextlanguage";
+
+                // The new mission id: after the database's largest, unused by the client's tables.
+                std::vector<DbTable> before;
+                const char* tableNames[] = {"mission_content_definition", "mission_objective_definition", "mission_objective_transition",
+                                            "mission_trigger", "mission_reward_definition", "mission_action"};   // parents first
+                for (const char* name : tableNames) before.push_back(database->loadTable(name));
+                int64_t mission = 0;
+                for (const auto& row : before[0].rows) mission = std::max(mission, row[before[0].column("mission_id")].asInt());
+                auto clientUses = [&](int64_t m) {
+                    for (const std::string& module : {conv, objectives, objConv})
+                        for (const auto& e : data.global(module, "lookup")->entries)
+                            if (tr::py::asInt(tr::py::item(e.first.get(), 0)) == m) return true;
+                    return false;
+                };
+                do ++mission; while (clientUses(mission));
+                const std::string revision = "rasaedit_test";
+
+                // Client texts: new missiontextlanguage ids after every language's largest.
+                auto copyOf = [&](const std::string& module) {
+                    return tr::py::deepCopy(std::shared_ptr<tr::py::Object>(&const_cast<tr::py::Object&>(data.module(module)), [](tr::py::Object*) {}));
+                };
+                tr::py::Ref convGlobals = copyOf(conv), objGlobals = copyOf(objectives), objConvGlobals = copyOf(objConv),
+                            textGlobals = copyOf(textModule);
+                auto lookupOf = [](tr::py::Ref& globals) -> tr::py::Object& {
+                    return *const_cast<tr::py::Object*>(tr::py::dictGet(globals.get(), "lookup"));
+                };
+                int64_t next = 0;
+                for (const std::string& module : data.moduleNames())
+                    if (module.size() > 20 && module.compare(module.size() - 20, 20, ".missiontextlanguage") == 0)
+                        for (const auto& e : data.global(module, "lookup")->entries) next = std::max(next, tr::py::asInt(tr::py::item(e.first.get(), 0)));
+                ++next;
+                const int64_t firstText = next;
+                auto newText = [&](const std::string& text) {
+                    const int64_t id = next++;
+                    for (int64_t g : {1, 2})
+                        tr::py::dictPut(lookupOf(textGlobals), tr::py::makeTuple({tr::py::makeInt(id), tr::py::makeInt(g)}),
+                                        tr::py::makeList({tr::py::makeText(text)}));
+                    return id;
+                };
+                const std::string receiverName = data.creatureName(int32_t(database->creature(int32_t(receiver))->nameId));
+                const std::string giverName = data.creatureName(int32_t(database->creature(int32_t(giver))->nameId));
+                const int64_t nameText = newText("RasaEdit Test: A Word with " + receiverName);
+                const int64_t logText = newText("Speak with " + receiverName + ".");
+                const int64_t offerText = newText("This mission was made in RasaEdit, not shipped with the game. " + receiverName +
+                                                  " is expecting you - go and have a word.\n\nThis second paragraph checks that long mission "
+                                                  "text wraps in the game's window as it does in the editor.");
+                const int64_t finishText = newText("So RasaEdit sent you. Good work, recruit - the test mission is complete.");
+                const int64_t reminderText = newText(receiverName + " is still waiting for you.");
+                const int64_t objectiveName = newText("Talk to " + receiverName);
+                const int64_t objectiveBody = newText("Find " + receiverName + " and speak with him. (" + giverName + " gave you this test.)");
+                const int64_t completionText = newText("RasaEdit test: you found me. That completes your objective - talk to me again "
+                                                       "to hand the mission in.");
+                auto key = [](std::initializer_list<int64_t> parts) {
+                    std::vector<tr::py::Ref> items;
+                    for (int64_t p : parts) items.push_back(tr::py::makeInt(p));
+                    return tr::py::makeTuple(items);
+                };
+                for (const auto& [type, text] : std::vector<std::pair<int64_t, int64_t>>{{1, nameText}, {2, logText}, {3, offerText},
+                                                                                        {4, finishText}, {6, reminderText}})
+                    tr::py::dictPut(lookupOf(convGlobals), key({mission, type}), tr::py::makeList({tr::py::makeInt(text)}));
+                tr::py::dictPut(lookupOf(objGlobals), key({mission, 1}),
+                                tr::py::makeList({tr::py::makeTuple({tr::py::makeInt(objectiveName), tr::py::makeInt(objectiveBody),
+                                                                     std::make_shared<tr::py::Object>(), std::make_shared<tr::py::Object>(), std::make_shared<tr::py::Object>()})}));
+                tr::py::dictPut(lookupOf(objConvGlobals), key({mission, 1, package, 1, 1}), tr::py::makeList({tr::py::makeInt(completionText)}));
+
+                // World database rows, each table's columns set by name (nullable columns left NULL).
+                std::vector<DbTable> after = before;
+                auto add = [&](DbTable& t, const std::vector<std::pair<const char*, int64_t>>& values, const char* comment) {
+                    std::vector<DbValue> row(t.columns.size());
+                    row[t.column("mission_id")] = DbValue::integer(mission);
+                    row[t.column("content_revision")] = DbValue::text(revision);
+                    if (t.column("comment") >= 0) row[t.column("comment")] = DbValue::text(comment);
+                    for (const auto& [column, value] : values) {
+                        if (t.column(column) < 0) throw std::runtime_error(t.name + " has no column " + column);
+                        row[t.column(column)] = DbValue::integer(value);
+                    }
+                    for (size_t c = 0; c < row.size(); ++c)
+                        if (row[c].isNull() && !t.nullable[c]) throw std::runtime_error(t.name + "." + t.columns[c] + " left empty");
+                    t.rows.push_back(std::move(row));
+                };
+                add(after[0], {{"abandonment_policy", 1}, {"category_id", 1}, {"client_name_text_id", nameText}, {"enabled", 1},
+                               {"giver_id", giver}, {"group_type", 1}, {"level", 1}, {"radio_completeable", 0}, {"receiver_id", receiver},
+                               {"requirement", 2}, {"shareable", 0}}, "RasaEdit in-game test mission");
+                add(after[1], {{"objective_id", 1}, {"requirement", 1}, {"client_name_text_id", objectiveName},
+                               {"client_body_text_id", objectiveBody}, {"ordinal", 0}, {"initial_state", 1}, {"is_required", 1}},
+                    "Talk to the receiver");
+                add(after[2], {{"objective_id", 1}, {"transition_id", 1}, {"requirement", 1}, {"sequence", 1}, {"from_state", 1}, {"to_state", 2}},
+                    "Objective 1 transition 1");
+                add(after[3], {{"objective_id", 1}, {"transition_id", 1}, {"trigger_id", 1}, {"requirement", 1}, {"kind", 1}, {"sequence", 1},
+                               {"npc_package_id", package}, {"player_flag_id", 1}}, "Talk to the receiver");
+                add(after[5], {{"objective_id", 1}, {"transition_id", 1}, {"action_id", 1}, {"kind", 4}, {"requirement", 1}, {"reward_id", 1},
+                               {"sequence", 1}}, "Grant the reward");
+                add(after[4], {{"reward_id", 1}, {"requirement", 1}, {"experience", 100}, {"credits", 50}, {"prestige", 0}, {"selection_count", 0}},
+                    "RasaEdit test reward");
+
+                // The editor's server checks on the new content, before anything is written.
+                std::vector<DbTable> checked;
+                for (const char* name : {"mission_channel_policy", "mission_repeat_policy", "mission_prerequisite", "mission_indicator",
+                                         "mission_reward_item", "mission_spawn_group", "mission_spawn", "mission_scenario", "mission_scenario_step",
+                                         "mission_area", "mission_scene_binding"})
+                    if (database->hasTable(name)) checked.push_back(database->loadTable(name));
+                std::map<std::string, const DbTable*> byName;
+                for (const DbTable& t : checked) byName[t.name] = &t;
+                for (const DbTable& t : after) byName[t.name] = &t;
+                const MissionValidationResult v = validateMissionContent(byName, MissionReferences::load(*database));
+                size_t own = 0;
+                for (const MissionDiagnostic& d : v.diagnostics)
+                    if (d.missionId == mission) {
+                        ++own;
+                        std::printf("  new mission %s: %s\n", d.code.c_str(), d.message.c_str());
+                    }
+                std::printf("new mission %lld: server checks - %zu enabled, %zu diagnostics of its own, start-up %s, readiness %s\n",
+                            static_cast<long long>(mission), v.enabledMissions, own, v.startupFails ? "FAILS" : "ok", v.blocksReadiness ? "BLOCKED" : "ok");
+                if (own || v.startupFails) throw std::runtime_error("the new mission does not pass the server's checks; nothing written");
+
+                // Keep copies, then write the database and game.zip.
+                std::error_code ec;
+                const fs::path dbPath = fs::u8path(database->path());
+                fs::path dbKeep = dbPath;
+                dbKeep += ".before-newmission";
+                fs::copy_file(dbPath, dbKeep, fs::copy_options::overwrite_existing, ec);
+                if (ec) throw std::runtime_error("cannot keep " + dbKeep.string() + ": " + ec.message());
+                const fs::path zipPath = fs::u8path(data.path());
+                fs::path zipKeep = zipPath;
+                zipKeep += ".before-newmission";
+                fs::copy_file(zipPath, zipKeep, fs::copy_options::overwrite_existing, ec);
+                if (ec) throw std::runtime_error("cannot keep " + zipKeep.string() + ": " + ec.message());
+
+                std::vector<std::pair<const DbTable*, const DbTable*>> pairs;
+                for (size_t k = 0; k < before.size(); ++k) pairs.emplace_back(&before[k], &after[k]);
+                WorldDatabase::SaveSummary summary;
+                std::string error;
+                if (!database->saveTables(pairs, summary, error)) throw std::runtime_error("database save failed: " + error);
+
+                std::map<std::string, tr::Bytes> replace;
+                std::vector<std::string> remove;
+                tr::ZipArchive zip(data.path());
+                for (const auto& [module, globals] : std::vector<std::pair<std::string, tr::py::Ref>>{
+                         {conv, convGlobals}, {objectives, objGlobals}, {objConv, objConvGlobals}, {textModule, textGlobals}}) {
+                    const std::string entry = data.moduleEntryName(module);
+                    const std::string base = entry.substr(0, entry.rfind('.'));
+                    const std::string source = tr::py::moduleSource(*globals);
+                    replace[base + ".py"] = tr::Bytes(source.begin(), source.end());
+                    for (const tr::ZipEntry& z : zip.entries())
+                        if (z.name == base + ".pyo" || z.name == base + ".pyc") remove.push_back(z.name);
+                }
+                fs::path temp = zipPath;
+                temp += ".rasaedit-new";
+                tr::writeZip(zip, temp.string(), replace, remove);
+                tr::GameData check(temp.string());
+                const tr::py::Object* nameEntry = tr::py::dictGetTuple(check.global(conv, "lookup"), {mission, 1});
+                const std::string readName = nameEntry ? check.missionText(int32_t(tr::py::asInt(tr::py::item(nameEntry, 0))), 1) : std::string();
+                const bool conversationBack = tr::py::dictGetTuple(check.global(objConv, "lookup"), {mission, 1, package, 1, 1}) != nullptr;
+                tr::ZipArchive written(temp.string());
+                bool stored = true;
+                for (const tr::ZipEntry& e : written.entries()) stored = stored && e.method == 0;
+                fs::rename(temp, zipPath, ec);
+                if (ec) throw std::runtime_error("cannot replace game.zip (is the game running?): " + ec.message());
+
+                // Read the database back and check again, as the server will at start-up.
+                WorldDatabase reread(database->path());
+                std::vector<DbTable> reloaded;
+                size_t rows = 0;
+                for (const char* name : tableNames) {
+                    reloaded.push_back(reread.loadTable(name));
+                    for (const auto& row : reloaded.back().rows) rows += row[reloaded.back().column("mission_id")].asInt() == mission;
+                }
+                for (const DbTable& t : reloaded) byName[t.name] = &t;
+                const MissionValidationResult again = validateMissionContent(byName, MissionReferences::load(reread));
+                std::printf("new mission %lld (%s), giver %s (%lld), receiver %s (%lld, package %lld): %zu rows in the database, %d inserted; "
+                            "client name read back \"%s\", objective conversation %s, all entries stored %s, texts %lld-%lld; after reload %zu "
+                            "enabled, start-up %s, readiness %s; kept %s and %s\n",
+                            static_cast<long long>(mission), revision.c_str(), giverName.c_str(), static_cast<long long>(giver), receiverName.c_str(),
+                            static_cast<long long>(receiver), static_cast<long long>(package), rows, summary.inserted, readName.c_str(),
+                            conversationBack ? "yes" : "MISSING", stored ? "yes" : "NO", static_cast<long long>(firstText),
+                            static_cast<long long>(next - 1), again.enabledMissions, again.startupFails ? "FAILS" : "ok",
+                            again.blocksReadiness ? "BLOCKED" : "ok", dbKeep.string().c_str(), zipKeep.string().c_str());
+            } catch (const std::exception& e) {
+                std::printf("in-game new mission FAILED: %s\n", e.what());
+            }
+            return 0;
+        }
         // RASA_SKYFADETEST=1 (Concordia with RASA_DB): walk into Ranja Cavern at the mouth (the in-game positions where the region
         // switched) and print the sky weights and hemisphere light every 0.5 s - the 4 s cross-fade (SceneView::skyTransitions).
         if (envValue("RASA_SKYFADETEST")) {
