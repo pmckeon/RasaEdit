@@ -1078,7 +1078,8 @@ size_t SceneView::mapLightModifierTracks(const tr::PlacedLight& light) const {
 tr::PlacedLight SceneView::modifiedLight(const tr::PlacedLight& light) const {
     if (light.id == 0 && light.modifiers.empty()) return light;
     tr::PlacedLight out = light;
-    auto applyTracks = [&](const std::vector<tr::LightModifierTrack>& list) {
+    // template: the light's own (.ltmp) tracks, as a contact-point light carries them; else the map's lights.xml <Mods>.
+    auto applyTracks = [&](const std::vector<tr::LightModifierTrack>& list, bool template_) {
         for (const tr::LightModifierTrack& track : list) {
             if (!track.enabled) continue;
             const float w = tr::lightModifierWeight(track, lightTime);
@@ -1095,18 +1096,29 @@ tr::PlacedLight SceneView::modifiedLight(const tr::PlacedLight& light) const {
                     out.colour = add(track.colour1, scaled(subtract(track.colour2, track.colour1), w));
                     break;
                 case tr::LightModifierTrack::Kind::Rotation: {
-                    // Point lights: the modifier replaces the orientation, but the game's angle stays 0. apitrace of Luna Cavern
+                    // Map point lights: the modifier replaces the orientation, but the game's angle stays 0. apitrace of Luna Cavern
                     // (2026-10-14): Light_08 (LocalOrientation 22.4 degrees about y in lights.xml, rotation track one turn per
                     // 100 s) has an identity Light2World / Proj2LightView in all 3,308 frames while its colour track runs through
-                    // ~23 s of modifier time. Why the angle does not advance is NOT understood. Other kinds: UNVERIFIED, as decompiled.
-                    if (light.kind == tr::PlacedLight::Kind::Point) {
+                    // ~23 s of modifier time. Why the angle does not advance is NOT understood.
+                    if (light.kind == tr::PlacedLight::Kind::Point && !template_) {
                         out.worldOrientation = tr::Quat{0, 0, 0, 1};
                         break;
                     }
                     const float angle = std::clamp(w * 6.2831853f, 0.0f, 6.2831853f);
                     const tr::Vec3 a = normalized(track.axis);
                     const float s = std::sin(angle * 0.5f);
-                    out.worldOrientation = tr::Quat{a.x * s, a.y * s, a.z * s, std::cos(angle * 0.5f)};
+                    const tr::Quat turn{a.x * s, a.y * s, a.z * s, std::cos(angle * 0.5f)};
+                    if (template_) {
+                        // A template's own track (a contact-point light) turns: apitrace at the Alia Das waypoint (2026-10-21,
+                        // tabula_rasa.9.trace) - point_human_ext_waypoint_blue.ltmp's light (one turn about y per 11 s) has a
+                        // Light2World turning about the vertical, with its intensity track fitting the turn's clock at 11.02 s a
+                        // turn. The turn replaces LocalOrientation, the light's child node, under the contact point's frame.
+                        const tr::Quat l = light.localOrientation;
+                        const tr::Quat contact = multiplyQuat(light.worldOrientation, tr::Quat{-l.x, -l.y, -l.z, l.w});
+                        out.worldOrientation = multiplyQuat(contact, turn);
+                    } else {
+                        out.worldOrientation = turn;            // other kinds: UNVERIFIED, as decompiled
+                    }
                     break;
                 }
                 case tr::LightModifierTrack::Kind::Position:
@@ -1120,8 +1132,8 @@ tr::PlacedLight SceneView::modifiedLight(const tr::PlacedLight& light) const {
     };
     if (light.id != 0)
         for (const tr::LightModifier& mod : lightModifiers_)
-            if (mod.lightId == light.id) applyTracks(mod.tracks);
-    applyTracks(light.modifiers);       // the template's own tracks (contact-point lights)
+            if (mod.lightId == light.id) applyTracks(mod.tracks, false);
+    applyTracks(light.modifiers, true);  // the template's own tracks (contact-point lights)
     return out;
 }
 
@@ -2998,25 +3010,49 @@ const std::vector<int>& SceneView::poseBoneIndices(const Model& part, const Mode
 // skinOverride_ (the base model's and each part's palette) and idlePosed_ (the base skeleton's posed bones, for accessory sockets).
 // False: draw the models' stored first frame.
 bool SceneView::poseIdle(const ServerPlacement& s) {
-    if (s.idles.empty() || !s.model || !s.model->avatarPose || s.model->skeleton.bones.empty()) return false;
-    IdleSequence& q = s.idle;
+    return poseSequence(s.model, s.avatarParts, s.idles, s.idleType, s.idleDelayLower, s.idleDelayUpper, s.idle, sequenceSeed(s.selection));
+}
+
+bool SceneView::poseIdle(const Placement& p, size_t index) {
+    static const std::vector<AvatarDraw> noParts;
+    return poseSequence(p.model, noParts, p.idles, p.idleType, p.idleDelayLower, p.idleDelayUpper, p.idle, sequenceSeed(index));
+}
+
+bool SceneView::poseSequence(const Model* model, const std::vector<AvatarDraw>& parts, const std::vector<tr::GameData::FamilyAnimation>& idles,
+                             int32_t type, int32_t delayLower, int32_t delayUpper, IdleSequence& q, uint32_t seed) {
+    if (idles.empty() || !model || !model->avatarPose || model->skeleton.bones.empty()) return false;
+    float t = 0;
+    const tr::Animation* animation = sequenceStep(idles, type, delayLower, delayUpper, q, seed, t);
+    if (!animation) return false;
+    const Model& base = *model;
+    // The palettes are kept while the pose does not change (the clock stopped, or the same time drawn twice); parts that finish
+    // loading invalidate them.
+    size_t loadedParts = 0;
+    for (const AvatarDraw& part : parts)
+        if (part.model && part.model->loaded) ++loadedParts;
+    return poseSequenceAt(base, parts, *animation, t, loadedParts, q);
+}
+
+const tr::Animation* SceneView::sequenceStep(const std::vector<tr::GameData::FamilyAnimation>& idles, int32_t type, int32_t delayLower,
+                                             int32_t delayUpper, IdleSequence& q, uint32_t seed, float& t) {
+    if (idles.empty()) return nullptr;
     int32_t total = 0;
-    for (const tr::GameData::FamilyAnimation& a : s.idles) total += std::max(a.frequency, 0);
+    for (const tr::GameData::FamilyAnimation& a : idles) total += std::max(a.frequency, 0);
     auto pick = [&]() {
         q.random = uint32_t(uint64_t(q.random) * 48271u % 2147483647u);
         if (total <= 0) return int32_t(0);
         int32_t r = int32_t(double(q.random) / 2147483647.0 * double(total));
-        for (size_t k = 0; k < s.idles.size(); ++k) {
-            r -= std::max(s.idles[k].frequency, 0);
+        for (size_t k = 0; k < idles.size(); ++k) {
+            r -= std::max(idles[k].frequency, 0);
             if (r < 0) return int32_t(k);
         }
-        return int32_t(s.idles.size() - 1);
+        return int32_t(idles.size() - 1);
     };
     const float now = std::max(lightTime, 0.0f);
     if (q.current < 0 || now < q.last) {
-        q.random = uint32_t((size_t(s.selection.kind) * 7919u + s.selection.index) % 2147483646u) + 1u;
+        q.random = seed;
         q.random = uint32_t(uint64_t(q.random) * 48271u % 2147483647u);
-        q.delay = float(s.idleDelayLower + int32_t(double(q.random) / 2147483647.0 * double(s.idleDelayUpper - s.idleDelayLower))) * 0.001f;
+        q.delay = float(delayLower + int32_t(double(q.random) / 2147483647.0 * double(delayUpper - delayLower))) * 0.001f;
         q.start = q.delay;                // objectanimationmgr.py: a delayed first animation starts after the delay
         q.current = pick();
     }
@@ -3026,38 +3062,38 @@ bool SceneView::poseIdle(const ServerPlacement& s) {
     // move-to-last-frame - one pick played once. A finished one-shot holds its last frame (UNVERIFIED: the engine's
     // non-looping playback end is not traced), as does the gap of a recurring delay; before a delayed first animation the
     // models' stored first frame is drawn.
-    if (now < q.start) return false;
-    const tr::Animation* animation = idleAnimation(s.idles[size_t(q.current)].name);
-    float t = 0;
-    if (s.idleType == 2) {
-        if (!animation || animation->duration <= 0.0f) return false;
+    if (now < q.start) return nullptr;
+    const tr::Animation* animation = idleAnimation(idles[size_t(q.current)].name);
+    t = 0;
+    if (type == 2) {
+        if (!animation || animation->duration <= 0.0f) return nullptr;
         t = std::fmod(now - q.start, animation->duration);
-    } else if (s.idleType == 3) {
+    } else if (type == 3) {
         animation = nullptr;
         for (int guard = 0; guard < 100000; ++guard) {
-            animation = idleAnimation(s.idles[size_t(q.current)].name);
+            animation = idleAnimation(idles[size_t(q.current)].name);
             const float duration = animation ? animation->duration : 0.0f;
             if (duration > 0.0f && now - q.start < duration + q.delay) break;
             q.start += duration + q.delay;
             q.current = pick();
             animation = nullptr;
         }
-        if (!animation) return false;
+        if (!animation) return nullptr;
         t = std::min(now - q.start, animation->duration);
     } else {
-        if (!animation || animation->duration <= 0.0f) return false;
-        t = s.idleType == 4 ? animation->duration : std::min(now - q.start, animation->duration);
+        if (!animation || animation->duration <= 0.0f) return nullptr;
+        t = type == 4 ? animation->duration : std::min(now - q.start, animation->duration);
     }
-    const Model& base = *s.model;
-    // The palettes are kept while the pose does not change (the clock stopped, or the same time drawn twice); parts that finish
-    // loading invalidate them.
-    size_t loadedParts = 0;
-    for (const AvatarDraw& part : s.avatarParts)
-        if (part.model && part.model->loaded) ++loadedParts;
+    return animation;
+}
+
+bool SceneView::poseSequenceAt(const Model& base, const std::vector<AvatarDraw>& parts, const tr::Animation& anim, float t, size_t loadedParts,
+                               IdleSequence& q) {
+    const tr::Animation* animation = &anim;
     if (q.cacheTime != t || q.cacheAnimation != animation || q.cacheParts != loadedParts) {
         q.baseSkin = skinMatrices(base.skeleton, *animation, t, nullptr, &q.posed, &idleTracks(base, *animation));
         q.partSkins.clear();
-        for (const AvatarDraw& part : s.avatarParts) {
+        for (const AvatarDraw& part : parts) {
             const Model* m = part.model;
             if (!m || !m->loaded || !m->avatarPose || m->skeleton.bones.empty()) continue;
             bool seen = false;
@@ -3603,7 +3639,14 @@ void SceneView::queueDraws(const Selection& selection) {
             ++drawnEntities_;
             const bool selected = int(k) == selectedEntity;
             const float fade = gameDistances ? entityDistanceAlpha(p) : 1.0f;
-            if (p.model && p.model->loaded) drawModelPieces(*p.model, p.world, p.hue, selected, selected ? 1.0f : fade);
+            {
+                struct IdleScope {              // a map usable's state animation applies to this placement only
+                    SceneView& view;
+                    ~IdleScope() { view.skinOverride_.clear(); }
+                } idleScope{*this};
+                if (!p.idles.empty()) poseIdle(p, k);
+                if (p.model && p.model->loaded) drawModelPieces(*p.model, p.world, p.hue, selected, selected ? 1.0f : fade);
+            }
             if (showStateEffects)                // a map usable's state accessories (e.g. a fire pit's flames' mesh), at the entity
                 for (Model* a : p.stateAccessories)
                     if (a && a->loaded) drawModelPieces(*a, p.world, Vec4f{0, 0, 0, 0}, selected, selected ? 1.0f : fade);
@@ -3678,6 +3721,11 @@ void SceneView::queueDraws(const Selection& selection) {
                 if (p.neverDrawn || !p.model || !p.model->loaded || !p.model->hasSolid) continue;
                 const uint32_t mask = maskFor(p.centre, p.radius);
                 if (mask == 0) continue;
+                struct IdleScope {
+                    SceneView& view;
+                    ~IdleScope() { view.skinOverride_.clear(); }
+                } idleScope{*this};
+                if (!p.idles.empty()) poseIdle(p, k);
                 const std::vector<Mat4> animated = animatedPieceMatrices(*p.model, lightTime);
                 SkinScope skinScope{*renderer_};
                 for (const ModelPiece& piece : p.model->pieces) {
@@ -4509,12 +4557,21 @@ SceneView::Placement SceneView::makePlacement(const tr::MapEntity& e) {
     if (useState != mapUsableStates_.end() && !p.neverDrawn) {
         p.useState = useState->second;
         startPackage(effectLists(p), stateEffects(e.classId, p.useState), true);
-        // The state's animation (usabledata.animation (class, state, USE_STATE_NULL) -> a family on the mesh), looped from its
-        // first pick (the spec's type - looping / recurring one-shots - is not followed here: UNVERIFIED for the one-shot kinds).
+        // The state's animation (usabledata.animation (class, state, USE_STATE_NULL) -> objectAnimationSpecification -> a family on
+        // the mesh), played as the ambient figures play theirs (objectanimationmgr.py PlayObjectAnimation / _AnimationComplete, poseIdle):
+        // weighted picks by the spec's type (3 recurring one-shot = a new pick after each). The Bane articulated drill (6318, state 110:
+        // spec 53, override 3, family 277) draws among drilling / idle fidget / idle long, as in game (user, 2026-10-21: it drills, then now
+        // and then stops for a malfunction with a brief spark - the sparks' marker Resolve3 is in the fidget, not the drilling).
         if (usableAnimationFor_ && !mesh.empty()) {
             try {
                 const tr::GameData::UsableAnimation animation = usableAnimationFor_(e.classId, p.useState);
-                if (!animation.animations.empty()) p.model = objectModelFor(mesh, animation.animations.front().name);
+                if (!animation.animations.empty()) {
+                    p.model = modelFor(mesh, "%" + animation.animations.front().name);
+                    p.idles = animation.animations;
+                    p.idleType = animation.type;
+                    p.idleDelayLower = animation.delayLower;
+                    p.idleDelayUpper = animation.delayUpper;
+                }
             } catch (const std::exception&) {}
         }
     }
@@ -4753,21 +4810,16 @@ void SceneView::followAnimationMarkers(EffectLists lists, const std::string& ani
         player.markerAnimation.clear();
         return;
     }
-    if (player.markerAnimation != animation || player.markerLast < 0.0f) {
-        player.markerAnimation = animation;
-        player.markerLast = time;
-        return;
-    }
-    const float last = player.markerLast;
-    player.markerLast = time;
-    if (time == last) return;
-    std::vector<std::pair<float, uint32_t>> hits;   // (seconds into the animation, marker)
-    for (const tr::AnimMarker& m : animationMarkers(animation)) {
-        hits.emplace_back(float(m.timeMs) / 1000.0f, m.type);
-        if (m.type == 1) hits.emplace_back(std::max(0.0f, float(m.timeMs) / 1000.0f - 0.8f), 29u);
-    }
-    if (hits.empty()) return;
-    std::sort(hits.begin(), hits.end());
+    // (seconds into the animation, marker), with PreStrike 0.8 s before each Strike (FUN_0084b160).
+    const auto hitsOf = [&](const std::string& name) {
+        std::vector<std::pair<float, uint32_t>> out;
+        for (const tr::AnimMarker& m : animationMarkers(name)) {
+            out.emplace_back(float(m.timeMs) / 1000.0f, m.type);
+            if (m.type == 1) out.emplace_back(std::max(0.0f, float(m.timeMs) / 1000.0f - 0.8f), 29u);
+        }
+        std::sort(out.begin(), out.end());
+        return out;
+    };
     std::set<uint32_t> waited;
     for (const StateParticle& e : player.pending.particles) waited.insert(e.marker);
     for (const StateLight& e : player.pending.lights) waited.insert(e.marker);
@@ -4775,10 +4827,30 @@ void SceneView::followAnimationMarkers(EffectLists lists, const std::string& ani
     for (const tr::SfxTimer& t : player.pending.timers) waited.insert(t.marker);
     for (uint32_t m : player.pending.stops) waited.insert(m);
     for (uint32_t m : player.pending.accessoryMarkers) waited.insert(m);
-    auto fireBetween = [&](float from, float to) {         // (from, to]
+    auto fireIn = [&](const std::vector<std::pair<float, uint32_t>>& hits, float from, float to) {      // (from, to]
         for (const auto& [at, m] : hits)
             if (at > from && at <= to && waited.count(m)) fireMarker(lists, m);
     };
+    if (player.markerLast < 0.0f) {                      // the first look: nothing fired yet
+        player.markerAnimation = animation;
+        player.markerLast = time;
+        return;
+    }
+    if (player.markerAnimation != animation) {
+        // A sequence moved on to another pick: the previous pick's markers after the last look, then the new one's from its start
+        // (a marker at 0 ms fires as the animation begins).
+        fireIn(hitsOf(player.markerAnimation), player.markerLast, std::numeric_limits<float>::max());
+        player.markerAnimation = animation;
+        player.markerLast = time;
+        fireIn(hitsOf(animation), -1.0f, time);
+        return;
+    }
+    const float last = player.markerLast;
+    player.markerLast = time;
+    if (time == last) return;
+    const std::vector<std::pair<float, uint32_t>> hits = hitsOf(animation);
+    if (hits.empty()) return;
+    auto fireBetween = [&](float from, float to) { fireIn(hits, from, to); };
     if (time > last) {
         fireBetween(last, time);
     } else {                                             // wrapped round the loop's end
@@ -4810,13 +4882,20 @@ void SceneView::advancePackagePlayers(float dt) {
     for (Placement& p : placements_) {
         if (!p.player.active()) continue;
         advance(effectLists(p));
-        if (p.model && p.model->loaded && p.model->animation.duration > 0.0f)
+        float sequenceTime = 0;
+        if (!p.idles.empty()) sequenceStep(p.idles, p.idleType, p.idleDelayLower, p.idleDelayUpper, p.idle, sequenceSeed(size_t(&p - placements_.data())), sequenceTime);
+        if (p.idle.current >= 0 && size_t(p.idle.current) < p.idles.size()) {       // a state animation sequence (poseIdle)
+            const tr::GameData::FamilyAnimation& a = p.idles[size_t(p.idle.current)];
+            followAnimationMarkers(effectLists(p), a.name, std::max(0.0f, lightTime - p.idle.start), std::numeric_limits<float>::max());
+        } else if (p.model && p.model->loaded && p.model->animation.duration > 0.0f)
             followAnimationMarkers(effectLists(p), p.model->animationName, std::fmod(lightTime, p.model->animation.duration), p.model->animation.duration);
     }
     for (ServerPlacement& s : serverPlacements_) {
         if (!s.player.active()) continue;
         advance(effectLists(s));
         // An idle sequence (ambient figures: their state's animation family) as poseIdle plays it; else the model's object animation.
+        float sequenceTime = 0;
+        if (!s.idles.empty()) sequenceStep(s.idles, s.idleType, s.idleDelayLower, s.idleDelayUpper, s.idle, sequenceSeed(s.selection), sequenceTime);
         if (s.idle.current >= 0 && size_t(s.idle.current) < s.idles.size()) {
             const tr::GameData::FamilyAnimation& a = s.idles[size_t(s.idle.current)];
             followAnimationMarkers(effectLists(s), a.name, std::max(0.0f, lightTime - s.idle.start), std::numeric_limits<float>::max());

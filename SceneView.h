@@ -601,6 +601,19 @@ private:
                    !pending.timers.empty() || !pending.stops.empty();
         }
     };
+    struct IdleSequence {               // a creature's idle playback (poseIdle)
+        float start = 0;                // light-clock time the current animation started
+        float last = -1;                // light-clock time of the last update (a clock running backwards restarts)
+        int32_t current = -1;           // index in ServerPlacement::idles; -1 = not started
+        uint32_t random = 1;            // Park-Miller state
+        float delay = 0;                // seconds, drawn once per sequence (objectanimationmgr.py: one delay per PlayObjectAnimation)
+        // The last pose's palettes (base skeleton, its posed bones, each part's), reused while the pose is unchanged.
+        float cacheTime = -1;
+        const tr::Animation* cacheAnimation = nullptr;
+        size_t cacheParts = 0;
+        std::vector<Mat4> baseSkin, posed;
+        std::vector<std::pair<const Model*, std::vector<Mat4>>> partSkins;
+    };
     struct Placement {
         Mat4 world;                 // entity placement
         Mat4 boxWorld;              // placement * local bounds (for placeholders and selection)
@@ -620,25 +633,18 @@ private:
         std::vector<StateLight> stateLights;
         std::vector<StateBeam> stateBeams;
         PackagePlayer player;
+        // The use state's animation family (usabledata.animation -> objectAnimationSpecification -> animationFamilyObject), played as the
+        // ambient figures play theirs (poseIdle): weighted picks by the spec's type, on a "%"-posed model. Empty: the model's own animation.
+        std::vector<tr::GameData::FamilyAnimation> idles;
+        int32_t idleType = 3;
+        int32_t idleDelayLower = 0, idleDelayUpper = 0;
+        mutable IdleSequence idle;
     };
 
     struct AvatarDraw {                 // one suit's pieces of one swap set
         Model* model = nullptr;
         uint32_t swapsetId = 0;
         Vec4f hue;                      // w: 1 = hue the non-flesh pieces
-    };
-    struct IdleSequence {               // a creature's idle playback (poseIdle)
-        float start = 0;                // light-clock time the current animation started
-        float last = -1;                // light-clock time of the last update (a clock running backwards restarts)
-        int32_t current = -1;           // index in ServerPlacement::idles; -1 = not started
-        uint32_t random = 1;            // Park-Miller state
-        float delay = 0;                // seconds, drawn once per sequence (objectanimationmgr.py: one delay per PlayObjectAnimation)
-        // The last pose's palettes (base skeleton, its posed bones, each part's), reused while the pose is unchanged.
-        float cacheTime = -1;
-        const tr::Animation* cacheAnimation = nullptr;
-        size_t cacheParts = 0;
-        std::vector<Mat4> baseSkin, posed;
-        std::vector<std::pair<const Model*, std::vector<Mat4>>> partSkins;
     };
     struct ServerPlacement {
         Selection selection;
@@ -704,6 +710,21 @@ private:
     const tr::Animation* idleAnimation(const std::string& name);
     const std::vector<int>& idleTracks(const Model& model, const tr::Animation& animation);
     bool poseIdle(const ServerPlacement& s);
+    bool poseIdle(const Placement& p, size_t index);       // a map usable's state animation sequence
+    // The shared core: the sequence's current pose on `model` (and the avatar parts), into skinOverride_ / idlePosed_.
+    bool poseSequence(const Model* model, const std::vector<AvatarDraw>& parts, const std::vector<tr::GameData::FamilyAnimation>& idles,
+                      int32_t type, int32_t delayLower, int32_t delayUpper, IdleSequence& q, uint32_t seed);
+    // The sequence at the light clock's time: moves it on to its current pick and gives that animation and the time into it
+    // (nullptr: nothing to pose - before a delayed start, or no animation). Run by the posing and by advancePackagePlayers, so the
+    // picks (and the markers they fire) go on while the object is out of view.
+    const tr::Animation* sequenceStep(const std::vector<tr::GameData::FamilyAnimation>& idles, int32_t type, int32_t delayLower,
+                                      int32_t delayUpper, IdleSequence& q, uint32_t seed, float& t);
+    static uint32_t sequenceSeed(const Selection& selection) {
+        return uint32_t((size_t(selection.kind) * 7919u + selection.index) % 2147483646u) + 1u;
+    }
+    bool poseSequenceAt(const Model& base, const std::vector<AvatarDraw>& parts, const tr::Animation& animation, float t, size_t loadedParts,
+                        IdleSequence& q);
+    static uint32_t sequenceSeed(size_t placementIndex) { return uint32_t((placementIndex * 7919u + 104729u) % 2147483646u) + 1u; }
     void queueSky();                        // the active sky's layers (TRasa::SkyLayer bodies), see the comment at queueSky
     void queueSkyLayers(const tr::Sky& sky, float fade);
     void queueBillboards(const Model& model, const Mat4& placementWorld, const std::vector<Mat4>& animatedMatrices, const SceneLighting& light);
