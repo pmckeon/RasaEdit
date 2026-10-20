@@ -44,6 +44,7 @@ void AssetPreview::release() {
     renderer_.reset();
     releaseTexture();
     releaseSound();
+    packageSound_.release();
     if (mixer_) MIX_DestroyMixer(mixer_);      // destroys its tracks too
     mixer_ = nullptr;
     track_ = nullptr;
@@ -91,6 +92,11 @@ void AssetPreview::select(EditorContext& ctx, const std::string& name) {
     animationModelsLooking_ = false;
     animationModel_.clear();
     particlesOnly_ = false;
+    package_ = false;
+    packageBodies_.clear();
+    packageBody_ = 0;
+    packageSounds_.clear();
+    packageSound_.stop();
     kind_ = Kind::None;
     text_.clear();
     summary_.clear();
@@ -188,7 +194,26 @@ void AssetPreview::select(EditorContext& ctx, const std::string& name) {
             for (const tr::SfxAccessory& a : p.accessories)
                 summary_ += "  accessory " + a.mesh + (a.animation.empty() ? "" : " + " + a.animation) + (a.package.empty() ? "" : " -> " + a.package) + "\n";
             for (const tr::SfxParticleAttach& a : p.particles) summary_ += "  particles " + a.file + "\n";
-            kind_ = Kind::Info;
+            for (const tr::SfxLight& l : p.lights)
+                summary_ += "  light " + std::string(l.spot ? "spot" : "point") + ", " + (l.durationMs ? std::to_string(l.durationMs) + " ms" : std::string("persistent")) + "\n";
+            for (const tr::SfxBeam& b : p.beams)
+                summary_ += "  beam " + b.texture + ", " + (b.durationMs ? std::to_string(b.durationMs) + " ms" : std::string("persistent")) + "\n";
+            for (const tr::SfxSound& s : p.sounds) packageSounds_.push_back(int32_t(s.audioSet));
+            // The bodies it plays on: objects whose usable state (or a transition into it) attaches it, then the effect proxy.
+            if (ctx.gameData) {
+                for (const tr::GameData::UsablePackageUse& u : ctx.gameData->usablePackageUsers(name)) {
+                    const std::string mesh = ctx.gameData->classMeshName(u.classId);
+                    if (mesh.empty() || mesh == "default.geo") continue;
+                    std::string label = ctx.gameData->className(u.classId) + " (state " + std::to_string(u.stateId) +
+                                        (u.previousState == 97 ? "" : ", from " + std::to_string(u.previousState)) + ") - " + mesh;
+                    bool seen = false;
+                    for (const auto& b : packageBodies_) seen = seen || b.second == mesh;
+                    if (!seen) packageBodies_.emplace_back(label, mesh);
+                }
+            }
+            packageBodies_.emplace_back("the effect proxy (particle_proxy.geo: every HPS_ point at its origin)", "particle_proxy.geo");
+            package_ = true;
+            openPackageBody(ctx);
         }
     } catch (const std::exception& e) {
         summary_ += std::string("\nparse error: ") + e.what() + "\n";
@@ -244,7 +269,15 @@ void AssetPreview::openScene(EditorContext& ctx, const std::string& mesh) {
     pitch_ = -0.25f;
     animationTime_ = 0;
     modelFitted_ = false;
+    frontEndCamera_ = tr::toLowerAscii(mesh).rfind("ui_fe_", 0) == 0;
     kind_ = Kind::Model;
+}
+
+// gfxView's projection (tabula_rasa.exe FUN_005e7360, traced 2026-10-20): s = 1 / tan(fieldOfView / 2) is the scale of the view's
+// LONGER side and the other is s x long / short, so a wide view's fieldOfView is horizontal (1.047 = 60 degrees across).
+float AssetPreview::frontEndFovY(float aspect) const {
+    const float halfAcross = 1.047f * 0.5f;
+    return aspect >= 1.0f ? 2.0f * std::atan(std::tan(halfAcross) / aspect) : 2.0f * halfAcross;
 }
 
 void AssetPreview::setAnimationModels(EditorContext& ctx, const std::vector<ModelUse>& models, bool stillLooking) {
@@ -303,32 +336,101 @@ void AssetPreview::draw(EditorContext& ctx) {
     }
 }
 
-void AssetPreview::drawModel(EditorContext&) {
+void AssetPreview::openPackageBody(EditorContext& ctx) {
+    const std::string& mesh = packageBodies_[size_t(std::clamp(packageBody_, 0, int(packageBodies_.size()) - 1))].second;
+    openScene(ctx, mesh);
+    scene_->previewTimedEffects = true;
+    scene_->setEntityPackage(0, name_);
+    if (mesh == "particle_proxy.geo") {          // nothing to fit to: frame the origin
+        target_ = tr::Vec3{0, 1, 0};
+        distance_ = 6.0f;
+        modelFitted_ = true;
+    }
+}
+
+// The package's controls: the body it plays on, Restart (the package clock, timed lights and beams again), its sounds.
+void AssetPreview::drawPackage(EditorContext& ctx) {
+    if (!package_ || !scene_) return;
+    if (packageBodies_.size() > 1) {
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::BeginCombo("##pkgbody", ("On " + packageBodies_[size_t(packageBody_)].first).c_str())) {
+            for (size_t k = 0; k < packageBodies_.size(); ++k)
+                if (ImGui::Selectable(packageBodies_[k].first.c_str(), int(k) == packageBody_) && int(k) != packageBody_) {
+                    packageBody_ = int(k);
+                    openPackageBody(ctx);
+                }
+            ImGui::EndCombo();
+        }
+    }
+    if (!scene_) return;
+    if (ImGui::SmallButton("Restart package")) scene_->setEntityPackage(0, name_);
+    ImGui::SameLine();
+    ImGui::TextDisabled("%.1f s", scene_->packageTime());
+    if (packageSounds_.empty() || !ctx.gameData) return;
+    if (ImGui::TreeNode("pkgsounds", "Sounds (%zu)", packageSounds_.size())) {
+        for (size_t k = 0; k < packageSounds_.size(); ++k) {
+            const int32_t set = packageSounds_[k];
+            ImGui::PushID(int(k));
+            ImGui::Text("audio set %d %s", set, ctx.gameData->audioSetName(set).c_str());
+            const std::vector<tr::GameData::AudioSetSound> members = ctx.gameData->audioSetSounds(set);
+            for (size_t m = 0; m < members.size(); ++m) {
+                ImGui::PushID(int(m));
+                const bool playing = packageSound_.playing(members[m].file);
+                if (ImGui::SmallButton(playing ? "Stop" : "Play")) {
+                    if (playing) packageSound_.stop();
+                    else if (ctx.assets && ctx.assets->exists(members[m].file)) packageSound_.play(members[m].file, ctx.assets->read(members[m].file));
+                }
+                ImGui::SameLine();
+                ImGui::TextUnformatted(members[m].file.c_str());
+                ImGui::PopID();
+            }
+            if (members.empty()) ImGui::TextDisabled("  (no sounds in this set)");
+            ImGui::PopID();
+        }
+        if (!packageSound_.error().empty()) ImGui::TextColored(ImVec4(1, 0.5f, 0.4f, 1), "%s", packageSound_.error().c_str());
+        ImGui::TreePop();
+    }
+}
+
+void AssetPreview::drawModel(EditorContext& ctx) {
+    drawPackage(ctx);
     if (!scene_ || !renderer_) return;
+    if (ImGui::Checkbox("Front-end camera", &frontEndCamera_) && !frontEndCamera_) modelFitted_ = false;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("As the login / character screens show it: camera at (0, 0.9, 0) looking +z, 60 degrees across, black behind\n"
+                          "(client/gameui.py SetupFrontEndSceneView, FrontEnd/BkgdView).");
+    if (frontEndCamera_) {
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(90);
+        const char* shapes[] = {"16:9", "4:3"};
+        ImGui::Combo("##feaspect", &frontEndAspect_, shapes, 2);
+    }
     const float width = std::max(64.0f, ImGui::GetContentRegionAvail().x);
-    const ImVec2 size(width, std::max(160.0f, std::min(width, ImGui::GetContentRegionAvail().y * 0.6f)));
+    const ImVec2 size = frontEndCamera_ ? ImVec2(width, width / (frontEndAspect_ == 0 ? 16.0f / 9.0f : 4.0f / 3.0f))
+                                        : ImVec2(width, std::max(160.0f, std::min(width, ImGui::GetContentRegionAvail().y * 0.6f)));
     const float scale = ImGui::GetIO().DisplayFramebufferScale.x;
     renderer_->resize(uint32_t(size.x * scale), uint32_t(size.y * scale));     // before the image is referenced
     ImGui::InvisibleButton("modelpreview", size, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight | ImGuiButtonFlags_MouseButtonMiddle);
     const ImVec2 origin = ImGui::GetItemRectMin();
     ImGui::GetWindowDrawList()->AddImage(ImTextureRef((ImTextureID)(intptr_t)renderer_->colourTarget()), origin, ImVec2(origin.x + size.x, origin.y + size.y));
-    if (ImGui::IsItemActive() && (ImGui::IsMouseDragging(ImGuiMouseButton_Left) || ImGui::IsMouseDragging(ImGuiMouseButton_Right))) {
+    if (!frontEndCamera_ && ImGui::IsItemActive() && (ImGui::IsMouseDragging(ImGuiMouseButton_Left) || ImGui::IsMouseDragging(ImGuiMouseButton_Right))) {
         const ImVec2 d = ImGui::GetIO().MouseDelta;
         yaw_ += d.x * 0.01f;
         pitch_ = std::clamp(pitch_ - d.y * 0.01f, -1.5f, 1.5f);
     }
     // Middle drag moves the camera (and the point it turns about) in the view plane, the model following the cursor.
-    if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
+    if (!frontEndCamera_ && ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
         const ImVec2 d = ImGui::GetIO().MouseDelta;
         const ViewCamera& camera = scene_->camera();
         const float metresPerPixel = 2.0f * distance_ * std::tan(camera.fovY * 0.5f) / size.y;
         target_ = add(target_, add(scaled(camera.right(), -d.x * metresPerPixel), scaled(camera.up(), d.y * metresPerPixel)));
     }
-    if (ImGui::IsItemHovered() && ImGui::GetIO().MouseWheel != 0) distance_ *= std::pow(0.85f, ImGui::GetIO().MouseWheel);
+    if (!frontEndCamera_ && ImGui::IsItemHovered() && ImGui::GetIO().MouseWheel != 0) distance_ *= std::pow(0.85f, ImGui::GetIO().MouseWheel);
     modelVisible_ = true;
     const size_t total = scene_->modelsTotal(), loaded = scene_->modelsLoaded(), failed = scene_->modelsFailed();
     if (failed > 0) ImGui::TextColored(ImVec4(1, 0.5f, 0.4f, 1), "The model failed to load.");
     else if (loaded < total) ImGui::TextDisabled("Loading...");
+    else if (frontEndCamera_) ImGui::TextDisabled("The game's front-end camera (fixed).");
     else ImGui::TextDisabled("Drag to turn, middle drag to move, wheel to zoom.");
     ImGui::SameLine();
     if (ImGui::SmallButton("Reset view")) modelFitted_ = false;
@@ -390,11 +492,22 @@ void AssetPreview::render(EditorContext&, SDL_GPUCommandBuffer* commands) {
         modelFitted_ = true;
     }
     ViewCamera& camera = scene_->camera();
-    camera.yaw = yaw_;
-    camera.pitch = pitch_;
-    camera.position = subtract(target_, scaled(camera.forward(), distance_));
-    camera.nearZ = std::max(0.01f, distance_ * 0.01f);
-    camera.farZ = std::max(100.0f, distance_ * 20.0f);
+    scene_->blackBackground = frontEndCamera_;
+    if (frontEndCamera_) {
+        camera.yaw = 0;
+        camera.pitch = 0;
+        camera.position = tr::Vec3{0, 0.9f, 0};
+        camera.fovY = frontEndFovY(frontEndAspect_ == 0 ? 16.0f / 9.0f : 4.0f / 3.0f);
+        camera.nearZ = 0.1f;
+        camera.farZ = 10000.0f;
+    } else {
+        camera.fovY = 1.0f;
+        camera.yaw = yaw_;
+        camera.pitch = pitch_;
+        camera.position = subtract(target_, scaled(camera.forward(), distance_));
+        camera.nearZ = std::max(0.01f, distance_ * 0.01f);
+        camera.farZ = std::max(100.0f, distance_ * 20.0f);
+    }
     scene_->drawDistance = camera.farZ;
     scene_->particleDistance = camera.farZ;
     const float dt = ImGui::GetIO().DeltaTime;

@@ -1082,6 +1082,20 @@ int main() {
                                                               : 0;
                 std::printf("      particle preview: radius %.1f m, %zu colours\n", radius, colours);
                 check(running && colours > 20, "a particle system previews on its own");
+                // A special-FX package plays on the object whose usable state attaches it: the craft station's package (Kraftwerks state
+                // 46) - its particle systems run and its persistent beam is made between the station's contact points.
+                assets.showAsset("arch_hum_craftstation_on_v01.pkg");
+                frames(editor, device, 90);
+                const bool onStation = p.package_ && !p.packageBodies_.empty() && p.packageBodies_[0].second == "prop_hum_craftstation_v01.geo";
+                size_t liveBeams = 0;
+                if (p.scene_)
+                    for (const std::string& line : p.scene_->stateBeamList())
+                        if (line.find("live segments 0") == std::string::npos && line.find("ends found") != std::string::npos) ++liveBeams;
+                const size_t systems = p.scene_ ? p.scene_->liveParticleSystems() : 0;
+                std::printf("      package preview: %zu bodies, %zu particle systems, %zu live beams, %zu sound events\n", p.packageBodies_.size(),
+                            systems, liveBeams, p.packageSounds_.size());
+                check(onStation && systems >= 2 && liveBeams >= 1 && p.packageSounds_.size() == 1,
+                      "a special-FX package previews on its object (particles, beam, sound listed)");
             }
             {
                 // Out and back: Extract writes the file as the game reads it; a texture goes out as PNG and comes back encoded like the
@@ -1317,6 +1331,64 @@ int main() {
                 }
                 check(typed, "UI interactive edit box: typed text is drawn");
                 check(caret, "UI interactive edit box: the focused box shows its caret");
+                bool blinkOff = false;
+                if (box) {                         // the caret's off phase draws the box as unfocused
+                    tr::XmlNode copy = *box;
+                    const int32_t w = std::atoi(copy.attribute("sizeW").c_str()) + 20, h = std::atoi(copy.attribute("sizeH").c_str()) + 20;
+                    std::map<const tr::XmlNode*, std::string> texts{{&copy, "Hello 42"}};
+                    UiCanvas::Options withText, off;
+                    withText.editTexts = off.editTexts = &texts;
+                    off.focusedEdit = &copy;
+                    off.caretVisible = false;
+                    std::vector<uint8_t> a, b;
+                    ui.canvas_.renderDetached(copy, w, h, 1.0f, withText, "", a);
+                    ui.canvas_.renderDetached(copy, w, h, 1.0f, off, "", b);
+                    blinkOff = a == b;
+                }
+                check(blinkOff, "UI interactive edit box: the caret's blink hides it");
+            }
+            // Sliders: a press on the track jumps the value there (slider.cpp FUN_008db250); the wheel steps one unit.
+            {
+                const tr::XmlNode* slider = nullptr;
+                std::function<void(const tr::XmlNode&)> find = [&](const tr::XmlNode& n) {
+                    if (slider) return;
+                    if (n.tag == "Slider" && std::atoi(n.attribute("maxRange").c_str()) > std::atoi(n.attribute("minRange").c_str()))
+                        for (const tr::XmlNode& c : n.children)
+                            if (c.tag == "Track") { slider = &n; return; }
+                    for (const tr::XmlNode& c : n.children) find(c);
+                };
+                if (ui.uiExport()) {
+                    find(ui.uiExport()->widgets);
+                    find(ui.uiExport()->templates);
+                }
+                bool jumped = false, wheel = false;
+                if (slider) {
+                    tr::XmlNode copy = *slider;
+                    copy.attributes.erase(std::remove_if(copy.attributes.begin(), copy.attributes.end(),
+                                                         [](const auto& a) { return a.first == "anchorOffsetX" || a.first == "anchorOffsetY"; }),
+                                          copy.attributes.end());
+                    const int32_t w = std::atoi(copy.attribute("sizeW").c_str()) + 20, h = std::atoi(copy.attribute("sizeH").c_str()) + 20;
+                    UiCanvas::Options o;
+                    std::vector<uint8_t> a;
+                    ui.canvas_.renderDetached(copy, w, h, 1.0f, o, "", a);
+                    const tr::XmlNode* track = nullptr;
+                    for (const tr::XmlNode& c : copy.children)
+                        if (c.tag == "Track") track = &c;
+                    UiCanvas::Rect r{0, 0, 0, 0};
+                    const tr::XmlNode* hit = nullptr;
+                    float ratio = -1;
+                    if (track && ui.canvas_.drawnRect(track, r) && r.width() > 4) {
+                        const int32_t x = r.x0 + (r.width() * 3) / 4;
+                        jumped = ui.canvas_.sliderPressAt(x, (r.y0 + r.y1) / 2, hit, ratio) && hit == &copy && std::fabs(ratio - 0.75f) < 0.15f;
+                        std::printf("      slider %s: track %d..%d, press at 3/4 -> ratio %.3f\n", slider->attribute("uiid").c_str(), r.x0, r.x1, ratio);
+                    }
+                    const float stepped = UiCanvas::sliderRatioStepped(copy, 0.5f, 1);
+                    const int span = std::atoi(copy.attribute("maxRange").c_str()) - std::atoi(copy.attribute("minRange").c_str());
+                    wheel = span > 0 && std::fabs(stepped - (std::lround(0.5f * float(span)) + 1) / float(span)) < 1e-4f &&
+                            ui.canvas_.wheelTargetAt((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2) == &copy;
+                }
+                check(jumped, "UI interactive slider: a press on the track jumps the thumb there");
+                check(wheel, "UI interactive slider: the wheel steps one value unit");
             }
 
             // Editing a COPY of the layout file: valid edits are written, invalid values refused, saving refused while the file has a

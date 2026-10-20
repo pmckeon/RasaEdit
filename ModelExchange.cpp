@@ -219,8 +219,13 @@ std::vector<std::string> modelOwnAnimations(tr::AssetLibrary& assets, const std:
     std::vector<std::string> out;
     try {
         const tr::GeoModel model = tr::readGeo(assets.read(geoName));
-        for (const tr::GeoProperty& p : model.properties)
-            if (lower(p.key) == "anim" && !p.value.empty() && assets.exists(p.value)) out.push_back(p.value);
+        // Several property groups may name the same file (UI_FE_Char_Select.geo: 12 groups, one animation): list it once.
+        for (const tr::GeoProperty& p : model.properties) {
+            if (lower(p.key) != "anim" || p.value.empty() || !assets.exists(p.value)) continue;
+            bool listed = false;
+            for (const std::string& a : out) listed = listed || lower(a) == lower(p.value);
+            if (!listed) out.push_back(p.value);
+        }
     } catch (const std::exception&) {
     }
     const std::string own = baseName(geoName) + ".anm";

@@ -248,6 +248,12 @@ public:
     // specialFX[(classId, stateId, USE_STATE_NULL 97)] through the string table, as client/augmentations/usable.py
     // GetStatePkgId / AttachStateSFX. "" if none.
     std::string usableStatePackage(int32_t classId, int32_t stateId);
+    // Every usabledata.specialFX entry naming this .pkg (case-insensitive): (class, state, previous state) - previous 97 (USE_STATE_NULL)
+    // = attached in that state, else on the transition from the previous state.
+    struct UsablePackageUse {
+        int32_t classId = 0, stateId = 0, previousState = 0;
+    };
+    std::vector<UsablePackageUse> usablePackageUsers(const std::string& package);
     std::string mapTemplateName(int32_t templateId);          // generated.client.maptemplate
     std::vector<MapScreenMarker> factionedMapMarkers(int32_t templateId);   // in table order
     // A module's integer constants as (value, name), sorted by value (e.g. "generated.client.constant.creatureflag": 5 BIOLOGICAL).

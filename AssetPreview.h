@@ -8,9 +8,12 @@
 // - text assets (.xml, .sky, .ltmp, ...): the text.
 // - .anm: a summary, and played on a model that plays it in the game (setAnimationModels: the links the other way round).
 // - .pfx: the particle system on its own at the origin, and its summary.
-// - .pkg: a summary.
+// - .pkg: the package played on a body (an object whose usable state attaches it, else the effect proxy particle_proxy.geo):
+//   accessories, particle attaches, lights and beams - timed ones for their duration - with Restart; its sound events' audio sets
+//   listed with Play buttons.
 
 #include "ModelAnimations.h"
+#include "SoundPlayer.h"
 #include "Renderer.h"
 #include "SceneView.h"
 #include "assetlibrary.h"
@@ -52,6 +55,8 @@ private:
     void releaseSound();
     void buildTextureView();
     void drawModel(EditorContext& ctx);
+    void drawPackage(EditorContext& ctx);
+    void openPackageBody(EditorContext& ctx);
     void drawTexture();
     void drawSound();
 
@@ -70,6 +75,12 @@ private:
     float yaw_ = 2.6f;                        // radians; models are authored facing -z, so look at the front first
     float pitch_ = -0.25f;
     bool modelVisible_ = false;               // drawn this frame (render() records only then)
+    // The front-end camera (UI_FE_* models, the login / character screens' 3D backgrounds): client/gameui.py SetupFrontEndSceneView
+    // puts the camera at (0, 0.9, 0) in FrontEnd/BkgdView (fieldOfView 1.047, near 0.1, far 10000, no orientation = looking +z) and
+    // clears to black; the view fills the screen, so the image takes the screen's shape (frontEndAspect_: 0 = 16:9, 1 = 4:3).
+    bool frontEndCamera_ = false;
+    int frontEndAspect_ = 0;
+    float frontEndFovY(float aspect) const;
     float animationTime_ = 0;
     const ModelAnimationLinks* links_ = nullptr;
     std::string playing_;                     // the animation chosen in the list ("" = the model's own)
@@ -78,6 +89,13 @@ private:
     bool animationModelsLooking_ = false;
     std::string animationModel_;              // the one it plays on now
     bool particlesOnly_ = false;              // a selected .pfx (the scene holds no entity)
+    // A selected .pkg: the bodies it can play on (label, mesh) - objects whose usable state attaches it, then the effect proxy - the
+    // one in use, and its sound events (audio set ids).
+    bool package_ = false;
+    std::vector<std::pair<std::string, std::string>> packageBodies_;
+    int packageBody_ = 0;
+    std::vector<int32_t> packageSounds_;
+    SoundPlayer packageSound_;
 
     // Texture: decoded top level and the texture shown.
     SDL_GPUDevice* device_ = nullptr;

@@ -48,6 +48,7 @@ public:
     void update(const tr::Vec3& start, const tr::Vec3& end, float time, const tr::Vec3& eye, const tr::Vec3& right, const tr::Vec3& up,
                 std::vector<MeshVertex>& out);
     const tr::SfxBeam& event() const { return event_; }
+    float startTime() const { return startTime_; }
     size_t segmentCount() const { return segments_.size(); }
 
 private:

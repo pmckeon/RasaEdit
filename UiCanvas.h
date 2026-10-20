@@ -70,6 +70,7 @@ public:
         // shows); see drawEditText.
         const std::map<const tr::XmlNode*, std::string>* editTexts = nullptr;
         const tr::XmlNode* focusedEdit = nullptr;
+        bool caretVisible = true;           // the focused box's caret in its blink (EditBox FUN_008cffd0: toggled every 500 ms)
         // Edit mode: the widget being dragged and by how much (logical units), drawn moved before the edit is written.
         const tr::XmlNode* dragNode = nullptr;
         int32_t dragX = 0, dragY = 0;          // added to its anchorOffset
@@ -121,6 +122,7 @@ public:
     // element that uses an animation, ...) - on its own in a pixelWidth x pixelHeight image at `scale` pixels per logical unit (the
     // game's screen scale: 1.125 on a 1080-line screen), laid out in that frame as a root widget. A Text widget shows sampleText
     // instead of its textId. Options as for render (animTime, background, buttonState, ...; screen size and backgroundRgba ignored).
+    // Until the next render(), paths (node, the hit tests) are relative to `widget`, which must outlive those queries.
     void renderDetached(const tr::XmlNode& widget, int32_t pixelWidth, int32_t pixelHeight, float scale, const Options& options,
                         const std::string& sampleText, std::vector<uint8_t>& rgba);
     uint32_t animationLength(const std::string& name) const;       // milliseconds (the longest track's last key); 0 if none
@@ -139,6 +141,12 @@ public:
     // `ratio` (below 0: the exported currentValue), clamped as the game's setValue.
     bool scrollStepAt(int32_t x, int32_t y, const tr::XmlNode*& bar, int& step) const;
     static float scrollRatioStepped(const tr::XmlNode& bar, float ratio, int step);
+    // A press on a slider's Track (slider.cpp FUN_008db250): the slider and its thumb ratio after the jump; false if (x, y) is on none.
+    bool sliderPressAt(int32_t x, int32_t y, const tr::XmlNode*& slider, float& ratio) const;
+    // The scroll bar or slider (any of its parts) under (x, y) in the last render - the mouse wheel's target; nullptr if none.
+    const tr::XmlNode* wheelTargetAt(int32_t x, int32_t y) const;
+    // A slider's thumb ratio after `step` value units (the wheel), clamped to min .. max.
+    static float sliderRatioStepped(const tr::XmlNode& slider, float ratio, int step);
     static bool isButton(const tr::XmlNode& n) { return n.hasAttribute("UpTextureDef"); }
     // Whether the last render sampled an animation that has not come to rest (repeat / pingpong, or before its end).
     bool animating() const { return animating_; }
@@ -184,6 +192,7 @@ private:
     void placeCaret(const tr::XmlNode& box, const Rect& rect, const Rect& clip, Target& target);
     void drawEditText(const tr::XmlNode& box, const Rect& rect, const Rect& clip, Target& target);
     const tr::XmlNode* sampleNode_ = nullptr;                       // renderDetached's widget, whose text is sampleText_
+    const tr::XmlNode* detachedRoot_ = nullptr;                     // renderDetached's widget: node(path) starts there until render()
     std::string sampleText_;
 
     const tr::UiExport* ui_ = nullptr;

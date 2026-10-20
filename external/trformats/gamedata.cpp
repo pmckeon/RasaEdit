@@ -1510,6 +1510,27 @@ std::string GameData::usableStatePackage(int32_t classId, int32_t stateId) {
     return stringById(int32_t(py::asInt(id)));
 }
 
+std::vector<GameData::UsablePackageUse> GameData::usablePackageUsers(const std::string& package) {
+    std::vector<UsablePackageUse> out;
+    const py::Object* table = global("generated.client.usabledata", "specialFX");
+    if (!table || table->kind != py::Kind::Dict) return out;
+    std::string wanted = package;
+    for (char& ch : wanted) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+    for (const auto& e : table->entries) {
+        const py::Object* key = e.first.get();
+        if (!py::isInt(e.second.get()) || py::length(key) != 3) continue;
+        std::string name = stringById(int32_t(py::asInt(e.second.get())));
+        for (char& ch : name) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+        if (name != wanted) continue;
+        UsablePackageUse u;
+        u.classId = int32_t(py::asInt(py::item(key, 0)));
+        u.stateId = int32_t(py::asInt(py::item(key, 1)));
+        u.previousState = int32_t(py::asInt(py::item(key, 2)));
+        out.push_back(u);
+    }
+    return out;
+}
+
 GameData::UsableAnimation GameData::usableStateAnimation(int32_t classId, int32_t state0, int32_t state1) {
     UsableAnimation out;
     const py::Object* list = py::dictGetTuple(global("generated.client.usabledata", "animation"), {classId, state0, state1});

@@ -162,6 +162,12 @@ public:
     // Plays this animation on a map entity's model instead of its own ("" = its own again), from the start (the light clock is
     // reset: used by the Assets preview, whose scene holds that one entity).
     void setEntityAnimation(size_t entityIndex, const std::string& animation);
+    // Plays a special-FX package's events on a map entity (the Assets preview of a .pkg): its accessories, particle attaches, lights
+    // and beams, as a map usable's state package; "" removes them. Restarts the package clock (and with previewTimedEffects its timed
+    // lights and beams, which otherwise only persistent ones are shown).
+    void setEntityPackage(size_t entityIndex, const std::string& package);
+    bool previewTimedEffects = false;       // timed special-FX lights / beams play from setEntityPackage for their duration
+    float packageTime() const { return lightTime - packageStart_; }
     // A particle system on its own at the origin (the Assets preview of a .pfx): started afresh by each call ("" = none), run by
     // advanceParticles and drawn with the others while Particles is on.
     void setStandaloneParticles(const std::string& file);
@@ -296,6 +302,7 @@ public:
     bool skyLighting = true;                // false: plain editor lighting
     bool showFog = true;                    // distance fog in the sky colour (the .sky's own "Used" flag is false everywhere)
     bool showMapLights = true;              // the map's lights.xml (up to 32 in view, nearest first)
+    bool blackBackground = false;           // clear to black instead of the sky colour (the front-end SceneView's SetClearColor)
     const std::string& globeErrors() const { return globeErrors_; }   // globe maps that could not be loaded, one per line
     bool localShadows = true;               // shadows of spot lights with CastsShadows (the game's selection, see lighting())
     bool localShadowTerrain = true;         // terrain chunks among the placed lights' shadow casters
@@ -797,6 +804,7 @@ private:
         std::unique_ptr<BeamInstance> beam;
     };
     std::vector<LiveBeam> liveBeams_;
+    float packageStart_ = 0;                // lightTime when setEntityPackage started the package
     // A state beam's two ends in world space this frame; false when a contact point is missing (or the body not loaded).
     bool beamEnds(const StateBeam& beam, const Model* model, const Mat4& world, tr::Vec3& start, tr::Vec3& end) const;
     std::string standaloneFile_;

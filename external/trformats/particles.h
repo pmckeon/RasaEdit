@@ -292,6 +292,30 @@ struct SfxOpacity {
     uint32_t durationMs = 0;
     uint32_t unknown10 = 0;
 };
+// `SND ` audio v2-12 (TRasa::SfxAudioEvent, factory 0x007537d0 -> constructor FUN_00760180, unserializer FUN_007609c0, trigger
+// FUN_00760210; all 2,775 shipped events parse exactly): u8 marker (+ 8), [v < 12: u8 n, n x asset (the sounds, before audio sets)],
+// u8 target (+ 0xc), [v < 12: f32], [v3+: u8 bool (+ 0x10)], [v4+: u8 contactPoint (+ 0x14)], [v5+: u8 flag, when set u32 x2 (stored
+// past + 0x18)], [v6+: u32 audioSet (+ 0x20; the trigger does nothing when it is 0)], [v7+: u8 (+ 0x24), u8 (+ 0x28)], [v8+: u8 bool
+// (+ 0x2c), f32 (1000 / 100 in the shipped events - a distance? NOT traced)], [v10+: u8 bool (+ 0x34), f32 x3 offset (+ 0x38, added to
+// the contact point's position)]. The trigger plays the audio set at the contact point (connection point, usage 1) of the bodies
+// `target` selects, through the audio manager (FUN_007a3800 / FUN_007a0940). Which member of the set plays is the audio manager's
+// choice (audiosetdata selection type).
+struct SfxSound {
+    uint32_t version = 0;
+    uint32_t marker = 0;
+    std::vector<std::string> files;              // v < 12: the event's own sounds
+    uint32_t target = 0;
+    bool flag10 = false;
+    uint32_t contactPoint = 0;
+    bool hasPair = false;
+    uint32_t pair0 = 0, pair1 = 0;
+    uint32_t audioSet = 0;
+    uint32_t unknown24 = 0, unknown28 = 0;
+    bool flag2c = false;
+    float distance = 0;
+    bool flag34 = false;
+    Vec3 offset;
+};
 struct SfxPackage {
     std::vector<uint32_t> events;                // every event's tag, in order
     std::vector<SfxAccessory> accessories;
@@ -299,6 +323,7 @@ struct SfxPackage {
     std::vector<SfxLight> lights;
     std::vector<SfxBeam> beams;
     std::vector<SfxOpacity> opacities;
+    std::vector<SfxSound> sounds;
 };
 SfxPackage readSfxPackage(const Bytes& data);
 

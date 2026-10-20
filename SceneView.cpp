@@ -682,6 +682,7 @@ SceneLighting SceneView::lighting() const {
     l.showLight = showLightBuffer;
     l.debugView = debugView;
     l.cameraForward = camera_.forward();
+    if (blackBackground) l.clearColour = SDL_FColor{0, 0, 0, 1};
     if (!showMapLights) return l;
     // Placed lights: the enabled ones nearest the camera (distance to their range sphere), up to the shader's limit.
     // Candidates: the map's lights.xml, and lights on map entities' models (contact point "lsys" templates) placed
@@ -785,7 +786,16 @@ SceneLighting SceneView::lighting() const {
     // the model lights (UNVERIFIED for these); the curves are evaluated on the light clock.
     auto considerStateLight = [&](const StateLight& sl, const Model* model, const Mat4& world) {
             const tr::SfxLight& e = sl.event;
-            if (e.durationMs != 0 || e.target != 0) return;
+            if (e.target != 0) return;
+            // Persistent lights run on the light clock; in a package preview every light runs from the package's start, timed ones
+            // only for their duration.
+            float lightTime = this->lightTime;
+            if (previewTimedEffects) {
+                lightTime = packageTime();
+                if (e.durationMs != 0 && (lightTime < 0 || lightTime * 1000.0f > float(e.durationMs))) return;
+            } else if (e.durationMs != 0) {
+                return;
+            }
             Mat4 frame;
             tr::Quat cpRotation;
             if (!contactFrame(sl.body ? sl.body : model, e.contactPoint, 1, frame, cpRotation)) return;
@@ -2484,7 +2494,9 @@ void SceneView::advanceParticles(float dt) {
     auto startBeams = [&](bool server, size_t k, const std::vector<StateBeam>& beams, const Model* model, const Mat4& world) {
         for (size_t m = 0; m < beams.size(); ++m) {
             const tr::SfxBeam& e = beams[m].event;
-            if (!showBeams || e.durationMs != 0 || e.target1 != 0 || e.target2 != 0 || liveBeam.count({server, k, m})) continue;
+            if (!showBeams || (e.durationMs != 0 && !previewTimedEffects) || e.target1 != 0 || e.target2 != 0 || liveBeam.count({server, k, m}))
+                continue;
+            if (e.durationMs != 0 && (packageTime() < 0 || packageTime() * 1000.0f > float(e.durationMs))) continue;
             tr::Vec3 a, b;
             if (!beamEnds(beams[m], model, world, a, b)) continue;
             LiveBeam l;
@@ -3721,6 +3733,8 @@ void SceneView::queueDraws(const Selection& selection) {
             const Mat4& world = l.server ? serverPlacements_[l.placement].world : placements_[l.placement].world;
             tr::Vec3 a, b;
             if (!beamEnds(beams[l.index], model, world, a, b)) continue;
+            const uint32_t duration = l.beam->event().durationMs;
+            if (duration != 0 && (lightTime - l.beam->startTime()) * 1000.0f > float(duration)) continue;   // a timed beam has ended
             particleScratch_.clear();
             l.beam->update(a, b, lightTime, camera_.position, right, up, particleScratch_);
             if (particleScratch_.empty()) continue;
@@ -4426,6 +4440,26 @@ void SceneView::refreshEntity(size_t entityIndex) {
                          liveParticles_.end());
     liveBeams_.erase(std::remove_if(liveBeams_.begin(), liveBeams_.end(), [&](const LiveBeam& l) { return !l.server && l.placement == entityIndex; }),
                      liveBeams_.end());
+}
+
+void SceneView::setEntityPackage(size_t entityIndex, const std::string& package) {
+    if (entityIndex >= placements_.size()) return;
+    Placement& p = placements_[entityIndex];
+    StateEffects fx;
+    if (!package.empty()) addPackageEffects(package, nullptr, 0, fx);
+    p.useState = package.empty() ? -1 : 0;
+    p.stateAccessories = fx.accessories;
+    p.stateParticles = fx.particles;
+    p.stateLights = fx.lights;
+    p.stateBeams = fx.beams;
+    liveParticles_.erase(std::remove_if(liveParticles_.begin(), liveParticles_.end(),
+                                        [&](const LiveParticles& l) { return l.mapState && l.placement == entityIndex; }),
+                         liveParticles_.end());
+    liveBeams_.erase(std::remove_if(liveBeams_.begin(), liveBeams_.end(), [&](const LiveBeam& l) { return !l.server && l.placement == entityIndex; }),
+                     liveBeams_.end());
+    packageStart_ = lightTime;
+    loadGlobeMaps();
+    invalidateShadowMaps();
 }
 
 void SceneView::setEntityAnimation(size_t entityIndex, const std::string& animation) {

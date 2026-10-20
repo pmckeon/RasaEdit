@@ -201,6 +201,7 @@ private:
     double stepHeld_ = 0.0;                              // milliseconds summed while held (the game's repeat counter)
     std::map<const tr::XmlNode*, std::string> editTexts_;   // interactive mode: text typed into edit boxes (UTF-8)
     const tr::XmlNode* focusedEdit_ = nullptr;           // the edit box that has the keyboard
+    double caretTimer_ = 0.0;                            // ms since the caret last toggled (FUN_008cffd0: every 500 ms)
     char filter_[128] = {};
     // Definitions panel.
     tr::UiSection defSection_ = tr::UiSection::Textures;

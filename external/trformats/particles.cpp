@@ -591,6 +591,40 @@ SfxPackage readSfxPackage(const Bytes& data) {
             if (event.version >= 3) o.unknown10 = r.u8();
             finish(r, event);
             package.opacities.push_back(o);
+        } else if (event.tag == fourcc("SND ")) {
+            SfxSound a;
+            a.version = event.version;
+            a.marker = r.u8();
+            if (event.version < 12) {
+                const uint32_t n = r.u8();
+                for (uint32_t k = 0; k < n; ++k) a.files.push_back(readAsset(r));
+            }
+            a.target = r.u8();
+            if (event.version < 12) r.f32();
+            if (event.version > 2) a.flag10 = r.u8() != 0;
+            if (event.version > 3) a.contactPoint = r.u8();
+            if (event.version > 4) {
+                a.hasPair = r.u8() != 0;
+                if (a.hasPair) {
+                    a.pair0 = r.u32();
+                    a.pair1 = r.u32();
+                }
+            }
+            if (event.version > 5) a.audioSet = r.u32();
+            if (event.version > 6) {
+                a.unknown24 = r.u8();
+                a.unknown28 = r.u8();
+            }
+            if (event.version > 7) {
+                a.flag2c = r.u8() != 0;
+                a.distance = r.f32();
+            }
+            if (event.version > 9) {
+                a.flag34 = r.u8() != 0;
+                a.offset = Vec3{r.f32(), r.f32(), r.f32()};
+            }
+            finish(r, event);
+            package.sounds.push_back(a);
         }
         r.seek(event.end);
     }

@@ -531,6 +531,28 @@ void UiWorkspace::drawCanvasPanel() {
                     dirty_ = true;
                 }
             };
+            // A slider's track: the thumb jumps to the press (slider.cpp FUN_008db250).
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !thumbBar_) {
+                const tr::XmlNode* slider = nullptr;
+                float ratio = 0;
+                if (canvas_.sliderPressAt(x, y, slider, ratio)) {
+                    scrollValues_[slider] = ratio;
+                    dirty_ = true;
+                }
+            }
+            // The mouse wheel over a scroll bar or slider: value - notches (FUN_00902870 / FUN_008d7ca0 / FUN_008db220).
+            if (const float wheel = ImGui::GetIO().MouseWheel; wheel != 0.0f)
+                if (const tr::XmlNode* bar = canvas_.wheelTargetAt(x, y)) {
+                    const int step = -int(std::lround(wheel));
+                    const auto old = scrollValues_.find(bar);
+                    const float current = old == scrollValues_.end() ? -1.0f : old->second;
+                    const float ratio = bar->tag == "ScrollBar" ? UiCanvas::scrollRatioStepped(*bar, current, step)
+                                                                : UiCanvas::sliderRatioStepped(*bar, current, step);
+                    if (step != 0 && (old == scrollValues_.end() || old->second != ratio)) {
+                        scrollValues_[bar] = ratio;
+                        dirty_ = true;
+                    }
+                }
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !thumbBar_) {
                 int step = 0;
                 stepBar_ = nullptr;
@@ -556,12 +578,15 @@ void UiWorkspace::drawCanvasPanel() {
                 }
                 if (box != focusedEdit_) {
                     focusedEdit_ = box;
+                    caretTimer_ = 0.0;
+                    options_.caretVisible = true;
                     dirty_ = true;
                 }
             }
             if (focusedEdit_) {
             ImGuiIO& io = ImGui::GetIO();
             std::string& text = editTexts_[focusedEdit_];
+            const std::string before = text;
             const long limit = focusedEdit_->hasAttribute("lengthLimit") ? std::strtol(focusedEdit_->attribute("lengthLimit").c_str(), nullptr, 10) : -1;
             auto count = [](const std::string& s) {
                 size_t n = 0;
@@ -585,6 +610,18 @@ void UiWorkspace::drawCanvasPanel() {
             if (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
                 focusedEdit_ = nullptr;
                 dirty_ = true;
+            }
+            // The caret blinks: shown again (timer at 0) by typing, else toggled every 500 ms.
+            if (focusedEdit_ && editTexts_[focusedEdit_] != before) {
+                caretTimer_ = 0.0;
+                options_.caretVisible = true;
+            } else {
+                caretTimer_ += double(io.DeltaTime) * 1000.0;
+                if (caretTimer_ > 499.0) {
+                    caretTimer_ = std::fmod(caretTimer_, 500.0);
+                    options_.caretVisible = !options_.caretVisible;
+                    dirty_ = true;
+                }
             }
             }
             if (thumbBar_ && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {

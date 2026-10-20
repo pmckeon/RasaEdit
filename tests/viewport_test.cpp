@@ -392,7 +392,7 @@ int main(int argc, char** argv) {
         }
         // RASA_PKGSCAN=1: parse every special-FX package; counts of accessory / particle / light events and failures.
         if (envValue("RASA_PKGSCAN")) {
-            size_t packages = 0, failed = 0, accessories = 0, particles = 0, lights = 0, beams = 0, opacities = 0;
+            size_t packages = 0, failed = 0, accessories = 0, particles = 0, lights = 0, beams = 0, opacities = 0, sounds = 0;
             std::map<uint32_t, size_t> tags;                     // every event chunk's tag (decoded or not)
             std::map<uint32_t, std::string> tagExample;
             for (const std::string& name : assets.namesWithExtension(".pkg")) {
@@ -408,6 +408,7 @@ int main(int argc, char** argv) {
                     lights += p.lights.size();
                     beams += p.beams.size();
                     opacities += p.opacities.size();
+                    sounds += p.sounds.size();
                 } catch (const std::exception& e) {
                     if (++failed <= 5) std::printf("pkg %s: %s\n", name.c_str(), e.what());
                 }
@@ -416,8 +417,8 @@ int main(int argc, char** argv) {
                 const char tagName[5] = {char(t & 0xff), char((t >> 8) & 0xff), char((t >> 16) & 0xff), char(t >> 24), 0};
                 std::printf("pkg event %s: %zu (e.g. %s)\n", tagName, n, tagExample[t].c_str());
             }
-            std::printf("pkg scan: %zu packages, %zu failed; %zu accessories, %zu particle attaches, %zu lights, %zu beams, %zu opacities\n",
-                        packages, failed, accessories, particles, lights, beams, opacities);
+            std::printf("pkg scan: %zu packages, %zu failed; %zu accessories, %zu particle attaches, %zu lights, %zu beams, %zu opacities, %zu sounds\n",
+                        packages, failed, accessories, particles, lights, beams, opacities, sounds);
         }
         // RASA_PFXSCAN=1: how often the particle features the simulator lacks are used - groups by primitive, sorted groups (by sort
         // order), zBias values, groups with emit-from-particle (PEMT) / bounce (BONC) operators - with a few example files each.
