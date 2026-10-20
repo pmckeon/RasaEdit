@@ -751,6 +751,7 @@ void UiCanvas::drawColour(const tr::XmlNode& widget, const Rect& rect, const Rec
 }
 
 std::string UiCanvas::text(const tr::XmlNode& widget) {
+    if (&widget == sampleNode_) return sampleText_;          // a Definitions preview's sample
     const std::string id = widget.attribute("textId");
     if (id.empty() || !game_) return "";
     std::string s;
@@ -1123,6 +1124,72 @@ void UiCanvas::drawWidget(const tr::XmlNode& widget, std::vector<int32_t>& path,
     }
 }
 
+void UiCanvas::fillBackground(Target& target) const {
+    const int32_t screenW = target.width, screenH = target.height;
+    const Options& options = options_;
+    target.rgb.assign(size_t(screenW) * size_t(screenH) * 3, 0.0f);
+    const bool imageBackground = options.backgroundRgba && options.backgroundRgba->size() == size_t(screenW) * size_t(screenH) * 4;
+    for (int32_t y = 0; y < screenH; ++y)
+        for (int32_t x = 0; x < screenW; ++x) {
+            float* p = &target.rgb[(size_t(y) * size_t(screenW) + size_t(x)) * 3];
+            if (imageBackground) {
+                const uint8_t* b = &(*options.backgroundRgba)[(size_t(y) * size_t(screenW) + size_t(x)) * 4];
+                p[0] = float(b[0]) / 255.0f; p[1] = float(b[1]) / 255.0f; p[2] = float(b[2]) / 255.0f;
+                continue;
+            }
+            float g = 0;
+            if (options.background == 1) g = 0.25f;
+            else if (options.background == 2) g = ((x / 16 + y / 16) & 1) ? 0.30f : 0.20f;
+            p[0] = p[1] = p[2] = g;
+        }
+}
+
+void UiCanvas::finish(const Target& target, std::vector<uint8_t>& rgba) const {
+    const int32_t screenW = target.width, screenH = target.height;
+    const size_t count = size_t(screenW) * size_t(screenH);
+    rgba.resize(count * 4);
+    for (size_t k = 0; k < count; ++k) {
+        for (int c = 0; c < 3; ++c) rgba[k * 4 + size_t(c)] = uint8_t(std::lround(std::clamp(target.rgb[k * 3 + size_t(c)], 0.0f, 1.0f) * 255.0f));
+        rgba[k * 4 + 3] = 255;
+    }
+}
+
+void UiCanvas::renderDetached(const tr::XmlNode& widget, int32_t pixelWidth, int32_t pixelHeight, float scale, const Options& options,
+                              const std::string& sampleText, std::vector<uint8_t>& rgba) {
+    drawn_.clear();
+    options_ = options;
+    options_.screenWidth = options_.screenHeight = 0;
+    options_.backgroundRgba = nullptr;
+    animating_ = false;
+    buttonOverrides_.clear();
+    childClips_.clear();
+    if (scale <= 0) scale = 1;
+    pixelWidth_ = std::max(pixelWidth, 1);
+    pixelHeight_ = std::max(pixelHeight, 1);
+    width_ = std::max(int32_t(std::lround(float(pixelWidth_) / scale)), 1);
+    height_ = std::max(int32_t(std::lround(float(pixelHeight_) / scale)), 1);
+    Target target;
+    target.width = pixelWidth_;
+    target.height = pixelHeight_;
+    target.sx = target.sy = scale;
+    fillBackground(target);
+    Placed frame;
+    frame.rect = Rect{0, 0, width_, height_};
+    frame.w = width_;
+    frame.h = height_;
+    sampleNode_ = &widget;
+    sampleText_ = sampleText;
+    std::vector<int32_t> walk;
+    drawWidget(widget, walk, frame, frame.rect, true, target);
+    sampleNode_ = nullptr;
+    finish(target, rgba);
+}
+
+uint32_t UiCanvas::animationLength(const std::string& name) const {
+    const auto it = animations_.find(name);
+    return it == animations_.end() ? 0 : it->second.length;
+}
+
 std::vector<UiCanvas::DrawnWidget> UiCanvas::render(const std::vector<int32_t>& path, const Options& options, std::vector<uint8_t>& rgba) {
     drawn_.clear();
     options_ = options;
@@ -1145,21 +1212,7 @@ std::vector<UiCanvas::DrawnWidget> UiCanvas::render(const std::vector<int32_t>& 
     target.height = screenH;
     target.sx = float(screenW) / float(width_);
     target.sy = float(screenH) / float(height_);
-    target.rgb.assign(size_t(screenW) * size_t(screenH) * 3, 0.0f);
-    const bool imageBackground = options.backgroundRgba && options.backgroundRgba->size() == size_t(screenW) * size_t(screenH) * 4;
-    for (int32_t y = 0; y < screenH; ++y)
-        for (int32_t x = 0; x < screenW; ++x) {
-            float* p = &target.rgb[(size_t(y) * size_t(screenW) + size_t(x)) * 3];
-            if (imageBackground) {
-                const uint8_t* b = &(*options.backgroundRgba)[(size_t(y) * size_t(screenW) + size_t(x)) * 4];
-                p[0] = float(b[0]) / 255.0f; p[1] = float(b[1]) / 255.0f; p[2] = float(b[2]) / 255.0f;
-                continue;
-            }
-            float g = 0;
-            if (options.background == 1) g = 0.25f;
-            else if (options.background == 2) g = ((x / 16 + y / 16) & 1) ? 0.30f : 0.20f;
-            p[0] = p[1] = p[2] = g;
-        }
+    fillBackground(target);
     const Rect screen{0, 0, width_, height_};
     const tr::XmlNode* n = node(path);
     if (n && !path.empty()) {
@@ -1173,12 +1226,7 @@ std::vector<UiCanvas::DrawnWidget> UiCanvas::render(const std::vector<int32_t>& 
             drawWidget(n->children[k], walk, root, screen, false, target);
         }
     }
-    const size_t count = size_t(screenW) * size_t(screenH);
-    rgba.resize(count * 4);
-    for (size_t k = 0; k < count; ++k) {
-        for (int c = 0; c < 3; ++c) rgba[k * 4 + size_t(c)] = uint8_t(std::lround(std::clamp(target.rgb[k * 3 + size_t(c)], 0.0f, 1.0f) * 255.0f));
-        rgba[k * 4 + 3] = 255;
-    }
+    finish(target, rgba);
     return drawn_;
 }
 

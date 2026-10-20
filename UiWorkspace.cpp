@@ -22,6 +22,9 @@ void UiWorkspace::releaseGpuResources() {
     if (previewTexture_) SDL_ReleaseGPUTexture(ctx_.device, previewTexture_);
     previewTexture_ = nullptr;
     previewLoaded_.clear();
+    if (sampleTexture_) SDL_ReleaseGPUTexture(ctx_.device, sampleTexture_);
+    sampleTexture_ = nullptr;
+    sampleLoaded_.clear();
 }
 
 void UiWorkspace::buildDefaultLayout(ImGuiID dockspace) {
@@ -73,6 +76,8 @@ void UiWorkspace::loadExport() {
         doc_.reset();
     }
     canvas_.setSources(ui(), ctx_.assets.get(), ctx_.gameData.get(), ctx_.gameRoot);
+    sampleCanvas_.setSources(ui(), ctx_.assets.get(), ctx_.gameData.get(), ctx_.gameRoot);
+    sampleLoaded_.clear();
     if (doc_) {
         validateNow();
         for (const auto& i : issues_)
@@ -145,6 +150,7 @@ void UiWorkspace::beginFrame() {
     }
     if (doc_ && doc_->revision() != seenRevision_) syncWithDocument();
     updateDefinitionPreview();
+    updateSamplePreview();
     // Validation takes a moment on the whole file: run it once edits pause.
     if (doc_ && validatedRevision_ != doc_->revision() && ImGui::GetTime() - lastEditTime_ > 0.5) validateNow();
     if (!dirty_ || !doc_ || !hasBranch_) return;
@@ -854,6 +860,7 @@ void UiWorkspace::syncWithDocument() {
     if (!doc_) return;
     seenRevision_ = doc_->revision();
     canvas_.setExport(ui());
+    sampleCanvas_.setExport(ui());
     // Node pointers changed with the re-parse.
     toggled_.clear();
     scrollValues_.clear();

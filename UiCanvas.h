@@ -113,6 +113,13 @@ public:
     // Draws the branch at path (the branch's root is drawn even when hidden; ancestors are laid out, not drawn) into rgba
     // (pixelWidth() x pixelHeight() x 4 bytes). Returns the widgets drawn (logical rectangles), in drawing order.
     std::vector<DrawnWidget> render(const std::vector<int32_t>& path, const Options& options, std::vector<uint8_t>& rgba);
+    // Definitions previews: draws `widget` - a node the caller built, not part of the export (a Text with a fontId, a copy of an
+    // element that uses an animation, ...) - on its own in a pixelWidth x pixelHeight image at `scale` pixels per logical unit (the
+    // game's screen scale: 1.125 on a 1080-line screen), laid out in that frame as a root widget. A Text widget shows sampleText
+    // instead of its textId. Options as for render (animTime, background, buttonState, ...; screen size and backgroundRgba ignored).
+    void renderDetached(const tr::XmlNode& widget, int32_t pixelWidth, int32_t pixelHeight, float scale, const Options& options,
+                        const std::string& sampleText, std::vector<uint8_t>& rgba);
+    uint32_t animationLength(const std::string& name) const;       // milliseconds (the longest track's last key); 0 if none
     // The widget under a point of the last render: the last drawn visual widget containing it, else the deepest container.
     std::vector<int32_t> pick(int32_t x, int32_t y) const;
     // The button (a widget with button textures) under a point of the last render: the picked widget or its nearest such ancestor.
@@ -157,6 +164,10 @@ private:
     void drawTexture(const tr::XmlNode& widget, const Rect& rect, const Rect& clip, Target& target);
     void drawColour(const tr::XmlNode& widget, const Rect& rect, const Rect& clip, Target& target);
     void drawText(const tr::XmlNode& widget, const Rect& rect, const Rect& clip, Target& target);
+    void fillBackground(Target& target) const;                      // options_.background / backgroundRgba
+    void finish(const Target& target, std::vector<uint8_t>& rgba) const;
+    const tr::XmlNode* sampleNode_ = nullptr;                       // renderDetached's widget, whose text is sampleText_
+    std::string sampleText_;
 
     const tr::UiExport* ui_ = nullptr;
     bool templates_ = false;

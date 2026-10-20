@@ -718,6 +718,234 @@ bool beginProperties(const char* id) {
 
 }  // namespace
 
+// ------------------------------------------------------------------------------------------
+// Previews: colours, fonts, animations
+// ------------------------------------------------------------------------------------------
+namespace {
+
+const float kSampleScales[3] = {1.0f, 1.125f, 1.5f};
+const char* kSampleScaleNames[3] = {"1280 x 960 (1 pixel per unit)", "1080 lines (x 1.125)", "1440 lines (x 1.5)"};
+
+void setAttr(tr::XmlNode& n, const std::string& name, const std::string& value) {
+    for (auto& a : n.attributes)
+        if (a.first == name) {
+            a.second = value;
+            return;
+        }
+    n.attributes.emplace_back(name, value);
+}
+
+void eraseAttr(tr::XmlNode& n, const std::string& name) {
+    n.attributes.erase(std::remove_if(n.attributes.begin(), n.attributes.end(), [&](const auto& a) { return a.first == name; }), n.attributes.end());
+}
+
+int32_t intAttr(const tr::XmlNode& n, const char* name, int32_t fallback) {
+    return n.hasAttribute(name) ? int32_t(std::strtol(n.attribute(name).c_str(), nullptr, 10)) : fallback;
+}
+
+}  // namespace
+
+void UiWorkspace::updateSamplePreview() {
+    SampleRequest wanted = std::move(sampleWanted_);
+    sampleWanted_ = SampleRequest{};
+    if (wanted.key.empty() || wanted.key == sampleLoaded_ || !doc_) return;
+    UiCanvas::Options options;
+    options.background = 2;
+    options.animTime = wanted.animTime;
+    std::vector<uint8_t> rgba;
+    sampleCanvas_.renderDetached(wanted.widget, wanted.width, wanted.height, wanted.scale, options, wanted.text, rgba);
+    // Replaced between frames: no draw list of this frame references the old texture yet.
+    if (sampleTexture_) SDL_ReleaseGPUTexture(ctx_.device, sampleTexture_);
+    sampleTexture_ = uploadRgbaTexture(ctx_.device, rgba.data(), uint32_t(sampleCanvas_.pixelWidth()), uint32_t(sampleCanvas_.pixelHeight()));
+    sampleWidth_ = sampleCanvas_.pixelWidth();
+    sampleHeight_ = sampleCanvas_.pixelHeight();
+    sampleLoaded_ = wanted.key;
+}
+
+void UiWorkspace::showSample(const std::string& key) {
+    // The texture shows the last request drawn; another entry's is not shown (its own is drawn between this frame and the next).
+    const auto stem = [](const std::string& k) { return k.substr(0, k.find('|')); };
+    if (!sampleTexture_ || sampleWidth_ <= 0 || stem(sampleLoaded_) != stem(key)) {
+        ImGui::Dummy(ImVec2(1.0f, float(std::max(sampleWanted_.height, 16))));
+        return;
+    }
+    const float avail = std::max(ImGui::GetContentRegionAvail().x, 16.0f);
+    const float f = std::min(1.0f, avail / float(sampleWidth_));
+    ImGui::Image(ImTextureRef((ImTextureID)(intptr_t)sampleTexture_), ImVec2(float(sampleWidth_) * f, float(sampleHeight_) * f));
+    if (f < 1.0f && ImGui::IsItemHovered()) ImGui::SetTooltip("Shown at %d %% (the panel is narrower than the sample)", int(f * 100.0f));
+}
+
+// A colour definition with its alpha over a checkerboard, beside the colour opaque.
+void UiWorkspace::drawColourSwatch(const float rgba[4]) {
+    const float w = std::max(ImGui::GetContentRegionAvail().x, 64.0f), h = ImGui::GetFrameHeight() * 2.5f;
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float split = std::floor(w * 0.7f), cell = 8.0f;
+    for (float y = 0; y < h; y += cell)
+        for (float x = 0; x < split; x += cell) {
+            const bool odd = ((int(x / cell) + int(y / cell)) & 1) != 0;
+            dl->AddRectFilled(ImVec2(p.x + x, p.y + y), ImVec2(p.x + std::min(x + cell, split), p.y + std::min(y + cell, h)),
+                              odd ? IM_COL32(204, 204, 204, 255) : IM_COL32(128, 128, 128, 255));
+        }
+    const ImU32 blended = ImGui::ColorConvertFloat4ToU32(ImVec4(rgba[0], rgba[1], rgba[2], rgba[3]));
+    const ImU32 opaque = ImGui::ColorConvertFloat4ToU32(ImVec4(rgba[0], rgba[1], rgba[2], 1.0f));
+    dl->AddRectFilled(p, ImVec2(p.x + split, p.y + h), blended);
+    dl->AddRectFilled(ImVec2(p.x + split, p.y), ImVec2(p.x + w, p.y + h), opaque);
+    dl->AddRect(p, ImVec2(p.x + w, p.y + h), ImGui::GetColorU32(ImGuiCol_Border));
+    ImGui::Dummy(ImVec2(w, h));
+    const auto byte = [](float v) { return int(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f)); };
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Left: with its alpha (%d) over a checkerboard. Right: opaque.\nR %d  G %d  B %d  A %d", byte(rgba[3]), byte(rgba[0]),
+                          byte(rgba[1]), byte(rgba[2]), byte(rgba[3]));
+}
+
+// The font's sample text drawn the game's way (UiCanvas::drawText: the GDI-style glyphs, the font's ranges per character), in white,
+// at a screen scale - the em follows the screen (round(trunc(pointSize x 4 / 3) x scale)).
+void UiWorkspace::drawFontSample(size_t index) {
+    const std::string id = definitionId(tr::UiSection::Fonts, index);
+    ImGui::SeparatorText("Preview");
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    ImGui::InputText("##sample", fontSampleText_, sizeof fontSampleText_);
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    ImGui::Combo("##scale", &sampleScale_, kSampleScaleNames, 3);
+    const float scale = kSampleScales[std::clamp(sampleScale_, 0, 2)];
+    const int32_t pixelWidth = std::max(int32_t(ImGui::GetContentRegionAvail().x), 64);
+    const tr::UiFont* font = ui() ? ui()->font(id) : nullptr;
+    int32_t em = 16;
+    if (font && !font->ranges.empty()) em = int32_t(std::lround(float(font->ranges.front().pointSize * 4 / 3) * scale));
+    // Room for a few wrapped lines at the font's size.
+    const int32_t pixelHeight = std::clamp(em * 4 + 8, 32, 400);
+    SampleRequest& r = sampleWanted_;
+    r.widget = tr::XmlNode{};
+    r.widget.tag = "Text";
+    setAttr(r.widget, "fontId", id);
+    setAttr(r.widget, "wrapText", "true");
+    setAttr(r.widget, "anchorOffsetX", "4");
+    setAttr(r.widget, "anchorOffsetY", "4");
+    setAttr(r.widget, "sizeW", std::to_string(int32_t(float(pixelWidth - 8) / scale)));
+    setAttr(r.widget, "sizeH", std::to_string(int32_t(float(pixelHeight - 8) / scale)));
+    r.width = pixelWidth;
+    r.height = pixelHeight;
+    r.scale = scale;
+    r.animTime = -1.0f;
+    r.text = fontSampleText_;
+    r.key = "font:" + id + "|" + std::to_string(doc_->revision()) + "|" + std::to_string(pixelWidth) + "|" + std::to_string(sampleScale_) + "|" + r.text;
+    showSample(r.key);
+    if (!font) {
+        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.3f, 1.0f), "No font by this id.");
+    } else if (!sampleCanvas_.missingFonts().empty()) {
+        std::string faces;
+        for (const std::string& f : sampleCanvas_.missingFonts()) faces += (faces.empty() ? "" : ", ") + f;
+        ImGui::TextDisabled("Faces not found: %s", faces.c_str());
+    }
+}
+
+// The animation played on a copy of an element that uses it (its own size and children, centred), else - Widget animations - on a
+// plain white box. The clock is the preview's own: playing from when the entry was opened, or paused / scrubbed.
+void UiWorkspace::drawAnimationSample(size_t index) {
+    const std::string id = definitionId(tr::UiSection::Animations, index);
+    const tr::XmlNode* n = doc_->node(tr::UiSection::Animations, {int32_t(index)});
+    const tr::XmlNode* type = n ? n->child("animType") : nullptr;
+    const bool bitmap = type && type->text == "Bitmap";
+    ImGui::SeparatorText("Preview");
+    if (animFor_ != id) {
+        animFor_ = id;
+        animStart_ = ImGui::GetTime();
+        animPausedAt_ = 0.0f;
+        animShownOn_ = 0;
+    }
+    if (referencesRevision_ != doc_->revision() || referencesSection_ != tr::UiSection::Animations || referencesId_ != id) {
+        references_ = findReferences(tr::UiSection::Animations, id);
+        referencesRevision_ = doc_->revision();
+        referencesSection_ = tr::UiSection::Animations;
+        referencesId_ = id;
+    }
+    const std::string attribute = bitmap ? "bitmapAnimName" : "widgetAnimName";
+    std::vector<const Reference*> users;
+    for (const Reference& ref : references_)
+        if (ref.attribute == attribute) users.push_back(&ref);
+    if (animShownOn_ >= int(users.size())) animShownOn_ = 0;
+    const uint32_t length = sampleCanvas_.animationLength(id);
+    const tr::XmlNode* playback = n ? n->child("playbackType") : nullptr;
+    const bool stalls = !playback || playback->text.empty() || playback->text == "stall";
+    float t = animPlaying_ ? float((ImGui::GetTime() - animStart_) * 1000.0) : animPausedAt_;
+    // A stalling animation holds its last frame; the preview shows that for a second, then starts it again.
+    if (animPlaying_ && stalls && length > 0) t = std::fmod(t, float(length) + 1000.0f);
+    if (ImGui::SmallButton(animPlaying_ ? "Pause" : "Play")) {
+        if (animPlaying_) animPausedAt_ = t;
+        else animStart_ = ImGui::GetTime() - double(animPausedAt_) / 1000.0;
+        animPlaying_ = !animPlaying_;
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Restart")) {
+        animStart_ = ImGui::GetTime();
+        animPausedAt_ = 0.0f;
+        t = 0.0f;
+    }
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    float shown = t;
+    const float sliderEnd = stalls ? float(length) + 1000.0f : float(std::max<uint32_t>(length, 1)) * 2.0f;
+    if (ImGui::SliderFloat("##time", &shown, 0.0f, sliderEnd, "%.0f ms")) {
+        animPlaying_ = false;
+        animPausedAt_ = t = shown;
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Length %u ms (the longest track's last key). Dragging pauses.%s", length,
+                          stalls ? "\nstall: the preview holds the last frame for a second, then plays it again." : "");
+    if (!users.empty()) {
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::BeginCombo("##on", ("On " + referenceLabel(*users[size_t(animShownOn_)])).c_str())) {
+            for (size_t k = 0; k < users.size() && k < 200; ++k) {
+                ImGui::PushID(int(k));
+                if (ImGui::Selectable(referenceLabel(*users[k]).c_str(), int(k) == animShownOn_)) animShownOn_ = int(k);
+                ImGui::PopID();
+            }
+            ImGui::EndCombo();
+        }
+    }
+    const tr::XmlNode* source = nullptr;
+    if (!users.empty()) {
+        const Reference& ref = *users[size_t(animShownOn_)];
+        source = doc_->node(ref.templates ? tr::UiSection::Templates : tr::UiSection::Widgets, ref.path);
+    }
+    SampleRequest& r = sampleWanted_;
+    if (source) {
+        r.widget = *source;
+    } else if (!bitmap) {
+        r.widget = tr::XmlNode{};
+        r.widget.tag = "ColoredRect";
+        setAttr(r.widget, "sizeW", "96");
+        setAttr(r.widget, "sizeH", "64");
+    } else {
+        ImGui::TextDisabled("No Bitmap uses it: nothing to play it on (a Bitmap animation moves its texture).");
+        return;
+    }
+    // Centred in the preview, visible, at its own size (a widget sized by its parent gets 64 x 64).
+    for (const char* a : {"anchorOffsetX", "anchorOffsetY", "resizeToParent", "visible"}) eraseAttr(r.widget, a);
+    setAttr(r.widget, "childAnchor", "8");
+    setAttr(r.widget, "parentAnchor", "8");
+    setAttr(r.widget, attribute, id);
+    const int32_t w = std::max(intAttr(r.widget, "sizeW", 64), 8), h = std::max(intAttr(r.widget, "sizeH", 64), 8);
+    setAttr(r.widget, "sizeW", std::to_string(w));
+    setAttr(r.widget, "sizeH", std::to_string(h));
+    // Room around it for scale / translation; at most the panel's width and 320 pixels high.
+    const float frameW = float(w) * 1.5f + 32.0f, frameH = float(h) * 1.5f + 32.0f;
+    const float availW = std::max(ImGui::GetContentRegionAvail().x, 64.0f);
+    const float scale = std::min({1.0f, availW / frameW, 320.0f / frameH});
+    r.width = std::max(int32_t(frameW * scale), 16);
+    r.height = std::max(int32_t(frameH * scale), 16);
+    r.scale = scale;
+    r.text.clear();
+    // The playback rule (sampleAnimation) loops, mirrors or holds the last frame.
+    r.animTime = length > 0 ? std::max(t, 0.0f) : -1.0f;
+    r.key = "anim:" + id + "|" + std::to_string(doc_->revision()) + "|" + std::to_string(animShownOn_) + "|" + std::to_string(r.width) + "|" +
+            std::to_string(int32_t(r.animTime));
+    showSample(r.key);
+    if (length == 0) ImGui::TextDisabled("No keys: nothing moves.");
+    if (!source) ImGui::TextDisabled("Not used by any element: shown on a plain white box.");
+}
+
 void UiWorkspace::drawColourEditor(size_t index) {
     const std::vector<int32_t> path{int32_t(index)};
     if (!beginProperties("colour")) return;
@@ -749,6 +977,16 @@ void UiWorkspace::drawColourEditor(size_t index) {
         definitionField(tr::UiSection::Colours, path, c);
     }
     ImGui::EndTable();
+    if (const tr::XmlNode* c = doc_->node(tr::UiSection::Colours, path)) {
+        float rgba[4];
+        for (int k = 0; k < 4; ++k) {
+            const char name[2] = {"RGBA"[k], 0};
+            rgba[k] = float(c->hasAttribute(name) ? std::strtol(c->attribute(name).c_str(), nullptr, 10) : 255) / 255.0f;
+        }
+        const std::string key = pathKey(tr::UiSection::Colours, path, "rgba");
+        if (const auto held = defColours_.find(key); held != defColours_.end()) std::copy(held->second.begin(), held->second.end(), rgba);
+        drawColourSwatch(rgba);
+    }
 }
 
 void UiWorkspace::drawTextureEditor(size_t index) {
@@ -942,8 +1180,10 @@ void UiWorkspace::drawFontEditor(size_t index) {
         definitionField(tr::UiSection::Fonts, path, "id");
         ImGui::EndTable();
     }
+    drawFontSample(index);
     const tr::XmlNode* n = doc_->node(tr::UiSection::Fonts, path);
     if (!n) return;
+    ImGui::SeparatorText("Ranges");
     ImGui::TextDisabled("Ranges: the first one containing a character draws it (faceName, size in points).");
     static const char* columns[] = {"RangeBegin", "RangeEnd", "faceName", "pointSize", "bold", "italic", "shadow", "outline"};
     // Fixed widths, scrolled sideways in a narrow panel.
@@ -1020,6 +1260,9 @@ void UiWorkspace::drawAnimationEditor(size_t index) {
         }
         ImGui::EndTable();
     }
+    n = doc_->node(tr::UiSection::Animations, path);
+    if (!n) return;
+    drawAnimationSample(index);
     n = doc_->node(tr::UiSection::Animations, path);
     if (!n) return;
     const tr::XmlNode* type = n->child("animType");

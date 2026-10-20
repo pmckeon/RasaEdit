@@ -1400,6 +1400,59 @@ int main() {
                     }
                     check(usedAnim >= 0 && !ui.setAnimationField(size_t(usedAnim), "animType", "Bitmap").empty(),
                           "UI definitions: a Widget animation in use cannot become Bitmap");
+                    // Previews: the panel draws a font's sample text and plays an animation on an element using it (its own canvas,
+                    // between frames); the sample text and an animated box drawn directly.
+                    if (font >= 0) {
+                        ui.selectDefinition(S::Fonts, font);
+                        ui.focusDefinitions_ = true;
+                        frames(editor, device, 3);
+                        const std::string fontId = ui.definitionId(S::Fonts, size_t(font));
+                        check(ui.sampleTexture_ && ui.sampleLoaded_.rfind("font:" + fontId + "|", 0) == 0, "UI definitions: the font preview is drawn");
+                        tr::XmlNode sample;
+                        sample.tag = "Text";
+                        sample.attributes = {{"fontId", fontId}, {"sizeW", "300"}, {"sizeH", "40"}};
+                        UiCanvas::Options o;
+                        std::vector<uint8_t> px;
+                        ui.sampleCanvas_.renderDetached(sample, 300, 40, 1.125f, o, "Sample 123", px);
+                        size_t lit = 0;
+                        for (size_t k = 0; k + 3 < px.size(); k += 4) lit += px[k] > 128 ? 1 : 0;
+                        check(px.size() == 300u * 40u * 4u && lit > 50, ("UI definitions: a font's sample text is drawn (" + std::to_string(lit) + " pixels)").c_str());
+                    }
+                    if (usedAnim >= 0) {
+                        ui.selectDefinition(S::Animations, usedAnim);
+                        ui.focusDefinitions_ = true;
+                        frames(editor, device, 3);
+                        const std::string first = ui.sampleLoaded_;
+                        ui.animPlaying_ = false;
+                        ui.animPausedAt_ = float(ui.sampleCanvas_.animationLength(ui.definitionId(S::Animations, size_t(usedAnim)))) * 0.5f + 1.0f;
+                        frames(editor, device, 3);
+                        check(ui.sampleTexture_ && first.rfind("anim:", 0) == 0 && ui.sampleLoaded_.rfind("anim:", 0) == 0 && ui.sampleLoaded_ != first,
+                              "UI definitions: the animation preview plays (redrawn at another time)");
+                        ui.animPlaying_ = true;
+                    }
+                    {
+                        bool moved = false;
+                        std::string which;
+                        const tr::XmlNode* all = ui.document()->node(S::Animations, {});
+                        for (size_t k = 0; all && k < all->children.size() && !moved; ++k) {
+                            const tr::XmlNode* type = all->children[k].child("animType");
+                            const std::string id = ui.definitionId(S::Animations, k);
+                            const uint32_t length = ui.sampleCanvas_.animationLength(id);
+                            if (!type || type->text != "Widget" || length == 0) continue;
+                            tr::XmlNode box;
+                            box.tag = "ColoredRect";
+                            box.attributes = {{"childAnchor", "8"}, {"parentAnchor", "8"}, {"sizeW", "40"}, {"sizeH", "40"}, {"widgetAnimName", id}};
+                            UiCanvas::Options o;
+                            std::vector<uint8_t> a, b;
+                            o.animTime = 0.0f;
+                            ui.sampleCanvas_.renderDetached(box, 96, 96, 1.0f, o, "", a);
+                            o.animTime = float(length) * 0.5f;
+                            ui.sampleCanvas_.renderDetached(box, 96, 96, 1.0f, o, "", b);
+                            moved = a != b;
+                            which = id;
+                        }
+                        check(moved, ("UI definitions: a Widget animation changes its box between two times (" + which + ")").c_str());
+                    }
                     ui.revertChanges();
                     check(ui.document()->text() == start, "UI definitions: changes reverted");
                 }

@@ -137,6 +137,11 @@ private:
     void definitionField(tr::UiSection section, const std::vector<int32_t>& path, const std::string& name);   // one attribute's editor
     std::string referenceLabel(const Reference& r) const;
     void updateDefinitionPreview();         // between frames: the selected textureDef's file as a GPU texture
+    void updateSamplePreview();             // between frames: the font / animation sample asked for while drawing (sampleWanted_)
+    void drawColourSwatch(const float rgba[4]);
+    void drawFontSample(size_t index);
+    void drawAnimationSample(size_t index);
+    void showSample(const std::string& key);   // the sample texture, once it holds `key`, fitted to the panel's width
     void validateNow();
     std::vector<int32_t> branchFor(const std::vector<int32_t>& path) const;
 
@@ -215,5 +220,27 @@ private:
     float previewZoom_ = 0.0f;              // screen pixels per texture pixel (0: fit the view)
     ImVec2 previewScroll_{};
     bool previewScrollPending_ = false;
+    // Font and animation previews (Definitions panel): a sample widget drawn by its own canvas between frames (the panel asks with
+    // sampleWanted_, keyed by what it shows; the texture of the previous request is shown until the new one is ready).
+    struct SampleRequest {
+        std::string key;                    // empty: none asked for this frame
+        tr::XmlNode widget;
+        int32_t width = 0, height = 0;      // pixels
+        float scale = 1.0f;                 // pixels per logical unit
+        float animTime = -1.0f;
+        std::string text;
+    };
+    UiCanvas sampleCanvas_;
+    SampleRequest sampleWanted_;
+    std::string sampleLoaded_;
+    SDL_GPUTexture* sampleTexture_ = nullptr;
+    int32_t sampleWidth_ = 0, sampleHeight_ = 0;
+    char fontSampleText_[256] = "The quick brown fox jumps over the lazy dog. 0123456789";
+    int sampleScale_ = 1;                   // 0: 1280 x 960 (1 pixel per unit), 1: 1080 lines (1.125), 2: 1440 lines (1.5)
+    bool animPlaying_ = true;
+    double animStart_ = 0.0;                // ImGui time the animation preview started (playing)
+    float animPausedAt_ = 0.0f;             // milliseconds (paused)
+    std::string animFor_;                   // the animation the clock belongs to
+    int animShownOn_ = 0;                   // which element using it the preview copies
     bool zoomPreviewToRegion_ = false;      // once the preview is shown (RASAEDIT_UI_DEFINITION=...@zoom)     // previewScroll_ applied with the new content size before the view's next frame
 };
