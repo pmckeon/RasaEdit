@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Avatar.h"
+#include "Beams.h"
 #include "ParticleSim.h"
 #include "Renderer.h"
 #include "assetlibrary.h"
@@ -83,6 +84,9 @@ public:
     size_t liveParticleSystems() const { return liveParticles_.size(); }
     // Each running system: map entity (or server placement) index, its file and particle count (viewport_test RASA_LISTLIVEPFX).
     std::vector<std::string> liveParticleList() const;
+    // Every map usable / server object carrying persistent accessory beams (ACBM, durationMs 0): where, its texture, whether its ends
+    // resolve, and the live beam's segment count once made (viewport_test RASA_LISTBEAMS).
+    std::vector<std::string> stateBeamList() const;
     size_t liveParticles() const;
     size_t modelsLoaded() const { return modelsLoaded_; }
     size_t texturesLoaded() const;
@@ -326,6 +330,7 @@ public:
     bool materialMaps = true;               // normal and gloss maps (Pal* materials); off for comparison
     bool environmentMaps = true;
     bool showStateEffects = true;           // server objects' use-state particles and lights (special-FX packages)
+    bool showBeams = true;                  // their accessory beams (ACBM; viewport_test RASA_NOBEAMS)
     std::string hiddenGroup;                // debug: skip model pieces of this GPCE group; "!<group>" draws only it
     int onlyEntity = -1;                    // debug: draw only this map entity (-1 = all)            // environment cube reflections (Pal*Env*); off for comparison
     int entityFirst = -1, entityLast = -1;  // debug: draw only map entities in [first, last) (-1 = all)
@@ -526,6 +531,10 @@ private:
         Model* body = nullptr;
         tr::SfxLight event;
     };
+    struct StateBeam {                  // ACBM (see Beams.h): both ends on this body's contact points
+        Model* body = nullptr;
+        tr::SfxBeam event;
+    };
     struct Placement {
         Mat4 world;                 // entity placement
         Mat4 boxWorld;              // placement * local bounds (for placeholders and selection)
@@ -543,6 +552,7 @@ private:
         std::vector<Model*> stateAccessories;
         std::vector<StateParticle> stateParticles;
         std::vector<StateLight> stateLights;
+        std::vector<StateBeam> stateBeams;
     };
 
     struct AvatarDraw {                 // one suit's pieces of one swap set
@@ -573,6 +583,7 @@ private:
         std::vector<Model*> accessories;        // the use state's special-FX accessory models (drawn at the same placement)
         std::vector<StateParticle> stateParticles;   // the use state's particle attaches (PFXA)
         std::vector<StateLight> stateLights;         // the use state's lights (SLIT)
+        std::vector<StateBeam> stateBeams;           // the use state's accessory beams (ACBM)
         struct BodyAccessory {                       // avatar accessories (weapons, holsters, headsets)
             Model* model = nullptr;
             uint32_t connectionPoint = 0;
@@ -749,6 +760,7 @@ private:
         std::vector<Model*> accessories;
         std::vector<StateParticle> particles;
         std::vector<StateLight> lights;
+        std::vector<StateBeam> beams;
     };
     StateEffects stateEffects(int32_t classId, int32_t stateId);
     void addPackageEffects(const std::string& package, Model* body, int depth, StateEffects& effects);
@@ -776,6 +788,17 @@ private:
         std::unique_ptr<ParticleInstance> instance;
     };
     std::vector<LiveParticles> liveParticles_;
+    // Persistent accessory beams (durationMs 0, both targets 0) of server objects' and map usables' use states, made when they come
+    // within particleDistance (BeamInstance: the trigger's branches, then the noise and ribbons each frame).
+    struct LiveBeam {
+        size_t placement = 0;                   // server placement index when `server`, else map entity index
+        size_t index = 0;                       // stateBeams index
+        bool server = false;
+        std::unique_ptr<BeamInstance> beam;
+    };
+    std::vector<LiveBeam> liveBeams_;
+    // A state beam's two ends in world space this frame; false when a contact point is missing (or the body not loaded).
+    bool beamEnds(const StateBeam& beam, const Model* model, const Mat4& world, tr::Vec3& start, tr::Vec3& end) const;
     std::string standaloneFile_;
     std::unique_ptr<ParticleInstance> standalone_;
     // GEOG particle generators: each model's pieces' stored vertex positions, read once per model.

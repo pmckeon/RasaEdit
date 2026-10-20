@@ -2307,6 +2307,30 @@ std::vector<std::string> SceneView::liveParticleList() const {
     return out;
 }
 
+std::vector<std::string> SceneView::stateBeamList() const {
+    std::vector<std::string> out;
+    auto list = [&](bool server, size_t k, const std::vector<StateBeam>& beams, const Model* model, const Mat4& world, const tr::Vec3& at) {
+        for (size_t m = 0; m < beams.size(); ++m) {
+            const tr::SfxBeam& e = beams[m].event;
+            if (e.durationMs != 0) continue;
+            tr::Vec3 a, b;
+            const bool ends = beamEnds(beams[m], model, world, a, b);
+            size_t segments = 0;
+            for (const LiveBeam& l : liveBeams_)
+                if (l.server == server && l.placement == k && l.index == m) segments = l.beam->segmentCount();
+            char line[400];
+            std::snprintf(line, sizeof line, "%s %zu at %.1f %.1f %.1f: %s cp %u -> %u, %s, live segments %zu", server ? "server" : "entity", k, at.x,
+                          at.y, at.z, e.texture.c_str(), e.contactPoint1, e.contactPoint2, ends ? "ends found" : "ends NOT found", segments);
+            out.push_back(line);
+        }
+    };
+    for (size_t k = 0; k < serverPlacements_.size(); ++k)
+        list(true, k, serverPlacements_[k].stateBeams, serverPlacements_[k].model, serverPlacements_[k].world, serverPlacements_[k].position);
+    for (size_t k = 0; k < placements_.size(); ++k)
+        list(false, k, placements_[k].stateBeams, placements_[k].model, placements_[k].world, placements_[k].centre);
+    return out;
+}
+
 GeoPointSource SceneView::geoPointSource() {
     return [this](const std::string& geo) -> const std::vector<std::vector<tr::Vec3>>* {
         auto it = geoPoints_.find(geo);
@@ -2343,6 +2367,7 @@ void SceneView::advanceParticles(float dt) {
     }
     if (!showParticles || !showEntities) {
         liveParticles_.clear();
+        liveBeams_.clear();
         return;
     }
     dt = animate ? std::clamp(dt, 0.0f, 0.1f) : 0.0f;     // paused: the systems keep their particles where they are
@@ -2354,6 +2379,12 @@ void SceneView::advanceParticles(float dt) {
                              return dot(d, d) > keep * keep;
                          }),
                          liveParticles_.end());
+    liveBeams_.erase(std::remove_if(liveBeams_.begin(), liveBeams_.end(), [&](const LiveBeam& l) {
+                         const tr::Vec3 centre = l.server ? serverPlacements_[l.placement].position : placements_[l.placement].centre;
+                         const tr::Vec3 d = subtract(centre, camera_.position);
+                         return dot(d, d) > keep * keep;
+                     }),
+                     liveBeams_.end());
     // Special-FX particle attaches of server objects' use states (target 0 only; see tr::SfxParticleAttach).
     std::set<std::pair<size_t, size_t>> liveServer;
     for (const LiveParticles& l : liveParticles_)
@@ -2445,6 +2476,36 @@ void SceneView::advanceParticles(float dt) {
             if (!a || !a->loaded) continue;
             for (size_t m = 0; m < a->particles.size(); ++m) start(particleSystem(a->particles[m].file), multiply(p.world, a->particles[m].local), int(b), m);
         }
+    }
+    // Accessory beams (ACBM) of server objects' and map usables' use states: the persistent ones (durationMs 0) whose two ends are on
+    // the body itself (targets 0), as for the state lights; made once within particleDistance (the trigger builds the branches).
+    std::set<std::tuple<bool, size_t, size_t>> liveBeam;
+    for (const LiveBeam& l : liveBeams_) liveBeam.insert({l.server, l.placement, l.index});
+    auto startBeams = [&](bool server, size_t k, const std::vector<StateBeam>& beams, const Model* model, const Mat4& world) {
+        for (size_t m = 0; m < beams.size(); ++m) {
+            const tr::SfxBeam& e = beams[m].event;
+            if (!showBeams || e.durationMs != 0 || e.target1 != 0 || e.target2 != 0 || liveBeam.count({server, k, m})) continue;
+            tr::Vec3 a, b;
+            if (!beamEnds(beams[m], model, world, a, b)) continue;
+            LiveBeam l;
+            l.server = server;
+            l.placement = k;
+            l.index = m;
+            l.beam = std::make_unique<BeamInstance>(e, a, b, lightTime, uint32_t(k * 7907u + m * 104723u + (server ? 13u : 3u)));
+            liveBeams_.push_back(std::move(l));
+        }
+    };
+    for (size_t k = 0; k < serverPlacements_.size() && showStateEffects; ++k) {
+        const ServerPlacement& s = serverPlacements_[k];
+        if (s.stateBeams.empty() || !serverPlacementShown(s)) continue;
+        const tr::Vec3 d = subtract(s.position, camera_.position);
+        if (dot(d, d) <= particleDistance * particleDistance) startBeams(true, k, s.stateBeams, s.model, s.world);
+    }
+    for (size_t k = 0; k < placements_.size() && showStateEffects; ++k) {
+        const Placement& p = placements_[k];
+        if (p.useState < 0 || p.stateBeams.empty()) continue;
+        const tr::Vec3 d = subtract(p.centre, camera_.position);
+        if (dot(d, d) <= particleDistance * particleDistance) startBeams(false, k, p.stateBeams, p.model, p.world);
     }
     std::vector<uint8_t> live(placements_.size(), 0);
     for (const LiveParticles& l : liveParticles_)
@@ -2994,6 +3055,16 @@ SceneView::StateEffects SceneView::stateEffects(int32_t classId, int32_t stateId
     return effects;
 }
 
+bool SceneView::beamEnds(const StateBeam& beam, const Model* model, const Mat4& world, tr::Vec3& start, tr::Vec3& end) const {
+    const Model* body = beam.body ? beam.body : model;
+    Mat4 a, b;
+    tr::Quat ra, rb;
+    if (!contactFrame(body, beam.event.contactPoint1, 1, a, ra) || !contactFrame(body, beam.event.contactPoint2, 1, b, rb)) return false;
+    start = transformPoint(world, tr::Vec3{a.row0.w, a.row1.w, a.row2.w});
+    end = transformPoint(world, tr::Vec3{b.row0.w, b.row1.w, b.row2.w});
+    return true;
+}
+
 // A package's accessories, particle attaches and lights; an accessory's nested package attaches to the accessory's model.
 void SceneView::addPackageEffects(const std::string& package, Model* body, int depth, StateEffects& effects) {
     if (depth > 3) return;
@@ -3001,6 +3072,7 @@ void SceneView::addPackageEffects(const std::string& package, Model* body, int d
         const tr::SfxPackage p = tr::readSfxPackage(assets_.read(package));
         for (const tr::SfxParticleAttach& a : p.particles) effects.particles.push_back(StateParticle{body, a});
         for (const tr::SfxLight& l : p.lights) effects.lights.push_back(StateLight{body, l});
+        for (const tr::SfxBeam& b : p.beams) effects.beams.push_back(StateBeam{body, b});
         // Accessories are drawn at the placement (their own attachment fields are not decoded).
         for (const tr::SfxAccessory& a : p.accessories) {
             Model* accessory = a.mesh.empty() ? nullptr : objectModelFor(a.mesh, a.animation);
@@ -3638,6 +3710,22 @@ void SceneView::queueDraws(const Selection& selection) {
             if (particleScratch_.empty()) continue;
             const tr::ParticleGroup& group = d.instance->system().groups[d.group];
             renderer_->drawParticles(particleScratch_, showTextures && !group.texture.empty() ? texture(group.texture) : nullptr, tr::particleBlendType(group));
+        }
+        // Accessory beams: TRBeam (ONE / ONE, rgb = texture x vertex alpha, no fog, two-sided); the additive particle path gives the
+        // same result for their DXT1 textures (texture alpha 1). The ends follow their contact points; the noise runs on the light clock.
+        for (LiveBeam& l : liveBeams_) {
+            if (!showBeams) break;
+            const std::vector<StateBeam>& beams = l.server ? serverPlacements_[l.placement].stateBeams : placements_[l.placement].stateBeams;
+            if (l.index >= beams.size()) continue;
+            const Model* model = l.server ? serverPlacements_[l.placement].model : placements_[l.placement].model;
+            const Mat4& world = l.server ? serverPlacements_[l.placement].world : placements_[l.placement].world;
+            tr::Vec3 a, b;
+            if (!beamEnds(beams[l.index], model, world, a, b)) continue;
+            particleScratch_.clear();
+            l.beam->update(a, b, lightTime, camera_.position, right, up, particleScratch_);
+            if (particleScratch_.empty()) continue;
+            const std::string& file = l.beam->event().texture;
+            renderer_->drawParticles(particleScratch_, showTextures && !file.empty() ? texture(file) : nullptr, 0, false);
         }
     }
 
@@ -4313,6 +4401,7 @@ SceneView::Placement SceneView::makePlacement(const tr::MapEntity& e) {
         p.stateAccessories = fx.accessories;
         p.stateParticles = fx.particles;
         p.stateLights = fx.lights;
+        p.stateBeams = fx.beams;
         // The state's animation (usabledata.animation (class, state, USE_STATE_NULL) -> a family on the mesh), looped from its
         // first pick (the spec's type - looping / recurring one-shots - is not followed here: UNVERIFIED for the one-shot kinds).
         if (usableAnimationFor_ && !mesh.empty()) {
@@ -4335,6 +4424,8 @@ void SceneView::refreshEntity(size_t entityIndex) {
     liveParticles_.erase(std::remove_if(liveParticles_.begin(), liveParticles_.end(),
                                         [&](const LiveParticles& l) { return !l.server && l.placement == entityIndex; }),
                          liveParticles_.end());
+    liveBeams_.erase(std::remove_if(liveBeams_.begin(), liveBeams_.end(), [&](const LiveBeam& l) { return !l.server && l.placement == entityIndex; }),
+                     liveBeams_.end());
 }
 
 void SceneView::setEntityAnimation(size_t entityIndex, const std::string& animation) {
@@ -4390,6 +4481,7 @@ void SceneView::rebuildEntities() {
     for (const tr::MapEntity& e : map_.map.entities) placements_.push_back(makePlacement(e));
     liveParticles_.erase(std::remove_if(liveParticles_.begin(), liveParticles_.end(), [](const LiveParticles& l) { return !l.server; }),
                          liveParticles_.end());
+    liveBeams_.erase(std::remove_if(liveBeams_.begin(), liveBeams_.end(), [](const LiveBeam& l) { return !l.server; }), liveBeams_.end());
 }
 
 bool SceneView::entityModelBounds(size_t entityIndex, tr::Bounds& bounds) const {
@@ -4669,6 +4761,7 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
     serverPlacements_.clear();
     liveParticles_.erase(std::remove_if(liveParticles_.begin(), liveParticles_.end(), [](const LiveParticles& l) { return l.server; }),
                          liveParticles_.end());
+    liveBeams_.erase(std::remove_if(liveBeams_.begin(), liveBeams_.end(), [](const LiveBeam& l) { return l.server; }), liveBeams_.end());
     struct GlobeReload {
         SceneView& view;
         ~GlobeReload() {
@@ -4764,6 +4857,7 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
         s.accessories = fx.accessories;
         s.stateParticles = fx.particles;
         s.stateLights = fx.lights;
+        s.stateBeams = fx.beams;
         s.colour = markerColour::teleporter;
         s.ringRadius = 2.0f;
         s.facing = true;
@@ -4784,6 +4878,7 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
             s.accessories = fx.accessories;
             s.stateParticles = fx.particles;
             s.stateLights = fx.lights;
+        s.stateBeams = fx.beams;
             tr::GameData::UsableAnimation animation;
             if (usableAnimationFor_) {
                 try { animation = usableAnimationFor_(o.classId, 44); } catch (const std::exception&) {}
@@ -4795,6 +4890,15 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
                 s.idleDelayLower = animation.delayLower;
                 s.idleDelayUpper = animation.delayUpper;
             }
+        }
+        if (o.kind == ObjectKind::Kraftwerk) {
+            // Rasa.NET places every station in USE_CRAFTER_STATE_0 (46) (Managers/KraftwerksManager.cs Place: StateId =
+            // UseObjectState.CrafterState0); the client then attaches that state's package (class 9595: arch_hum_craftstation_on_v01.pkg).
+            StateEffects fx = stateEffects(o.classId, 46);
+            s.accessories = fx.accessories;
+            s.stateParticles = fx.particles;
+            s.stateLights = fx.lights;
+            s.stateBeams = fx.beams;
         }
         if (o.kind == ObjectKind::Emitter) {
             // FXPackageEmitter: the body is particle_proxy.geo (no pieces, client/augmentations/emitter.py); while on, the package is
@@ -4813,6 +4917,7 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
                 s.accessories = fx.accessories;
                 s.stateParticles = fx.particles;
                 s.stateLights = fx.lights;
+        s.stateBeams = fx.beams;
             }
         }
         s.colour = markerColour::ofObject(o.kind);

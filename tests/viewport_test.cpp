@@ -392,7 +392,7 @@ int main(int argc, char** argv) {
         }
         // RASA_PKGSCAN=1: parse every special-FX package; counts of accessory / particle / light events and failures.
         if (envValue("RASA_PKGSCAN")) {
-            size_t packages = 0, failed = 0, accessories = 0, particles = 0, lights = 0;
+            size_t packages = 0, failed = 0, accessories = 0, particles = 0, lights = 0, beams = 0, opacities = 0;
             std::map<uint32_t, size_t> tags;                     // every event chunk's tag (decoded or not)
             std::map<uint32_t, std::string> tagExample;
             for (const std::string& name : assets.namesWithExtension(".pkg")) {
@@ -406,6 +406,8 @@ int main(int argc, char** argv) {
                     accessories += p.accessories.size();
                     particles += p.particles.size();
                     lights += p.lights.size();
+                    beams += p.beams.size();
+                    opacities += p.opacities.size();
                 } catch (const std::exception& e) {
                     if (++failed <= 5) std::printf("pkg %s: %s\n", name.c_str(), e.what());
                 }
@@ -414,8 +416,8 @@ int main(int argc, char** argv) {
                 const char tagName[5] = {char(t & 0xff), char((t >> 8) & 0xff), char((t >> 16) & 0xff), char(t >> 24), 0};
                 std::printf("pkg event %s: %zu (e.g. %s)\n", tagName, n, tagExample[t].c_str());
             }
-            std::printf("pkg scan: %zu packages, %zu failed; %zu accessories, %zu particle attaches, %zu lights\n", packages, failed,
-                        accessories, particles, lights);
+            std::printf("pkg scan: %zu packages, %zu failed; %zu accessories, %zu particle attaches, %zu lights, %zu beams, %zu opacities\n",
+                        packages, failed, accessories, particles, lights, beams, opacities);
         }
         // RASA_PFXSCAN=1: how often the particle features the simulator lacks are used - groups by primitive, sorted groups (by sort
         // order), zBias values, groups with emit-from-particle (PEMT) / bounce (BONC) operators - with a few example files each.
@@ -2224,6 +2226,7 @@ int main(int argc, char** argv) {
         // Particle systems: started (with their warm-up) and run for RASA_PARTICLES seconds more (default 0.5);
         // RASA_NOPARTICLES=1 leaves them out.
         if (envValue("RASA_NOPARTICLES")) scene.showParticles = false;
+        if (envValue("RASA_NOBEAMS")) scene.showBeams = false;            // no accessory beams
         if (envValue("RASA_NOSTATEFX")) scene.showStateEffects = false;   // no use-state particles / lights of server objects
         if (envValue("RASA_NOTERRAIN")) scene.showTerrain = false;
         scene.terrainBuildsPerFrame = SIZE_MAX;      // a single frame: every chunk at its distance's detail
@@ -2390,6 +2393,8 @@ int main(int argc, char** argv) {
         scene.advanceParticles(0.0f);
         for (float t = 0; t < particleSeconds; t += 1.0f / 30.0f) scene.advanceParticles(1.0f / 30.0f);
         std::printf("particle systems running: %zu, %zu particles\n", scene.liveParticleSystems(), scene.liveParticles());
+        if (envValue("RASA_LISTBEAMS"))
+            for (const std::string& line : scene.stateBeamList()) std::printf("  beam %s\n", line.c_str());
         if (envValue("RASA_LISTLIVEPFX"))
             for (const std::string& line : scene.liveParticleList()) std::printf("  live %s\n", line.c_str());
         if (const char* pool = envValue("RASA_POOLFIGURES")) {   // <spawn pool index in the map's content>: its figures

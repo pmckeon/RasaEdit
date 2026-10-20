@@ -545,6 +545,52 @@ SfxPackage readSfxPackage(const Bytes& data) {
             if (event.version >= 5) l.renderMode = r.u8();
             finish(r, event);
             package.lights.push_back(l);
+        } else if (event.tag == fourcc("ACBM")) {
+            SfxBeam b;
+            b.version = event.version;
+            b.marker = r.u8();
+            b.texture = readAsset(r);
+            b.durationMs = r.u32();
+            b.target1 = r.u8();
+            b.contactPoint1 = r.u8();
+            b.target2 = r.u8();
+            b.contactPoint2 = r.u8();
+            if (event.version > 1) {
+                b.tileRate = r.f32();
+                b.animRate = r.f32();
+            }
+            b.noiseSpeed = r.f32();
+            b.noiseAmplitude = r.f32();
+            b.width = r.f32();
+            if (event.version > 2) b.unknownC = r.u8();
+            if (event.version > 3) {
+                b.tileOncePerSegment = r.u32();
+                b.maxSubdivisions = r.u32();
+                b.branchChance = float(r.u8()) / 100.0f;
+            }
+            if (event.version > 4) {
+                b.branchLength = float(r.u8()) / 100.0f;
+                b.branchDecay = float(r.u8()) / 100.0f;
+                b.branchPull = float(r.u8()) / 100.0f;
+            }
+            finish(r, event);
+            package.beams.push_back(b);
+        } else if (event.tag == fourcc("AOPC")) {
+            SfxOpacity o;
+            o.version = event.version;
+            o.unknown0 = r.u8();
+            o.target = r.u8();
+            o.loop = r.u8() != 0;
+            const uint32_t n = r.u32();
+            for (uint32_t k = 0; k < n; ++k) {
+                const float t = r.f32();
+                o.keys.emplace_back(t, r.f32());
+            }
+            if (event.version >= 2) o.durationMs = r.u32();
+            else if (!o.keys.empty()) o.durationMs = uint32_t(std::lround(o.keys.back().first * 1000.0f));
+            if (event.version >= 3) o.unknown10 = r.u8();
+            finish(r, event);
+            package.opacities.push_back(o);
         }
         r.seek(event.end);
     }

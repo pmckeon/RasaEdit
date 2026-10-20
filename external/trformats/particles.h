@@ -257,11 +257,48 @@ struct SfxLight {
     SfxCurve colourR, colourG, colourB, colourA, range, falloffPercent, intensity, penumbraAngle, coneAngle;
 };
 const SfxCurve& sfxLightCurve(const SfxLight& light, int index);   // 0..8 in file order
+// `ACBM` accessory beam v1-5 (SfxAccessoryBeamEvent, unserializer FUN_0076df30, serializer FUN_0076d990, trigger FUN_0076d3c0; all
+// 131 shipped events are v5 and parse exactly): u8 marker (+ 8), asset texture (+ 0x10), u32 durationMs (+ 0x1c; 0 = no end),
+// u8 target1 / contactPoint1 / target2 / contactPoint2 (+ 0x20 .. + 0x2c), [v2+: f32 TileRate, f32 AnimRate (+ 0x30 / + 0x34)],
+// f32 noise speed, noise amplitude, width (+ 0x38 / + 0x3c / + 0x40), [v3+: u8 (+ 0xc, use NOT traced)], [v4+: u32 (+ 0x44: 0 =
+// texture tiles per metre of the segment, else once per segment), u32 maxSubdivisions (+ 0x48), u8 branchChance / 100 (+ 0x4c)],
+// [v5: u8 x3 / 100: branchLength, branchDecay, branchPull (+ 0x50 / + 0x54 / + 0x58)]. Defaults for older versions are the editor's
+// (the constructor's are NOT traced; no shipped event is older than v5). What the trigger and the beam system do with them: see Beams.h.
+struct SfxBeam {
+    uint32_t version = 0;
+    uint32_t marker = 0;
+    std::string texture;
+    uint32_t durationMs = 0;
+    uint32_t target1 = 0, contactPoint1 = 0, target2 = 0, contactPoint2 = 0;
+    float tileRate = 1, animRate = 0;
+    float noiseSpeed = 0, noiseAmplitude = 0, width = 1;
+    uint32_t unknownC = 0;
+    uint32_t tileOncePerSegment = 0;
+    uint32_t maxSubdivisions = 6;
+    float branchChance = 0, branchLength = 0, branchDecay = 0, branchPull = 0;
+};
+// `AOPC` animate opacity v1-3 (TRasa::SfxAnimateOpacityEvent, factory FUN_00753920, constructor FUN_00766df0, unserializer
+// FUN_00767550, trigger FUN_00766ec0; all 253 shipped events parse exactly): u8 (+ 8), u8 target (+ 0xc), u8 loop (+ 0x2c, a
+// TRasa::ModifierTrack at + 0x14), u32 n, n x (f32 seconds, f32 opacity), [v2+: u32 durationMs (+ 0x30; v1: the last key x 1000)],
+// [v3: u8 (+ 0x10: when set the trigger looks up something on the body first - NOT traced)]. The trigger makes a product
+// (FUN_007779b0) per selected body that animates its opacity (NOT traced further). Every object use of it is a state TRANSITION
+// (usabledata.specialFX (class, state, previous state) with a previous state other than 97): dropships flying in / out, a reactor
+// destroyed, deaths - none is a steady state the editor shows, so the editor parses it and does not apply it.
+struct SfxOpacity {
+    uint32_t version = 0;
+    uint32_t unknown0 = 0, target = 0;
+    bool loop = false;
+    std::vector<std::pair<float, float>> keys;   // (seconds, opacity)
+    uint32_t durationMs = 0;
+    uint32_t unknown10 = 0;
+};
 struct SfxPackage {
     std::vector<uint32_t> events;                // every event's tag, in order
     std::vector<SfxAccessory> accessories;
     std::vector<SfxParticleAttach> particles;
     std::vector<SfxLight> lights;
+    std::vector<SfxBeam> beams;
+    std::vector<SfxOpacity> opacities;
 };
 SfxPackage readSfxPackage(const Bytes& data);
 
