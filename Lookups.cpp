@@ -231,6 +231,24 @@ LookupSource npcGreeting(EditorContext& ctx, const char* none) {
                      [](tr::GameData& g, int64_t id) { return g.npcGreeting(int32_t(id)); }, none);
 }
 
+LookupSource pairs(std::shared_ptr<std::vector<std::pair<int64_t, std::string>>> choices) {
+    LookupSource source;
+    source.name = [choices](int64_t id) {
+        for (const auto& c : *choices)
+            if (c.first == id) return c.second;
+        return std::string();
+    };
+    source.fill = [choices](LookupList& out) {
+        for (const auto& c : *choices) out.push_back(LookupChoice{c.first, c.second});
+    };
+    return source;
+}
+
+LookupSource bark(EditorContext& ctx, const char* none) {
+    return fromPairs(ctx, [](tr::GameData& g) { return g.lookupNames("generated.client.language.english.barklanguage", "lookup", 1); },
+                     [](tr::GameData& g, int64_t id) { return g.barkText(int32_t(id)); }, none);
+}
+
 LookupSource audioSet(EditorContext& ctx, const char* none) {
     return fromPairs(ctx, [](tr::GameData& g) { return g.lookupNames("generated.client.audiosetdata", "audioSet"); },
                      [](tr::GameData& g, int64_t id) { return g.audioSetName(int32_t(id)); }, none);

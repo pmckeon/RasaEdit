@@ -91,6 +91,7 @@ private:
 
     std::vector<Table> tables_;                       // parents before children
     MissionReferences references_;
+    std::vector<std::pair<int64_t, std::string>> modules_;       // module_class rows (id, comment): reward item modules
     std::vector<std::pair<int64_t, std::string>> teleporters_;   // teleporter rows (id, "description  (map)"): waypoint subjects
     MissionValidationResult validation_, savedValidation_;
     bool validationDirty_ = true;

@@ -147,6 +147,24 @@ def route_actor(c):                # a route run by an object actor
     edit_document(c, mission, change)
 
 
+def spawn_pools_intent(kind, pools):
+    def change(d):
+        for s in d['sequences'].values():
+            for i in s.get('world', []):
+                if i['$kind'] == kind:
+                    i['spawnPools'] = pools
+                    return
+    return change
+
+
+def quiet_no_pools(c):             # a quiet-spawn-pools operation naming no spawn pool (SceneRuntime.Evaluate, development b22b4a4d)
+    edit_document(c, 1994, spawn_pools_intent('quiet-spawn-pools', []))
+
+
+def wake_pool_zero(c):             # a wake-spawn-pools operation naming spawn pool 0
+    edit_document(c, 1994, spawn_pools_intent('wake-spawn-pools', [400301, 0]))
+
+
 def item_drop_objective(c):        # the objective a mission item drop names loses its item-acquisition rule (event kind unknown)
     r = enabled_revision(c, 425)
     c.execute('update mission_trigger set event_kind=99 where mission_id=425 and content_revision=? and kind=2', (r,))
@@ -198,7 +216,7 @@ def experience_unmapped_member(c):  # the Bootcamp experience with a member its 
 cases = [scene_unmapped_member, scene_required_member, scene_discriminator, scene_value_type, experience_unmapped_member,
          item_drop_objective, action_intent_kind, radio_target_inactive, no_scene_scenario, shareable_scripted, public_spawn_missing, dialogue_branch, radio_offer, radio_requirement, experience_trigger,
          item_intent_key, acceptance_quantity, unknown_script, inconsistent_script, duplicate_operation, timer_target, credit_objective,
-         object_conversation, gameplay_policy, route_actor]
+         object_conversation, gameplay_policy, route_actor, quiet_no_pools, wake_pool_zero]
 
 
 def server_failure(db):

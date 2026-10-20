@@ -5286,12 +5286,46 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
     for (size_t k = 0; k < content->spawnPools.size(); ++k) {
         const SpawnPool& pool = content->spawnPools[k];
         std::vector<const Creature*> spawned;
-        for (int slot = 0; slot < 6 && spawned.size() < 64; ++slot) {
-            const SpawnSlot& entry = spawnSlot(pool, slot);
-            if (entry.creatureId == 0 || entry.maxCount <= 0 || entry.minCount < 0 || entry.maxCount < entry.minCount) continue;
-            const Creature* creature = database ? database->creature(entry.creatureId) : nullptr;
-            if (!creature) continue;                    // the server skips a missing creature too
-            for (int32_t n = 0; n < entry.maxCount && spawned.size() < 64; ++n) spawned.push_back(creature);
+        int32_t drawCount = 0;                          // spawnpool_draw (SpawnPoolManager.DrawCreatures): that many, drawn from the slots
+        for (const PoolDraw& d : content->draws)
+            if (d.poolId == pool.id && pool.id > 0) drawCount = d.count;
+        if (drawCount > 0) {
+            // Each creature is a slot drawn at random, a slot's chance its max count over all slots'. The editor shows the expected
+            // mix instead: the figures shared out by weight (largest remainder), in slot order.
+            std::vector<std::pair<const Creature*, int32_t>> slots;
+            int64_t total = 0;
+            for (int slot = 0; slot < 6; ++slot) {
+                const SpawnSlot& entry = spawnSlot(pool, slot);
+                if (entry.creatureId == 0 || entry.maxCount <= 0) continue;
+                const Creature* creature = database ? database->creature(entry.creatureId) : nullptr;
+                if (!creature) continue;
+                slots.emplace_back(creature, entry.maxCount);
+                total += entry.maxCount;
+            }
+            const int32_t n = std::min<int32_t>(drawCount, 64);
+            if (total > 0) {
+                std::vector<int32_t> share(slots.size());
+                std::vector<std::pair<double, size_t>> remainders;
+                int32_t given = 0;
+                for (size_t j = 0; j < slots.size(); ++j) {
+                    const double exact = double(n) * slots[j].second / double(total);
+                    share[j] = int32_t(exact);
+                    given += share[j];
+                    remainders.emplace_back(exact - share[j], j);
+                }
+                std::stable_sort(remainders.begin(), remainders.end(), [](const auto& x, const auto& y) { return x.first > y.first; });
+                for (size_t j = 0; given < n && j < remainders.size(); ++j, ++given) ++share[remainders[j].second];
+                for (size_t j = 0; j < slots.size(); ++j)
+                    for (int32_t m = 0; m < share[j]; ++m) spawned.push_back(slots[j].first);
+            }
+        } else {
+            for (int slot = 0; slot < 6 && spawned.size() < 64; ++slot) {
+                const SpawnSlot& entry = spawnSlot(pool, slot);
+                if (entry.creatureId == 0 || entry.maxCount <= 0 || entry.minCount < 0 || entry.maxCount < entry.minCount) continue;
+                const Creature* creature = database ? database->creature(entry.creatureId) : nullptr;
+                if (!creature) continue;                    // the server skips a missing creature too
+                for (int32_t n = 0; n < entry.maxCount && spawned.size() < 64; ++n) spawned.push_back(creature);
+            }
         }
         const Creature* first = spawned.empty() ? (database ? database->creature(pool.slot1.creatureId) : nullptr) : spawned.front();
         const bool npc = first && database->classIsNpc(first->classId);
@@ -5364,6 +5398,11 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
             // Rasa.NET places every station in USE_CRAFTER_STATE_0 (46) (Managers/KraftwerksManager.cs Place: StateId =
             // UseObjectState.CrafterState0); the client then attaches that state's package (class 9595: arch_hum_craftstation_on_v01.pkg).
             startPackage(effectLists(s), stateEffects(o.classId, 46), true);
+        }
+        if (o.kind == ObjectKind::WorldContainer) {
+            // Rasa.NET places a container closed (WorldContainers.Build: StateId = UseObjectState.TdStateClosed, 200); the client's
+            // treasure dispenser is a usable, so it puts on that state's package (usable.py AttachStateSFX), if the class has one.
+            startPackage(effectLists(s), stateEffects(o.classId, kContainerClosedState), true);
         }
         if (o.kind == ObjectKind::Emitter) {
             // FXPackageEmitter: the body is particle_proxy.geo (no pieces, client/augmentations/emitter.py); while on, the package is
@@ -5451,6 +5490,20 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
                 s.pointSelection = Selection{SelectionKind::Object, pointIndex};
                 lineSet = true;
             }
+        }
+    }
+    // Local teleporter links (local_teleporter_link): a line from a local teleporter to the one it sends players to.
+    for (const LocalTeleporterLink& link : content->localTeleporterLinks) {
+        const Teleporter* to = nullptr;
+        for (const Teleporter& t : content->teleporters)
+            if (t.id == link.toTeleporterId) to = &t;
+        if (!to) continue;
+        for (ServerPlacement& s : serverPlacements_) {
+            if (s.selection.kind != SelectionKind::Teleporter || s.selection.index >= content->teleporters.size() ||
+                content->teleporters[s.selection.index].id != link.fromTeleporterId || s.linked)
+                continue;
+            s.linked = true;
+            s.linkTarget = to->position;
         }
     }
     // Patrol steps: a line from each to the next of its pool, and from the last back to the first (the circuit Rasa.NET's

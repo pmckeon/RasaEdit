@@ -151,7 +151,7 @@ struct Objective {
 };
 struct Reward {
     int64_t id = 0, selection = 0;
-    struct Item { int64_t id = 0, templateId = 0, quantity = 0; };
+    struct Item { int64_t id = 0, templateId = 0, quantity = 0; int64_t module1 = 0, module2 = 0, module3 = 0, module4 = 0; };
     std::vector<Item> fixed, selectable;
 };
 struct Area {
@@ -755,6 +755,44 @@ void validateObjectiveGraph(Context& c) {
         }
 }
 
+// MissionContentValidator.ValidateRewardModules (development b22b4a4d): the crafting station's rules for putting modules into an
+// item - each a module_class row, the item's class in modifiable_class, every module of that class set, no two of one variant - and
+// the slots filled from module_1.
+void validateRewardModules(Context& c, const Reward::Item& item, int64_t itemClassId) {
+    const int64_t modules[4] = {item.module1, item.module2, item.module3, item.module4};
+    int lastFull = -1;
+    for (int slot = 0; slot < 4; ++slot)
+        if (modules[slot] != 0) lastFull = slot;
+    if (lastFull < 0) return;
+    const std::string prefix = "reward item " + std::to_string(item.id) + ": ";
+    for (int slot = 0; slot < lastFull; ++slot)
+        if (modules[slot] == 0) {
+            c.add("reward-module-slot-gap", prefix + "module slot " + std::to_string(slot + 1) + " is empty before a full one; fill the slots from module_1.");
+            break;
+        }
+    const auto set = c.refs.modifiableClasses.find(itemClassId);
+    if (set == c.refs.modifiableClasses.end() || set->second == 0) {
+        c.add("reward-item-takes-no-modules", prefix + "item template " + std::to_string(item.templateId) + " (class " +
+                                                  std::to_string(itemClassId) + ") takes no modules.");
+        return;
+    }
+    std::set<int64_t> variants;
+    for (int64_t moduleId : modules) {
+        if (moduleId == 0) continue;
+        const auto module = c.refs.moduleClasses.find(moduleId);
+        if (module == c.refs.moduleClasses.end()) {
+            c.add("missing-reward-module", prefix + "module " + std::to_string(moduleId) + " is not in module_class.");
+            continue;
+        }
+        if (module->second.second != set->second)
+            c.add("wrong-reward-module-kind", prefix + "module " + std::to_string(moduleId) + " is for class set " + std::to_string(module->second.second) +
+                                                  ", not item template " + std::to_string(item.templateId) + "'s " + std::to_string(set->second) + ".");
+        if (module->second.first != 0 && !variants.insert(module->second.first).second)
+            c.add("duplicate-reward-module-variant", prefix + "module " + std::to_string(moduleId) + " is a second module of variant " +
+                                                         std::to_string(module->second.first) + ".");
+    }
+}
+
 void validateRewards(Context& c) {
     for (const auto& rp : c.def->rewards) {
         const Reward& r = rp.second;
@@ -771,6 +809,7 @@ void validateRewards(Context& c) {
                 c.add("missing-entity-class",
                       "item template " + std::to_string(item.templateId) + " resolves to missing entity class " + std::to_string(cls->second) + ".");
             if (item.quantity == 0) c.add("invalid-quantity", "reward item " + std::to_string(item.id) + " must have a positive quantity.");
+            validateRewardModules(c, item, cls->second);
         }
         const bool selectable = !r.selectable.empty();
         if ((r.selection == 0 && selectable) || (r.selection > 0 && !selectable))
@@ -1378,6 +1417,15 @@ std::string evaluateSequence(const JsonValue& scene, const JsonValue& sequence) 
             const int64_t k = actorKind(actor);
             if (!route || points == 0 || start < 0 || start >= int64_t(points) || !actor || k == 2 || k == 3)
                 return "Scene operation " + op + " references an invalid route or actor.";
+        }
+        if (kind == "quiet-spawn-pools" || kind == "wake-spawn-pools") {
+            // SceneRuntime.Evaluate (development b22b4a4d): a role and at least one spawn pool, none of them 0.
+            const std::vector<JsonValue>& pools = elements(mem(&intent, "spawnPools"));
+            bool bad = !present(roleValue) || pools.empty();
+            for (const JsonValue& pool : pools) bad = bad || num(&pool) == 0;
+            if (bad)
+                return "Scene operation " + op + (kind == "quiet-spawn-pools" ? " quiets" : " wakes") +
+                       " no spawn pools, or has no actor holding them.";
         }
         if (kind == "attack") {
             const JsonValue* targetValue = mem(&intent, "targetRole");
@@ -2589,6 +2637,8 @@ MissionReferences MissionReferences::load(const WorldDatabase& database) {
     each("creature_class_flag", [&](const Row& row) { r.creatureFlagIds.insert(row.i("flag_id")); });
     each("npc_package", [&](const Row& row) { r.npcPackageRows.emplace(row.i("id"), row.i("package_id")); });
     each("spawnpool", [&](const Row& row) { r.spawnPoolIds.insert(row.i("id")); });
+    each("module_class", [&](const Row& row) { r.moduleClasses.emplace(row.i("id"), std::make_pair(row.i("variant_id"), row.i("class_set_id"))); });
+    each("modifiable_class", [&](const Row& row) { r.modifiableClasses.emplace(row.i("id"), row.i("class_set_id")); });
     each("itemtemplate", [&](const Row& row) { r.itemTemplateIds.insert(row.i("id")); });
     each("itemclass", [&](const Row& row) { r.itemClassStackSizes[row.i("id")] = row.i("stack_size"); });
     each("mission_experience_binding", [&](const Row& row) {
@@ -2866,7 +2916,8 @@ MissionValidationResult validateMissionContent(const std::map<std::string, const
             w.selection = r.i("selection_count");
             for (const Row& it : in(rewardItems, key)) {
                 if (it.i("reward_id") != w.id) continue;
-                const Reward::Item item{it.i("item_id"), it.i("item_template_id"), it.i("quantity")};
+                const Reward::Item item{it.i("item_id"), it.i("item_template_id"), it.i("quantity"),
+                                        it.i("module_1"), it.i("module_2"), it.i("module_3"), it.i("module_4")};
                 if (it.i("kind") == 1) w.fixed.push_back(item);
                 else if (it.i("kind") == 2) w.selectable.push_back(item);
             }

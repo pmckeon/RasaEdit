@@ -447,6 +447,8 @@ void ServerWorkspace::drawServerPanel() {
                 addServerObject(SelectionKind::Object, ObjectKind::WorldDestructible);
             if (database_ && database_->hasTable("map_emitter") && ImGui::MenuItem("FX emitter"))
                 addServerObject(SelectionKind::Object, ObjectKind::Emitter);
+            if (database_ && database_->hasTable("world_container") && ImGui::MenuItem("World container"))
+                addServerObject(SelectionKind::Object, ObjectKind::WorldContainer);
             if (database_ && database_->hasTable("wormhole_lock") && ImGui::MenuItem("Wormhole lock"))
                 addServerObject(SelectionKind::WormholeLock, ObjectKind::Footlocker);
             if (ImGui::MenuItem("Kraftwerk")) addServerObject(SelectionKind::Object, ObjectKind::Kraftwerk);
@@ -752,6 +754,9 @@ void ServerWorkspace::deleteSelected() {
                 serverContent_.poses.erase(std::remove_if(serverContent_.poses.begin(), serverContent_.poses.end(),
                                                           [&](const PoolPose& p) { return p.poolId == poolId; }),
                                            serverContent_.poses.end());
+                serverContent_.draws.erase(std::remove_if(serverContent_.draws.begin(), serverContent_.draws.end(),
+                                                          [&](const PoolDraw& d) { return d.poolId == poolId; }),
+                                           serverContent_.draws.end());
                 removeControlPointLinks({1, 2}, poolId);
             }
             what = "spawn pool" + (arrivals ? " and its " + std::to_string(arrivals) + " arrival point(s)" : std::string());
@@ -781,6 +786,11 @@ void ServerWorkspace::deleteSelected() {
             if (serverContent_.teleporters[i].id > 0) {
                 removeControlPointLinks({3, 4}, serverContent_.teleporters[i].id);
                 removeMarkerBindings(1, serverContent_.teleporters[i].id);
+                const int64_t id = serverContent_.teleporters[i].id;   // its local links, from it or to it (the save deletes them too)
+                auto& links = serverContent_.localTeleporterLinks;
+                links.erase(std::remove_if(links.begin(), links.end(),
+                                           [&](const LocalTeleporterLink& l) { return l.fromTeleporterId == id || l.toTeleporterId == id; }),
+                            links.end());
             }
             serverContent_.teleporters.erase(serverContent_.teleporters.begin() + std::ptrdiff_t(i));
             what = "teleporter";
@@ -1094,6 +1104,16 @@ void ServerWorkspace::addServerObject(SelectionKind kind, ObjectKind objectKind)
                         break;
                     }
                 }
+            }
+            if (objectKind == ObjectKind::WorldContainer) {
+                // The class of the map's containers, else the first treasure dispenser class not marked DELETE; no comment.
+                if (o.classId == 0 && database_)
+                    for (int32_t c : database_->treasureDispenserClasses())
+                        if (ctx_.classInfo(c).name.find("DELETE") == std::string::npos) {
+                            o.classId = c;
+                            break;
+                        }
+                o.name.clear();
             }
             if (objectKind == ObjectKind::Emitter) {
                 o.classId = kEmitterClassId;
@@ -1869,6 +1889,61 @@ void ServerWorkspace::drawServerObjectEditor() {
                     if (steps && current > 0) ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "A pool with a patrol has no pose (Rasa.NET NpcPoses).");
                 }
             }
+            if (database_ && database_->hasTable("spawnpool_draw")) {
+                // spawnpool_draw (Rasa.NET SpawnPoolManager.DrawCreatures): a set number at a time, each drawn from the slots.
+                ImGui::SeparatorText("Draw (spawnpool_draw)");
+                PoolDraw* draw = nullptr;
+                for (PoolDraw& candidate : serverContent_.draws)
+                    if (candidate.poolId == p.id) draw = &candidate;
+                if (p.id <= 0) {
+                    ImGui::TextDisabled("Save the pool before giving it a draw.");
+                } else {
+                    bool on = draw != nullptr;
+                    if (ImGui::Checkbox("Sends a set number, drawn from the slots", &on)) {
+                        noteEdit();
+                        if (on) serverContent_.draws.push_back(PoolDraw{p.id, 3});
+                        else
+                            serverContent_.draws.erase(std::remove_if(serverContent_.draws.begin(), serverContent_.draws.end(),
+                                                                      [&](const PoolDraw& c) { return c.poolId == p.id; }),
+                                                       serverContent_.draws.end());
+                        contentChanged();
+                        draw = nullptr;
+                        for (PoolDraw& candidate : serverContent_.draws)
+                            if (candidate.poolId == p.id) draw = &candidate;
+                    }
+                    if (!draw) {
+                        ImGui::TextDisabled("No row: each slot sends its own min..max count.");
+                    } else {
+                        int count = draw->count;
+                        ImGui::SetNextItemWidth(fieldWidth);
+                        if (ImGui::InputInt("Creatures at a time", &count)) {
+                            noteEdit();
+                            draw->count = std::clamp(count, 1, 255);   // a byte; 0 would mean no draw
+                            contentChanged();
+                        }
+                        if (draw->count > 64) ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "The server makes at most 64 at a time.");
+                        // Each slot's chance: its max count over all slots' (slots without a creature, a max count or a creature row are not drawn).
+                        int64_t total = 0;
+                        for (int sIndex = 0; sIndex < 6; ++sIndex) {
+                            const SpawnSlot& slot = spawnSlot(p, sIndex);
+                            if (slot.creatureId != 0 && slot.maxCount > 0 && database_->creature(slot.creatureId)) total += slot.maxCount;
+                        }
+                        if (total == 0) ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "No slot can be drawn: the pool sends nothing.");
+                        for (int sIndex = 0; sIndex < 6 && total > 0; ++sIndex) {
+                            const SpawnSlot& slot = spawnSlot(p, sIndex);
+                            if (slot.creatureId == 0) continue;
+                            const bool drawn = slot.maxCount > 0 && database_->creature(slot.creatureId);
+                            if (drawn)
+                                ImGui::BulletText("Slot %d: %s - %.0f %%", sIndex + 1, (database_->creature(slot.creatureId) ? database_->creature(slot.creatureId)->comment : std::to_string(slot.creatureId)).c_str(),
+                                                  100.0 * slot.maxCount / double(total));
+                            else
+                                ImGui::BulletText("Slot %d: %s - not drawn (%s)", sIndex + 1, (database_->creature(slot.creatureId) ? database_->creature(slot.creatureId)->comment : std::to_string(slot.creatureId)).c_str(),
+                                                  slot.maxCount > 0 ? "no creature row" : "max count 0");
+                        }
+                        ImGui::TextDisabled("Min counts are not used; the viewport shows the expected mix.");
+                    }
+                }
+            }
             break;
         }
         case SelectionKind::PatrolStep: {
@@ -1968,6 +2043,7 @@ void ServerWorkspace::drawServerObjectEditor() {
             pick("Type", t.type, lookup::values(lookup::kWaypointTypes));
             text("Description", t.description);
             drawMarkerBinding(1, t.id, t.position, {2, 3, 19});
+            if (database_ && database_->hasTable("local_teleporter_link")) drawLocalTeleporterLink(t);
             break;
         }
         case SelectionKind::Object: {
@@ -1979,6 +2055,7 @@ void ServerWorkspace::drawServerObjectEditor() {
             position("Position", o.position);
             if (o.kind != ObjectKind::Logos) angle("Facing", o.rotation);
             if (o.kind == ObjectKind::Emitter) ImGui::TextDisabled("Class %d FXPackageEmitter (fixed: an invisible proxy that plays the package)", kEmitterClassId);
+            else if (o.kind == ObjectKind::WorldContainer) drawContainerClass(o);
             else classField("Class", o.classId);
             text(o.kind == ObjectKind::Logos || o.kind == ObjectKind::ControlPoint ? "Name" : "Comment", o.name);
             // Number columns of the Rasa.NET upstream tables (0 = the kind's / class's default).
@@ -2059,6 +2136,7 @@ void ServerWorkspace::drawServerObjectEditor() {
                     contentChanged();
                 }
             }
+            if (o.kind == ObjectKind::WorldContainer) drawContainer(o);
             if (o.kind == ObjectKind::WorldDestructible) {
                 ImGui::SeparatorText("Destructible (0 = the class's default)");
                 DestructibleSettings& d = o.destructible;
@@ -2407,6 +2485,282 @@ void ServerWorkspace::drawBattlecry(CreatureDefinition& d) {
     if (cries.empty()) ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.4f, 1.0f), "The client has no cries for this package: it plays nothing.");
 }
 
+// Barks (npc_bark; Rasa.NET NpcBarks, development b22b4a4d): lines of the client's barklanguage the creature says now and then - one
+// of them at a time, all alike, within 10 minutes half the time and always within 30 - shown over it for the bark's duration with
+// the bark's sound, if it has one (client/augmentations/creature.py Recv_Bark: generated.client.bark lookup[id] = (audio, ms)).
+void ServerWorkspace::drawBarks(CreatureDefinition& d) {
+    ImGui::SeparatorText("Barks (npc_bark)");
+    if (d.barks.empty()) ImGui::TextDisabled("None: it never barks.");
+    int remove = -1;
+    for (size_t k = 0; k < d.barks.size(); ++k) {
+        ImGui::PushID(int(30000 + k));
+        const int32_t bark = d.barks[k];
+        std::string text, sound;
+        int32_t durationMs = -1;
+        if (ctx_.gameData) {
+            try {
+                text = ctx_.gameData->barkText(bark);
+                sound = ctx_.gameData->barkSound(bark, &durationMs);
+            } catch (const std::exception&) {}
+        }
+        if (ImGui::SmallButton("x")) remove = int(k);
+        ImGui::SetItemTooltip("Remove this bark");
+        ImGui::SameLine();
+        if (!sound.empty()) {
+            const bool exists = ctx_.assets && ctx_.assets->exists(sound);
+            if (!exists) ImGui::BeginDisabled();
+            if (cryPlayer_.playing(sound)) {
+                if (ImGui::SmallButton("Stop")) cryPlayer_.stop();
+            } else if (ImGui::SmallButton("Play")) {
+                try {
+                    if (!cryPlayer_.play(sound, ctx_.assets->read(sound))) ctx_.setStatus("Cannot play " + cryPlayer_.error(), true);
+                } catch (const std::exception& e) {
+                    ctx_.setStatus("Cannot play " + sound + ": " + e.what(), true);
+                }
+            }
+            if (!exists) ImGui::EndDisabled();
+            ImGui::SetItemTooltip("%s%s", sound.c_str(), exists ? "" : " (not in the archives)");
+            ImGui::SameLine();
+        }
+        if (durationMs < 0) ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.4f, 1.0f), "%d  (not in the client's bark table: shows nothing)", bark);
+        else ImGui::TextWrapped("%d  %s  (%.1f s%s)", bark, text.empty() ? "(no text)" : text.c_str(), durationMs / 1000.0, sound.empty() ? ", silent" : "");
+        ImGui::PopID();
+    }
+    if (remove >= 0) d.barks.erase(d.barks.begin() + remove);
+    int64_t added = 0;
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 24);
+    if (lookupCombo("Add bark", added, lookup::bark(ctx_, "(pick a bark to add)")) && added != 0 &&
+        std::find(d.barks.begin(), d.barks.end(), int32_t(added)) == d.barks.end()) {
+        d.barks.push_back(int32_t(added));
+        std::sort(d.barks.begin(), d.barks.end());
+    }
+}
+
+// local_teleporter_link (Rasa.NET DynamicObjectManager.LoadLocalTeleporterLinks / LocalTeleporterWorker, development b22b4a4d): a local
+// teleporter (type 1) sends whoever comes within 2 m of it to the local teleporter its row names, on the same map (1 m above it, with
+// its rotation). One row a way. The server drops a row that is not from one local teleporter to a different one on its map.
+void ServerWorkspace::drawLocalTeleporterLink(const Teleporter& t) {
+    ImGui::SeparatorText("Local teleporter link (local_teleporter_link)");
+    const auto& teleporters = serverContent_.teleporters;
+    const auto findTeleporter = [&](int64_t id) -> const Teleporter* {
+        for (const Teleporter& other : teleporters)
+            if (other.id == id) return &other;
+        return nullptr;
+    };
+    auto& links = serverContent_.localTeleporterLinks;
+    const auto linkFrom = [&](int64_t from) -> LocalTeleporterLink* {
+        for (LocalTeleporterLink& l : links)
+            if (l.fromTeleporterId == from) return &l;
+        return nullptr;
+    };
+    if (t.id <= 0) {
+        ImGui::TextDisabled("Save the teleporter before linking it.");
+        return;
+    }
+    LocalTeleporterLink* out = linkFrom(t.id);
+    if (t.type != 1 && !out) {
+        ImGui::TextDisabled("Only local teleporters (type 1) send players by a link.");
+    } else {
+        if (t.type != 1)
+            ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "Not a local teleporter (type 1): the server drops this link.");
+        // The choices: this map's other saved teleporters, local ones first (a link to any other is dropped by the server).
+        auto choices = std::make_shared<std::vector<std::pair<int64_t, std::string>>>();
+        for (int pass = 0; pass < 2; ++pass)
+            for (const Teleporter& other : teleporters) {
+                if (other.id <= 0 || other.id == t.id || (other.type == 1) != (pass == 0)) continue;
+                const double d = std::sqrt(double(other.position.x - t.position.x) * (other.position.x - t.position.x) +
+                                           double(other.position.y - t.position.y) * (other.position.y - t.position.y) +
+                                           double(other.position.z - t.position.z) * (other.position.z - t.position.z));
+                char label[256];
+                std::snprintf(label, sizeof label, "%s  (%.0f m%s)", other.description.empty() ? "(no description)" : other.description.c_str(), d,
+                              other.type == 1 ? "" : ", not a local teleporter");
+                choices->emplace_back(other.id, label);
+            }
+        LookupSource source = lookup::pairs(choices);
+        source.none = "(none: takes nobody anywhere)";
+        int64_t to = out ? out->toTeleporterId : 0;
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 22);
+        if (lookupCombo("Sends players to", to, source)) {
+            noteEdit();
+            if (to == 0)
+                links.erase(std::remove_if(links.begin(), links.end(), [&](const LocalTeleporterLink& l) { return l.fromTeleporterId == t.id; }),
+                            links.end());
+            else if (out)
+                out->toTeleporterId = to;
+            else
+                links.push_back(LocalTeleporterLink{t.id, to});
+            contentChanged();
+            out = linkFrom(t.id);
+        }
+        if (out) {
+            const Teleporter* target = findTeleporter(out->toTeleporterId);
+            if (!target)
+                ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "Teleporter %lld is not on this map: the server drops this link.",
+                                   static_cast<long long>(out->toTeleporterId));
+            else if (target->type != 1)
+                ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "The destination is not a local teleporter (type 1): the server drops this link.");
+            if (target) {
+                if (ImGui::SmallButton("Select the destination")) {
+                    for (size_t k = 0; k < teleporters.size(); ++k)
+                        if (teleporters[k].id == target->id) selection_ = Selection{SelectionKind::Teleporter, k};
+                    viewport_.focusOn(ctx_, selection_);
+                    return;
+                }
+                const LocalTeleporterLink* back = linkFrom(target->id);
+                if (!back || back->toTeleporterId != t.id) {
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton(back ? "Send it back here instead" : "Make it two-way")) {
+                        noteEdit();
+                        if (LocalTeleporterLink* b = linkFrom(target->id)) b->toTeleporterId = t.id;
+                        else links.push_back(LocalTeleporterLink{target->id, t.id});
+                        contentChanged();
+                    }
+                    if (back) ImGui::SetItemTooltip("The destination sends players elsewhere now.");
+                }
+            }
+        }
+    }
+    // Teleporters that send players here.
+    bool any = false;
+    for (const LocalTeleporterLink& l : links) {
+        if (l.toTeleporterId != t.id) continue;
+        if (!any) ImGui::TextUnformatted("Reached from:");
+        any = true;
+        for (size_t k = 0; k < teleporters.size(); ++k) {
+            if (teleporters[k].id != l.fromTeleporterId) continue;
+            ImGui::PushID(int(40000 + k));
+            if (ImGui::Selectable(serverObjectLabel(Selection{SelectionKind::Teleporter, k}).c_str())) {
+                selection_ = Selection{SelectionKind::Teleporter, k};
+                viewport_.focusOn(ctx_, selection_);
+            }
+            ImGui::PopID();
+        }
+    }
+}
+
+// World containers (world_container / world_container_item; Rasa.NET WorldContainers, development b22b4a4d).
+void ServerWorkspace::drawContainerClass(PlacedObject& o) {
+    // Only treasure dispensers (the TREASUREDISPENSER augmentation, 64) can be containers: WorldContainers.WhyNot.
+    auto choices = std::make_shared<std::vector<std::pair<int64_t, std::string>>>();
+    if (database_)
+        for (int32_t c : database_->treasureDispenserClasses()) choices->emplace_back(c, ctx_.classInfo(c).name);
+    LookupSource source = lookup::pairs(choices);
+    source.name = [this](int64_t id) { return ctx_.classInfo(int32_t(id)).name; };
+    int64_t classId = o.classId;
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 22);
+    if (lookupCombo("Class", classId, source)) {
+        noteEdit();
+        o.classId = int32_t(classId);
+        contentChanged();
+    }
+    if (database_ && !database_->classIsTreasureDispenser(o.classId))
+        ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "Not a treasure dispenser (augmentation 64): the server leaves this container out.");
+}
+
+void ServerWorkspace::drawContainer(PlacedObject& o) {
+    ContainerSettings& c = o.container;
+    const float width = ImGui::GetFontSize() * 11;
+    ImGui::SeparatorText("Container");
+    // Loot profile: a loot_profile key (the ordinary loot tables, as creature loot), rolled on top of the fixed items.
+    std::vector<std::string> profiles;
+    if (database_ && database_->hasTable("loot_profile")) {
+        try {
+            const DbTable t = database_->loadTable("loot_profile");
+            const int key = t.column("profile_key");
+            for (const auto& r : t.rows)
+                if (key >= 0) profiles.push_back(r[size_t(key)].t);
+        } catch (const std::exception&) {}
+    }
+    std::sort(profiles.begin(), profiles.end());
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 22);
+    if (ImGui::BeginCombo("Loot profile", c.lootProfileKey.empty() ? "(none: the fixed items alone)" : c.lootProfileKey.c_str())) {
+        if (ImGui::Selectable("(none: the fixed items alone)", c.lootProfileKey.empty())) {
+            noteEdit();
+            c.lootProfileKey.clear();
+            contentChanged();
+        }
+        for (const std::string& p : profiles)
+            if (ImGui::Selectable(p.c_str(), p == c.lootProfileKey)) {
+                noteEdit();
+                c.lootProfileKey = p;
+                contentChanged();
+            }
+        ImGui::EndCombo();
+    }
+    ImGui::SetItemTooltip("Rolled each time it is opened, on top of the fixed items (the Loot panel edits profiles).");
+    if (!c.lootProfileKey.empty() && std::find(profiles.begin(), profiles.end(), c.lootProfileKey) == profiles.end())
+        ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "Profile %s is not in loot_profile: the server leaves this container out.", c.lootProfileKey.c_str());
+    int cipher = int(c.cipherLevel);
+    ImGui::SetNextItemWidth(width);
+    if (ImGui::SliderInt("Cipher level", &cipher, 0, 50, cipher == 0 ? "0 (not locked)" : "%d")) {
+        noteEdit();
+        c.cipherLevel = cipher;
+        contentChanged();
+    }
+    ImGui::SetItemTooltip("The Specialist Tools level a cipher tool needs to open it; 0 = not locked. Over 50 the server leaves it out.");
+    if (c.cipherLevel > 50) ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "Over 50, the highest Specialist Tools goes: the server leaves it out.");
+    long long reset = c.resetSeconds;
+    ImGui::SetNextItemWidth(width);
+    if (ImGui::InputScalar("Reset (s)", ImGuiDataType_S64, &reset)) {
+        noteEdit();
+        c.resetSeconds = std::clamp<long long>(reset, 0, 0xffffffffLL);
+        contentChanged();
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled(c.resetSeconds == 0 ? "(0 = the default, 30 min)" : "(%.1f min)", c.resetSeconds / 60.0);
+    ImGui::SetItemTooltip("How long it stays opened (and empty) to the player or squad that opened it; each has their own copy.");
+    // Fixed items (world_container_item): always given, as many stacks as the quantity takes.
+    ImGui::Text("Fixed items: %zu", c.items.size());
+    int remove = -1;
+    for (size_t k = 0; k < c.items.size(); ++k) {
+        ImGui::PushID(int(50000 + k));
+        ContainerItem& item = c.items[k];
+        if (ImGui::SmallButton("x")) remove = int(k);
+        ImGui::SameLine();
+        int64_t templateId = item.itemTemplateId;
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 18);
+        if (lookupCombo("##template", templateId, lookup::itemTemplate(ctx_, *database_))) {
+            const bool taken = std::any_of(c.items.begin(), c.items.end(), [&](const ContainerItem& x) { return x.itemTemplateId == templateId; });
+            if (taken) ctx_.setStatus("That item is in the container already (one row per template).", true);
+            else {
+                noteEdit();
+                item.itemTemplateId = templateId;
+                contentChanged();
+            }
+        }
+        ImGui::SameLine();
+        long long quantity = item.quantity;
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 5);
+        if (ImGui::InputScalar("x##quantity", ImGuiDataType_S64, &quantity)) {
+            noteEdit();
+            item.quantity = std::clamp<long long>(quantity, 0, 0xffffffffLL);
+            contentChanged();
+        }
+        if (item.quantity == 0) ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "Quantity 0: the server leaves this container out.");
+        else if (database_ && !database_->itemTemplate(int32_t(item.itemTemplateId)))
+            ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "Not an item template: the server leaves this container out.");
+        ImGui::PopID();
+    }
+    if (remove >= 0) {
+        noteEdit();
+        c.items.erase(c.items.begin() + remove);
+        contentChanged();
+    }
+    int64_t added = 0;
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 18);
+    if (lookupCombo("Add item", added, lookup::itemTemplate(ctx_, *database_, "(pick an item template to add)")) && added != 0) {
+        if (std::any_of(c.items.begin(), c.items.end(), [&](const ContainerItem& x) { return x.itemTemplateId == added; }))
+            ctx_.setStatus("That item is in the container already (one row per template).", true);
+        else {
+            noteEdit();
+            c.items.push_back(ContainerItem{added, 1});
+            std::sort(c.items.begin(), c.items.end(), [](const ContainerItem& a, const ContainerItem& b) { return a.itemTemplateId < b.itemTemplateId; });
+            contentChanged();
+        }
+    }
+    if (c.items.empty() && c.lootProfileKey.empty()) ImGui::TextDisabled("Neither items nor a loot profile: it opens empty.");
+}
+
 bool ServerWorkspace::creaturesChanged() const {
     if (classCries_ != classCriesSaved_ || classFlags_ != classFlagsSaved_) return true;
     if (creatureDefs_.size() != creatureDefsSaved_.size()) return true;
@@ -2604,6 +2958,7 @@ void ServerWorkspace::drawCreatureEditor(CreatureDefinition& d, bool isNew) {
     integer("Walk speed", c.walkSpeed);
     if (database_->hasTable("creature_class_flag")) drawClassFlags(d);
     if (database_->hasTable("creature_battlecry")) drawBattlecry(d);
+    if (database_->hasTable("npc_bark")) drawBarks(d);
     ImGui::SeparatorText("Actions (creature_action)");
     const std::vector<CreatureAction>& actions = database_->creatureActions();
     for (int k = 0; k < 8; ++k) {

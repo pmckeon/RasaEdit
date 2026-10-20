@@ -263,6 +263,37 @@ int main() {
             server.selection_ = Selection{SelectionKind::SpawnPool, 0};       // as before (a later check expects the pool selected)
         }
 
+        // World container (world_container / world_container_item, Rasa.NET development b22b4a4d): add one, give it a cipher level and
+        // two items, draw its inspector, save, read back (the id given as the table's largest + 1), delete, save.
+        if (server.database_->hasTable("world_container")) {
+            server.addServerObject(SelectionKind::Object, ObjectKind::WorldContainer);
+            const size_t index = server.selection_.index;
+            PlacedObject& o = server.serverContent_.objects[index];
+            check(server.database_->classIsTreasureDispenser(o.classId), "a new world container gets a treasure dispenser class");
+            o.name = "smoke test container";
+            o.container.cipherLevel = 5;
+            o.container.items = {ContainerItem{13066, 3}, ContainerItem{13096, 1}};
+            server.contentChanged();
+            frames(editor, device, 3);
+            check(server.saveChanges(), "world container saves");
+            const PlacedObject* back = nullptr;
+            const WorldContent reloaded = server.database_->loadMap(server.serverContent_.mapContextId);
+            for (const PlacedObject& r : reloaded.objects)
+                if (r.kind == ObjectKind::WorldContainer && r.name == "smoke test container") back = &r;
+            check(back && back->id > 0 && back->container.cipherLevel == 5 && back->container.items.size() == 2 && back->container.items[0].quantity == 3,
+                  "world container and its items read back");
+            for (size_t k = 0; k < server.serverContent_.objects.size(); ++k)
+                if (server.serverContent_.objects[k].kind == ObjectKind::WorldContainer && server.serverContent_.objects[k].name == "smoke test container")
+                    server.selection_ = Selection{SelectionKind::Object, k};
+            frames(editor, device, 2);
+            server.beginEdit();
+            server.deleteSelected();
+            check(server.saveChanges() && server.database_->loadMap(server.serverContent_.mapContextId).objects.size() == server.serverContent_.objects.size() &&
+                      server.database_->loadTable("world_container_item").rows.empty(),
+                  "world container and its items deleted again");
+            server.selection_ = Selection{SelectionKind::SpawnPool, 0};
+        }
+
         // Control point links: select a control point, draw its inspector (links listed), add a boss link, save, read back, remove it.
         if (server.database_->hasTable("control_point_link")) {
             size_t pointIndex = server.serverContent_.objects.size();
@@ -358,6 +389,28 @@ int main() {
             check(server.saveCreatures() && !server.creaturesChanged(), "creature save succeeds");
             const Creature* saved = server.database_->creature(510203);
             check(saved && saved->level == level + 1, "saved creature level reads back");
+        }
+        // Barks (npc_bark, Rasa.NET development b22b4a4d): McAllister's (852 in the shipped rows) with the client's text; add one, draw, save,
+        // read back, take it away again.
+        for (CreatureDefinition& d : server.creatureDefs_)              // (a save reloads the list)
+            if (d.creature.id == 510203) mcallister = &d;
+        if (server.database_->hasTable("npc_bark") && mcallister) {
+            const std::vector<int32_t> barks = mcallister->barks;
+            check(!barks.empty() && !ctx.gameData->barkText(barks.front()).empty(), "McAllister's barks load with the client's text");
+            mcallister->barks.push_back(22);
+            std::sort(mcallister->barks.begin(), mcallister->barks.end());
+            frames(editor, device, 2);
+            const bool saved = server.creaturesChanged() && server.saveCreatures();
+            bool found = false;
+            for (const CreatureDefinition& d : server.database_->creatureDefinitions())
+                if (d.creature.id == 510203) found = std::find(d.barks.begin(), d.barks.end(), 22) != d.barks.end() && d.barks.size() == barks.size() + 1;
+            check(saved && found, "an added bark saves and reads back");
+            for (CreatureDefinition& d : server.creatureDefs_)
+                if (d.creature.id == 510203) d.barks = barks;
+            check(server.saveCreatures(), "the bark is taken away again");
+            mcallister = nullptr;
+            for (CreatureDefinition& d : server.creatureDefs_)
+                if (d.creature.id == 510203) mcallister = &d;
         }
 
         // Class flags: add one to McAllister's class (KINGDOM_FUNGUS 35, which it does not have), draw, save, read back, remove, save.

@@ -18,6 +18,7 @@ inline const Vec4f ambientNpc{0.75f, 1.0f, 0.65f, 1};          // ambient NPC fi
 inline const Vec4f worldUsable{1.0f, 0.8f, 0.55f, 1};          // world usables: switches, doors, dispensers, blasts (world_usable)
 inline const Vec4f worldDestructible{0.7f, 0.35f, 0.15f, 1};   // world destructibles: barrels, pods, hives, force fields
 inline const Vec4f emitter{1.0f, 0.45f, 0.55f, 1};             // FX emitters (map_emitter): smoke, fire, ambient sound packages
+inline const Vec4f worldContainer{0.95f, 0.7f, 0.25f, 1};       // world containers (world_container): lootable crates, lockers, corpses
 inline const Vec4f arrival{0.8f, 0.15f, 0.2f, 1};              // spawn arrival points (dropship pads, Bane teleporters)
 inline const Vec4f patrol{0.1f, 0.75f, 0.6f, 1};                // spawn pool patrol steps and the circuit between them
 inline const Vec4f mapLink{1.0f, 0.35f, 0.85f, 1};             // map links (enabled)
@@ -43,6 +44,7 @@ inline const Vec4f& ofObject(ObjectKind kind) {
         case ObjectKind::WorldUsable: return worldUsable;
         case ObjectKind::WorldDestructible: return worldDestructible;
         case ObjectKind::Emitter: return emitter;
+        case ObjectKind::WorldContainer: return worldContainer;
         default: return object;
     }
 }

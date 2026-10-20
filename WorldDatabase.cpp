@@ -111,6 +111,7 @@ const char* objectKindName(ObjectKind kind) {
         case ObjectKind::WorldUsable: return "World usable";
         case ObjectKind::WorldDestructible: return "World destructible";
         case ObjectKind::Emitter: return "FX emitter";
+        case ObjectKind::WorldContainer: return "World container";
         default: return "Kraftwerk";
     }
 }
@@ -185,6 +186,7 @@ void WorldDatabase::loadCreatures() {
     vendors_.clear();
     vendorPrices_.clear();
     vendorItems_.clear();
+    barks_.clear();
     itemTemplates_.clear();
     creatureBattlecries_.clear();
     classBattlecries_.clear();
@@ -227,6 +229,10 @@ void WorldDatabase::loadCreatures() {
     if (requireColumns("vendor_item", {"id", "item_template_id"})) {
         Statement s(db_, std::string("SELECT id, item_template_id FROM vendor_item") + (db_->hasRowId() ? " ORDER BY rowid" : ""));
         while (s.step()) vendorItems_[s.int32(0)].push_back(s.int32(1));
+    }
+    if (hasTable("npc_bark") && requireColumns("npc_bark", {"creature_id", "bark_id"})) {
+        Statement s(db_, "SELECT creature_id, bark_id FROM npc_bark ORDER BY creature_id, bark_id");
+        while (s.step()) barks_[s.int32(0)].push_back(s.int32(1));
     }
     if (requireColumns("itemtemplate", {"id", "buy_price"}) && requireColumns("itemtemplate_itemclass", {"itemtemplateid", "itemclassid"})) {
         const bool quality = hasColumn("itemtemplate", "quality_id");
@@ -298,6 +304,7 @@ void WorldDatabase::loadGlobals() {
                 } else if (value >= 0) {
                     if (value == 52) npcClasses_.insert(s.int32(0));
                     if (value == 12) vendorClasses_.insert(s.int32(0));
+                    if (value == 64) treasureDispenserClasses_.insert(s.int32(0));
                     value = -1;
                 }
             }
@@ -388,6 +395,7 @@ bool sameCreatureDefinition(const CreatureDefinition& a, const CreatureDefinitio
     if (a.hasVendor != b.hasVendor || (a.hasVendor && a.vendorPackageId != b.vendorPackageId)) return false;
     if (a.hasVendorPrice != b.hasVendorPrice || (a.hasVendorPrice && a.vendorPrice != b.vendorPrice)) return false;
     if (a.vendorItems != b.vendorItems) return false;
+    if (a.barks != b.barks) return false;
     if (a.hasBattlecry != b.hasBattlecry || (a.hasBattlecry && a.battlecryPackage != b.battlecryPackage)) return false;
     if (a.appearance.size() != b.appearance.size()) return false;
     for (size_t k = 0; k < a.appearance.size(); ++k)
@@ -614,6 +622,7 @@ std::vector<CreatureDefinition> WorldDatabase::creatureDefinitions() const {
         if (const auto it = vendors_.find(c.id); it != vendors_.end()) { d.hasVendor = true; d.vendorPackageId = it->second; }
         if (const auto it = vendorPrices_.find(c.id); it != vendorPrices_.end()) { d.hasVendorPrice = true; d.vendorPrice = it->second; }
         if (const auto it = vendorItems_.find(c.id); it != vendorItems_.end()) d.vendorItems = it->second;
+        if (const auto it = barks_.find(c.id); it != barks_.end()) d.barks = it->second;
         if (const auto it = creatureBattlecries_.find(c.id); it != creatureBattlecries_.end()) { d.hasBattlecry = true; d.battlecryPackage = it->second; }
         out.push_back(std::move(d));
     }
@@ -782,6 +791,21 @@ bool WorldDatabase::saveCreatures(const std::vector<CreatureDefinition>& saved, 
                 }
                 if (b || !d.vendorItems.empty()) ++summary.updated;
             }
+            if (hasTable("npc_bark") && (b ? b->barks != d.barks : !d.barks.empty())) {     // key (creature, bark): replace the set
+                Statement del(db_, "DELETE FROM npc_bark WHERE creature_id = ?1");
+                del.bindInt(1, c.id);
+                del.run(db_);
+                std::vector<int32_t> barks = d.barks;
+                std::sort(barks.begin(), barks.end());
+                barks.erase(std::unique(barks.begin(), barks.end()), barks.end());
+                for (int32_t bark : barks) {
+                    Statement s(db_, "INSERT INTO npc_bark (creature_id, bark_id) VALUES (?1, ?2)");
+                    s.bindInt(1, c.id);
+                    s.bindInt(2, bark);
+                    s.run(db_);
+                }
+                ++summary.updated;
+            }
             // creature_battlecry scope 2 (key: scope, target_id).
             const bool hadCry = b && b->hasBattlecry;
             if (d.hasBattlecry && (!hadCry || b->battlecryPackage != d.battlecryPackage)) {
@@ -925,6 +949,11 @@ WorldContent WorldDatabase::loadMap(int32_t mapContextId) {
         Statement s(db_, "SELECT a.id, a.pose FROM spawnpool_pose a JOIN spawnpool p ON p.id = a.id WHERE p.map_context_id = ?1 ORDER BY a.id");
         s.bindInt(1, mapContextId);
         while (s.step()) content.poses.push_back(PoolPose{s.integer(0), s.int32(1)});
+    }
+    if (!content.spawnPools.empty() && hasTable("spawnpool_draw") && requireColumns("spawnpool_draw", {"id", "count"})) {
+        Statement s(db_, "SELECT a.id, a.count FROM spawnpool_draw a JOIN spawnpool p ON p.id = a.id WHERE p.map_context_id = ?1 ORDER BY a.id");
+        s.bindInt(1, mapContextId);
+        while (s.step()) content.draws.push_back(PoolDraw{s.integer(0), s.int32(1)});
     }
     if (requireColumns("teleporter", {"id", "class_id", "type", "description", "pos_x", "pos_y", "pos_z", "rotation", "map_context_id"})) {
         Statement s(db_, "SELECT id, class_id, type, description, pos_x, pos_y, pos_z, rotation, map_context_id FROM teleporter WHERE map_context_id = ?1 ORDER BY id");
@@ -1080,6 +1109,35 @@ WorldContent WorldDatabase::loadMap(int32_t mapContextId) {
             content.objects.push_back(o);
         }
     }
+    if (hasTable("world_container") &&
+        requireColumns("world_container", {"id", "map_context_id", "class_id", "pos_x", "pos_y", "pos_z", "rotation", "loot_profile_key",
+                                           "cipher_level", "reset_seconds", "comment"})) {
+        Statement s(db_, "SELECT id, class_id, map_context_id, pos_x, pos_y, pos_z, rotation, comment, loot_profile_key, cipher_level, reset_seconds "
+                         "FROM world_container WHERE map_context_id = ?1 ORDER BY id");
+        s.bindInt(1, mapContextId);
+        while (s.step()) {
+            PlacedObject o{ObjectKind::WorldContainer, s.integer(0), s.int32(1), s.int32(2), s.vec3(3), s.real(6), s.text(7)};
+            o.container.lootProfileKey = s.text(8);
+            o.container.cipherLevel = s.integer(9);
+            o.container.resetSeconds = s.integer(10);
+            content.objects.push_back(o);
+        }
+        if (hasTable("world_container_item") && requireColumns("world_container_item", {"container_id", "item_template_id", "quantity"})) {
+            Statement items(db_, "SELECT i.container_id, i.item_template_id, i.quantity FROM world_container_item i JOIN world_container c "
+                                 "ON c.id = i.container_id WHERE c.map_context_id = ?1 ORDER BY i.container_id, i.item_template_id");
+            items.bindInt(1, mapContextId);
+            while (items.step())
+                for (PlacedObject& o : content.objects)
+                    if (o.kind == ObjectKind::WorldContainer && o.id == items.integer(0))
+                        o.container.items.push_back(ContainerItem{items.integer(1), items.integer(2)});
+        }
+    }
+    if (hasTable("local_teleporter_link") && requireColumns("local_teleporter_link", {"from_teleporter_id", "to_teleporter_id"})) {
+        Statement s(db_, "SELECT l.from_teleporter_id, l.to_teleporter_id FROM local_teleporter_link l JOIN teleporter t ON t.id = l.from_teleporter_id "
+                         "WHERE t.map_context_id = ?1 ORDER BY l.from_teleporter_id");
+        s.bindInt(1, mapContextId);
+        while (s.step()) content.localTeleporterLinks.push_back(LocalTeleporterLink{s.integer(0), s.integer(1)});
+    }
     if (hasTable("map_marker") &&
         requireColumns("map_marker", {"marker_entity_id", "map_context_id", "marker_type", "object_kind", "object_id", "match_distance", "comment"})) {
         Statement s(db_, "SELECT marker_entity_id, marker_type, object_kind, object_id, match_distance, comment FROM map_marker WHERE map_context_id = ?1 "
@@ -1159,12 +1217,20 @@ bool same(const UsableSettings& a, const UsableSettings& b) {
 bool same(const DestructibleSettings& a, const DestructibleSettings& b) {
     return a.hitPoints == b.hitPoints && a.creatureId == b.creatureId && a.creatureCount == b.creatureCount && a.side == b.side;
 }
+bool same(const ContainerSettings& a, const ContainerSettings& b) {
+    if (a.lootProfileKey != b.lootProfileKey || a.cipherLevel != b.cipherLevel || a.resetSeconds != b.resetSeconds || a.items.size() != b.items.size())
+        return false;
+    for (size_t k = 0; k < a.items.size(); ++k)
+        if (a.items[k].itemTemplateId != b.items[k].itemTemplateId || a.items[k].quantity != b.items[k].quantity) return false;
+    return true;
+}
 bool same(const PlacedObject& a, const PlacedObject& b) {
     return a.classId == b.classId && sameVec(a.position, b.position) && a.rotation == b.rotation && a.name == b.name &&
            (a.kind != ObjectKind::WorldUsable || same(a.usable, b.usable)) && (a.kind != ObjectKind::WorldDestructible || same(a.destructible, b.destructible)) &&
            (a.kind != ObjectKind::Emitter || (a.emitter.packageId == b.emitter.packageId && a.emitter.isOn == b.emitter.isOn)) &&
            (a.kind != ObjectKind::ControlPoint ||
-            (a.controlPoint.markerEntityId == b.controlPoint.markerEntityId && a.controlPoint.defaultOwner == b.controlPoint.defaultOwner));
+            (a.controlPoint.markerEntityId == b.controlPoint.markerEntityId && a.controlPoint.defaultOwner == b.controlPoint.defaultOwner)) &&
+           (a.kind != ObjectKind::WorldContainer || same(a.container, b.container));
 }
 bool same(const WormholeLock& a, const WormholeLock& b) {
     return a.fromTeleporterId == b.fromTeleporterId && a.toTeleporterId == b.toTeleporterId && a.kind == b.kind && a.value == b.value &&
@@ -1189,6 +1255,7 @@ const char* objectTable(ObjectKind kind) {
         case ObjectKind::WorldUsable: return "world_usable";
         case ObjectKind::WorldDestructible: return "world_destructible";
         case ObjectKind::Emitter: return "map_emitter";
+        case ObjectKind::WorldContainer: return "world_container";
         default: return "kraftwerks";
     }
 }
@@ -1230,7 +1297,7 @@ bool WorldDatabase::save(const WorldContent& saved, const WorldContent& edited, 
         // spawnpool_patrol.pool_id / spawnpool_pose.id = spawnpool.id; no foreign key removes them).
         for (int64_t id : deletedIds(saved.spawnPools, edited.spawnPools)) {
             for (const char* sql : {"DELETE FROM spawnpool_arrival WHERE pool_id = ?1", "DELETE FROM spawnpool_patrol WHERE pool_id = ?1",
-                                    "DELETE FROM spawnpool_pose WHERE id = ?1"}) {
+                                    "DELETE FROM spawnpool_pose WHERE id = ?1", "DELETE FROM spawnpool_draw WHERE id = ?1"}) {
                 const std::string table = std::string(sql).substr(12, std::string(sql).find(' ', 12) - 12);
                 if (!hasTable(table)) continue;               // older worlds lack the patrol / pose tables
                 Statement rows(db_, sql);
@@ -1378,8 +1445,39 @@ bool WorldDatabase::save(const WorldContent& saved, const WorldContent& edited, 
             }
         }
 
-        // Teleporters.
+        // Draw counts, by pool.
+        if (hasTable("spawnpool_draw")) {
+            auto find = [](const std::vector<PoolDraw>& draws, int64_t pool) -> const PoolDraw* {
+                for (const PoolDraw& d : draws)
+                    if (d.poolId == pool) return &d;
+                return nullptr;
+            };
+            for (const PoolDraw& b : saved.draws) {
+                if (find(edited.draws, b.poolId)) continue;
+                Statement s(db_, "DELETE FROM spawnpool_draw WHERE id = ?1");
+                s.bindInt(1, b.poolId);
+                s.run(db_);
+                ++summary.deleted;
+            }
+            for (const PoolDraw& e : edited.draws) {
+                if (e.poolId <= 0) continue;
+                const PoolDraw* before = find(saved.draws, e.poolId);
+                if (before && before->count == e.count) continue;
+                Statement s(db_, before ? "UPDATE spawnpool_draw SET count = ?2 WHERE id = ?1" : "INSERT INTO spawnpool_draw (id, count) VALUES (?1, ?2)");
+                s.bindInt(1, e.poolId);
+                s.bindInt(2, e.count);
+                s.run(db_);
+                ++(before ? summary.updated : summary.inserted);
+            }
+        }
+
+        // Teleporters (a deleted one's local links, from it or to it, go with it).
         for (int64_t id : deletedIds(saved.teleporters, edited.teleporters)) {
+            if (hasTable("local_teleporter_link")) {
+                Statement links(db_, "DELETE FROM local_teleporter_link WHERE from_teleporter_id = ?1 OR to_teleporter_id = ?1");
+                links.bindInt(1, id);
+                links.run(db_);
+            }
             Statement s(db_, "DELETE FROM teleporter WHERE id = ?1");
             s.bindInt(1, id);
             s.run(db_);
@@ -1415,6 +1513,11 @@ bool WorldDatabase::save(const WorldContent& saved, const WorldContent& edited, 
                 Statement links(db_, "DELETE FROM control_point_link WHERE control_point_id = ?1");
                 links.bindInt(1, b.id);
                 links.run(db_);
+            }
+            if (b.kind == ObjectKind::WorldContainer && hasTable("world_container_item")) {
+                Statement items(db_, "DELETE FROM world_container_item WHERE container_id = ?1");
+                items.bindInt(1, b.id);
+                items.run(db_);
             }
             Statement s(db_, std::string("DELETE FROM ") + objectTable(b.kind) + " WHERE id = ?1");
             s.bindInt(1, b.id);
@@ -1454,6 +1557,47 @@ bool WorldDatabase::save(const WorldContent& saved, const WorldContent& edited, 
                 s.bindInt(10, id);
                 s.run(db_);
                 ++(o.id == 0 ? summary.inserted : summary.updated);
+                continue;
+            }
+            if (o.kind == ObjectKind::WorldContainer) {
+                // Columns per Rasa.NET WorldContainerEntry; the id is not generated (largest + 1); the items are replaced as a set.
+                int64_t id = o.id;
+                if (id == 0) {
+                    Statement next(db_, "SELECT COALESCE(MAX(id), 0) + 1 FROM world_container");
+                    if (next.step()) id = next.integer(0);
+                }
+                Statement s(db_, o.id == 0 ? "INSERT INTO world_container (map_context_id, class_id, pos_x, pos_y, pos_z, rotation, loot_profile_key, "
+                                             "cipher_level, reset_seconds, comment, id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
+                                           : "UPDATE world_container SET map_context_id = ?1, class_id = ?2, pos_x = ?3, pos_y = ?4, pos_z = ?5, "
+                                             "rotation = ?6, loot_profile_key = ?7, cipher_level = ?8, reset_seconds = ?9, comment = ?10 WHERE id = ?11");
+                s.bindInt(1, context);
+                s.bindInt(2, o.classId);
+                s.bindReal(3, o.position.x);
+                s.bindReal(4, o.position.y);
+                s.bindReal(5, o.position.z);
+                s.bindReal(6, o.rotation);
+                if (o.container.lootProfileKey.empty()) s.bindNull(7);
+                else s.bindText(7, o.container.lootProfileKey);
+                s.bindInt(8, o.container.cipherLevel);
+                s.bindInt(9, o.container.resetSeconds);
+                if (o.name.empty()) s.bindNull(10);
+                else s.bindText(10, o.name);
+                s.bindInt(11, id);
+                s.run(db_);
+                ++(o.id == 0 ? summary.inserted : summary.updated);
+                if (hasTable("world_container_item") && (!before || before->container.items.size() != o.container.items.size() ||
+                                                         !same(before->container, o.container))) {
+                    Statement clear(db_, "DELETE FROM world_container_item WHERE container_id = ?1");
+                    clear.bindInt(1, id);
+                    clear.run(db_);
+                    for (const ContainerItem& item : o.container.items) {
+                        Statement add(db_, "INSERT INTO world_container_item (container_id, item_template_id, quantity) VALUES (?1, ?2, ?3)");
+                        add.bindInt(1, id);
+                        add.bindInt(2, item.itemTemplateId);
+                        add.bindInt(3, item.quantity);
+                        add.run(db_);
+                    }
+                }
                 continue;
             }
             if (o.kind == ObjectKind::Emitter) {
@@ -1633,6 +1777,33 @@ bool WorldDatabase::save(const WorldContent& saved, const WorldContent& edited, 
                 s.bindInt(3, l.objectId);
                 s.run(db_);
                 ++summary.inserted;
+            }
+        }
+
+        // Local teleporter links, keyed by the teleporter they are from (links to or from a teleporter not saved yet wait for it).
+        if (hasTable("local_teleporter_link")) {
+            const auto find = [](const std::vector<LocalTeleporterLink>& list, int64_t from) -> const LocalTeleporterLink* {
+                for (const LocalTeleporterLink& l : list)
+                    if (l.fromTeleporterId == from) return &l;
+                return nullptr;
+            };
+            for (const LocalTeleporterLink& b : saved.localTeleporterLinks) {
+                if (find(edited.localTeleporterLinks, b.fromTeleporterId)) continue;
+                Statement s(db_, "DELETE FROM local_teleporter_link WHERE from_teleporter_id = ?1");
+                s.bindInt(1, b.fromTeleporterId);
+                s.run(db_);
+                ++summary.deleted;
+            }
+            for (const LocalTeleporterLink& e : edited.localTeleporterLinks) {
+                if (e.fromTeleporterId <= 0 || e.toTeleporterId <= 0) continue;
+                const LocalTeleporterLink* before = find(saved.localTeleporterLinks, e.fromTeleporterId);
+                if (before && before->toTeleporterId == e.toTeleporterId) continue;
+                Statement s(db_, before ? "UPDATE local_teleporter_link SET to_teleporter_id = ?2 WHERE from_teleporter_id = ?1"
+                                        : "INSERT INTO local_teleporter_link (from_teleporter_id, to_teleporter_id) VALUES (?1, ?2)");
+                s.bindInt(1, e.fromTeleporterId);
+                s.bindInt(2, e.toTeleporterId);
+                s.run(db_);
+                ++(before ? summary.updated : summary.inserted);
             }
         }
 

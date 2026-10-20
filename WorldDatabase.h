@@ -96,6 +96,22 @@ struct PoolPose {
     int64_t poolId = 0;
     int32_t pose = 0;
 };
+// spawnpool_draw (Rasa.NET upstream SpawnPoolDrawEntry / SpawnPoolManager.DrawCreatures, development b22b4a4d): a pool that sends
+// `count` creatures at a time, each drawn from its slots at random - a slot's chance its max count over all slots' (slots with no
+// creature, no max count or no loaded creature row are not drawn), 64 at most. A pool without a row sends each slot's own
+// min..max. The server logs a row whose pool is not loaded. count is a byte (1..255; 0 = no draw).
+struct PoolDraw {
+    int64_t poolId = 0;
+    int32_t count = 0;
+};
+// local_teleporter_link (Rasa.NET upstream LocalTeleporterLinkEntry / DynamicObjectManager.LoadLocalTeleporterLinks): where a local
+// teleporter (a teleporter row of type 1) sends whoever steps within 2 m of it - another local teleporter on the same map, arriving
+// 1 m above it with its rotation. One row a way (key: from). The server drops a row that is not from one local teleporter to a
+// different one on the same map; a local teleporter without a row takes nobody anywhere.
+struct LocalTeleporterLink {
+    int64_t fromTeleporterId = 0;
+    int64_t toTeleporterId = 0;
+};
 
 struct Creature {
     int32_t id = 0;
@@ -216,7 +232,7 @@ struct MissionArea {
 // Emitter: map_emitter (Rasa.NET MapEmitterEntry / EmitterManager): an FX package played at a spot - an FXPackageEmitter entity
 // (class 2873, kEmitterClassId; the table has no class column) whose client body is particle_proxy.geo (no pieces) and which
 // attaches the package while it is on (client/augmentations/fxpackageemitter.py: body.AttachFXPackage(stringtable[package])).
-enum class ObjectKind : uint8_t { Logos, ControlPoint, Footlocker, Kraftwerk, AmbientNpc, WorldUsable, WorldDestructible, Emitter };
+enum class ObjectKind : uint8_t { Logos, ControlPoint, Footlocker, Kraftwerk, AmbientNpc, WorldUsable, WorldDestructible, Emitter, WorldContainer };
 constexpr int32_t kEmitterClassId = 2873;
 const char* objectKindName(ObjectKind kind);
 
@@ -259,6 +275,25 @@ struct EmitterSettings {
     bool isOn = true;                    // plays from when the map loads (else placed but off until turned on)
 };
 
+// world_container columns (Rasa.NET upstream WorldContainerEntry / Managers.WorldContainers, development b22b4a4d): a lootable
+// container - a class with the client's TREASUREDISPENSER augmentation (64), placed in USE_TD_STATE_CLOSED (200). Opening it gives
+// its fixed items (world_container_item: as many stacks as the quantity takes) and a roll of its loot profile (a loot_profile key;
+// NULL / blank: none). cipher_level 0..50: the Specialist Tools level a cipher needs (0 = not locked); reset_seconds: how long it
+// stays opened to those who opened it (0 = 1800). The server leaves out (logs) a row whose class is not a treasure dispenser, whose
+// profile is not in the loot tables, an item that is no item or has quantity 0, or a cipher level over 50. The id is given, not
+// generated (the editor gives a new container the table's largest id + 1). comment varchar(200), NULL when empty.
+struct ContainerItem {
+    int64_t itemTemplateId = 0;
+    int64_t quantity = 1;
+};
+struct ContainerSettings {
+    std::string lootProfileKey;          // "" = NULL
+    int64_t cipherLevel = 0;
+    int64_t resetSeconds = 0;
+    std::vector<ContainerItem> items;    // world_container_item rows, by template (the key is (container, template))
+};
+constexpr int32_t kContainerClosedState = 200;   // UseObjectState.TdStateClosed
+
 struct PlacedObject {
     ObjectKind kind = ObjectKind::Logos;
     int64_t id = 0;
@@ -271,6 +306,7 @@ struct PlacedObject {
     DestructibleSettings destructible;   // WorldDestructible only
     EmitterSettings emitter;             // Emitter only
     ControlPointSettings controlPoint;   // ControlPoint only
+    ContainerSettings container;         // WorldContainer only
 };
 
 // wormhole_lock (Rasa.NET upstream WormholeLockEntry, Managers.Wormholes): a condition on travelling between world wormholes
@@ -317,6 +353,10 @@ struct CreatureDefinition {
     // (scope 1, kept apart: WorldDatabase::classBattlecries). Rasa.NET Battlecries.PackageOf.
     bool hasBattlecry = false;
     int32_t battlecryPackage = 0;
+    // npc_bark (Rasa.NET upstream NpcBarkEntry / Managers.NpcBarks, development b22b4a4d): the client's barks
+    // (generated.client.bark / barklanguage) this creature row says now and then - one of them, all alike, at a time drawn within
+    // 10 minutes on half the draws and 10 - 30 minutes on the other, to everyone around. None: it never barks. Key (creature, bark).
+    std::vector<int32_t> barks;                      // bark ids, ascending
 };
 
 struct ItemTemplateInfo {                            // itemtemplate + itemtemplate_itemclass (read-only)
@@ -360,6 +400,7 @@ struct WorldContent {
     std::vector<SpawnArrival> arrivals;  // of those pools
     std::vector<PatrolStep> patrolSteps; // of those pools, sorted by pool then step (empty on worlds without the table)
     std::vector<PoolPose> poses;         // of those pools
+    std::vector<PoolDraw> draws;         // of those pools (empty on worlds without spawnpool_draw)
     std::vector<Teleporter> teleporters;
     std::vector<MapLink> mapLinks;
     std::vector<MapRegion> regions;
@@ -368,6 +409,7 @@ struct WorldContent {
     std::vector<WormholeLock> wormholeLocks;   // all rows (empty on worlds without the table)
     std::vector<ControlPointLink> controlPointLinks;   // of this map's control points (empty on worlds without the table)
     std::vector<MapMarkerBinding> mapMarkers;          // map_marker rows of this map (empty on worlds without the table)
+    std::vector<LocalTeleporterLink> localTeleporterLinks;   // rows from this map's teleporters (empty on worlds without the table)
 };
 
 // A database value as SQLite stores it (dynamic typing kept), for tables edited generically (missions).
@@ -421,6 +463,9 @@ public:
     // From entityclass.aug_list: augmentation 52 = NPC, 12 = vendor.
     bool classIsNpc(int32_t classId) const { return npcClasses_.count(classId) != 0; }
     bool classIsVendor(int32_t classId) const { return vendorClasses_.count(classId) != 0; }
+    // entityclass rows with the TREASUREDISPENSER augmentation (64): what Rasa.NET WorldContainers.WhyNot accepts as a container.
+    bool classIsTreasureDispenser(int32_t classId) const { return treasureDispenserClasses_.count(classId) != 0; }
+    const std::set<int32_t>& treasureDispenserClasses() const { return treasureDispenserClasses_; }
 
     WorldContent loadMap(int32_t mapContextId);
 
@@ -493,6 +538,7 @@ private:
     std::unordered_map<int32_t, int32_t> vendors_;                           // creature id -> vendor package id
     std::unordered_map<int32_t, int32_t> vendorPrices_;
     std::unordered_map<int32_t, std::vector<int32_t>> vendorItems_;
+    std::unordered_map<int32_t, std::vector<int32_t>> barks_;               // npc_bark: creature id -> bark ids, ascending
     std::unordered_map<int32_t, ItemTemplateInfo> itemTemplates_;
     std::unordered_map<int32_t, int32_t> creatureBattlecries_;              // creature_battlecry scope 2: creature id -> package
     std::map<int32_t, int32_t> classBattlecries_;                            // scope 1: class id -> package
@@ -500,4 +546,5 @@ private:
     std::vector<CreatureAction> actions_;
     std::unordered_set<int32_t> npcClasses_;
     std::unordered_set<int32_t> vendorClasses_;
+    std::set<int32_t> treasureDispenserClasses_;
 };

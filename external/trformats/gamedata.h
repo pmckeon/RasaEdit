@@ -317,6 +317,11 @@ public:
     // An NPC greeting line: generated.client.language.english.npcgreetinglanguage lookup[(id, gender)][0] (a gender module:
     // clientlanguagemanager.py BuildModuleText; gender 1 = male, 2 = female). "" if none.
     std::string npcGreeting(int32_t greetingId, int32_t gender = 1);
+    // A bark (client/augmentations/creature.py Recv_Bark): generated.client.language.english.barklanguage lookup[(id, gender)][0], a
+    // gender module. "" if none. barkSound: generated.client.bark lookup[id] = (audio string id or None, duration ms) - the sound file
+    // it plays on the NPC (stringtable), "" for none; durationMs -1 when the bark is not in the table (the client then shows nothing).
+    std::string barkText(int32_t barkId, int32_t gender = 1);
+    std::string barkSound(int32_t barkId, int32_t* durationMs = nullptr);
     // Mission text (mission and objective names, bodies, counters): generated.client.language.english.missiontextlanguage
     // lookup[(id, gender)][0], a gender module like npcgreetinglanguage. "" if none.
     std::string missionText(int32_t textId, int32_t gender = 1);

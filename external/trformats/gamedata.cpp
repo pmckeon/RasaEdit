@@ -1683,6 +1683,19 @@ std::string GameData::npcGreeting(int32_t greetingId, int32_t gender) {
     return line && py::isString(line) ? py::asString(line) : "";
 }
 
+std::string GameData::barkText(int32_t barkId, int32_t gender) {
+    const py::Object* lines = py::dictGetTuple(global("generated.client.language.english.barklanguage", "lookup"), {barkId, gender});
+    const py::Object* line = py::length(lines) > 0 ? py::item(lines, 0) : nullptr;
+    return line && py::isString(line) ? py::asString(line) : "";
+}
+
+std::string GameData::barkSound(int32_t barkId, int32_t* durationMs) {
+    const py::Object* entry = py::dictGet(global("generated.client.bark", "lookup"), barkId);
+    if (durationMs) *durationMs = py::length(entry) > 1 && py::isInt(py::item(entry, 1)) ? int32_t(py::asInt(py::item(entry, 1))) : -1;
+    const py::Object* audio = py::length(entry) > 0 ? py::item(entry, 0) : nullptr;
+    return audio && py::isInt(audio) ? stringById(int32_t(py::asInt(audio))) : "";
+}
+
 std::vector<SwapsetPart> GameData::itemSwapsetParts(int32_t itemClassId, int32_t baseMeshId) {
     std::vector<SwapsetPart> parts;
     const py::Object* list = py::dictGetTuple(global("generated.client.equipmentdata", "equipableClassMeshSwapset"), {itemClassId, baseMeshId});

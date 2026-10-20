@@ -41,6 +41,7 @@ void drawMarkerLegend() {
     row(markerColour::worldUsable, "World usable (switch, door, dispenser, blast)");
     row(markerColour::worldDestructible, "World destructible (barrel, pod, hive, force field)");
     row(markerColour::emitter, "FX emitter (a package played at a spot)");
+    row(markerColour::worldContainer, "World container (lootable crate, locker, corpse)");
     row(markerColour::arrival, "Spawn arrival (dropship pad / Bane teleporter), line to its pool");
     row(markerColour::patrol, "Patrol step, lines along the pool's circuit");
     row(markerColour::mapLink, "Map link");

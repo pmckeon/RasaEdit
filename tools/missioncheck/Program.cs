@@ -85,7 +85,9 @@ namespace Harness
                 NpcPackages = new NpcPackageRepository(context);
                 Teleporters = new TeleporterRepository(context);
                 Spawnpools = new SpawnpoolRepository(context);
+                ItemModules = new ItemModuleRepository(context);     // the validator reads module data since development b22b4a4d
             }
+            public IItemModuleRepository ItemModules { get; }
             public IActionRepository Actions { get; }
             public IEquipmentRepository Equipment { get; }
             public ICreatureRepository Creatures { get; }

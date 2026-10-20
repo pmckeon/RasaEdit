@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -42,12 +43,14 @@ LookupSource npcPackage(const WorldDatabase& database, const char* none = nullpt
 LookupSource missionText(EditorContext& ctx, const char* none = nullptr);                     // missiontextlanguage
 LookupSource creatureName(EditorContext& ctx, const char* none = nullptr);                    // creaturenamelanguage
 LookupSource npcGreeting(EditorContext& ctx, const char* none = nullptr);                     // npcgreetinglanguage
+LookupSource bark(EditorContext& ctx, const char* none = nullptr);                            // barklanguage
 LookupSource vendorPackage(EditorContext& ctx, const char* none = nullptr);                   // vendordata.vendorpackages, by type
 LookupSource audioSet(EditorContext& ctx, const char* none = nullptr);                        // audiosetdata.audioSet
 LookupSource missionCategory(EditorContext& ctx, const char* none = nullptr);                 // missioncategorylanguage
 // A client constants module, e.g. generated.client.tutorialdata, generated.client.skilldata, generated.client.usabledata.
 LookupSource constants(EditorContext& ctx, const char* module, const char* none = nullptr);
 LookupSource values(const EnumValues& values, const char* none = nullptr);                    // a fixed enum
+LookupSource pairs(std::shared_ptr<std::vector<std::pair<int64_t, std::string>>> choices);   // (id, label) pairs worked out by the caller
 
 // Rasa.NET enums.
 extern const EnumValues kWaypointTypes;          // Rasa.Game/Data/WaypointType.cs (teleporter.type)

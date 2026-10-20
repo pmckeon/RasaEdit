@@ -2032,6 +2032,114 @@ int main(int argc, char** argv) {
                 scene.setServerContent(&content, database.get(), [&](int32_t id) { return data.classMeshName(id); },
                                        [&](const Creature& c) { return resolveAvatar(data, *database, c); });
             }
+            // RASA_SAVETEST with the tables of Rasa.NET development b22b4a4d (spawnpool_draw, local_teleporter_link, world_container /
+            // world_container_item): change or add a pool's draw count, drop the first local link and repoint the second, add a container
+            // with two items; save, reload and compare; then change the container (an item's quantity, one item removed, a loot profile);
+            // save, reload, compare; and restore everything.
+            if (envValue("RASA_SAVETEST") && database->hasTable("world_container") && database->hasTable("spawnpool_draw") &&
+                database->hasTable("local_teleporter_link")) {
+                const WorldContent original = content;
+                WorldContent edited = content;
+                bool drawChanged = false;
+                if (!edited.draws.empty()) {
+                    edited.draws.front().count += 1;
+                    drawChanged = true;
+                } else {
+                    for (const SpawnPool& p : edited.spawnPools)
+                        if (p.id > 0) { edited.draws.push_back(PoolDraw{p.id, 4}); drawChanged = true; break; }
+                }
+                if (edited.localTeleporterLinks.size() >= 2) {
+                    const int64_t to = edited.localTeleporterLinks.front().toTeleporterId;
+                    edited.localTeleporterLinks.erase(edited.localTeleporterLinks.begin());
+                    if (edited.localTeleporterLinks.front().fromTeleporterId != to) edited.localTeleporterLinks.front().toTeleporterId = to;
+                }
+                PlacedObject container;
+                container.kind = ObjectKind::WorldContainer;
+                container.classId = database->treasureDispenserClasses().empty() ? 7861 : *database->treasureDispenserClasses().begin();
+                container.mapContextId = content.mapContextId;
+                container.position = tr::Vec3{11, 12, 13};
+                container.rotation = 0.75f;
+                container.name = "save test container";
+                container.container.cipherLevel = 12;
+                container.container.resetSeconds = 600;
+                container.container.items = {ContainerItem{13066, 2}, ContainerItem{13096, 1}};
+                edited.objects.push_back(container);
+                WorldDatabase::SaveSummary summary;
+                std::string error;
+                const bool saved = database->save(original, edited, summary, error);
+                WorldContent reloaded = database->loadMap(content.mapContextId);
+                const auto sameDraws = [](std::vector<PoolDraw> a, std::vector<PoolDraw> b) {
+                    const auto by = [](const PoolDraw& x, const PoolDraw& y) { return x.poolId < y.poolId; };
+                    std::sort(a.begin(), a.end(), by);
+                    std::sort(b.begin(), b.end(), by);
+                    if (a.size() != b.size()) return false;
+                    for (size_t k = 0; k < a.size(); ++k)
+                        if (a[k].poolId != b[k].poolId || a[k].count != b[k].count) return false;
+                    return true;
+                };
+                const auto sameLinks = [](std::vector<LocalTeleporterLink> a, std::vector<LocalTeleporterLink> b) {
+                    const auto by = [](const LocalTeleporterLink& x, const LocalTeleporterLink& y) { return x.fromTeleporterId < y.fromTeleporterId; };
+                    std::sort(a.begin(), a.end(), by);
+                    std::sort(b.begin(), b.end(), by);
+                    if (a.size() != b.size()) return false;
+                    for (size_t k = 0; k < a.size(); ++k)
+                        if (a[k].fromTeleporterId != b[k].fromTeleporterId || a[k].toTeleporterId != b[k].toTeleporterId) return false;
+                    return true;
+                };
+                const auto findContainer = [](const WorldContent& w) -> const PlacedObject* {
+                    for (const PlacedObject& o : w.objects)
+                        if (o.kind == ObjectKind::WorldContainer && o.name == "save test container") return &o;
+                    return nullptr;
+                };
+                int64_t largest = 0;
+                for (const PlacedObject& o : original.objects)
+                    if (o.kind == ObjectKind::WorldContainer) largest = std::max(largest, o.id);
+                const PlacedObject* r = findContainer(reloaded);
+                const bool containerOk = r && r->classId == container.classId && r->container.cipherLevel == 12 && r->container.resetSeconds == 600 &&
+                                         r->container.lootProfileKey.empty() && r->container.items.size() == 2 && r->container.items[0].itemTemplateId == 13066 &&
+                                         r->container.items[0].quantity == 2 && r->container.items[1].itemTemplateId == 13096 && std::fabs(r->rotation - 0.75f) < 1e-4f &&
+                                         std::fabs(r->position.z - 13.0f) < 1e-4f && r->id > 0;
+                std::printf("b22b4a4d save test: saved %d (%d added, %d changed, %d deleted%s%s), draws %s%s, local links %s (%zu -> %zu), container %s (id %lld)\n",
+                            saved, summary.inserted, summary.updated, summary.deleted, error.empty() ? "" : ": ", error.c_str(),
+                            sameDraws(edited.draws, reloaded.draws) ? "match" : "DIFFER", drawChanged ? "" : " (none to change)",
+                            sameLinks(edited.localTeleporterLinks, reloaded.localTeleporterLinks) ? "match" : "DIFFER", original.localTeleporterLinks.size(),
+                            reloaded.localTeleporterLinks.size(), containerOk ? "ok" : "FAILED", r ? static_cast<long long>(r->id) : -1LL);
+                // Second save: the container changed (quantity, an item removed, a loot profile when the world has one).
+                WorldContent second = reloaded;
+                std::string profile;
+                if (database->hasTable("loot_profile")) {
+                    const DbTable profiles = database->loadTable("loot_profile");
+                    if (!profiles.rows.empty() && profiles.column("profile_key") >= 0) profile = profiles.rows.front()[size_t(profiles.column("profile_key"))].t;
+                }
+                for (PlacedObject& o : second.objects)
+                    if (o.kind == ObjectKind::WorldContainer && o.name == "save test container") {
+                        o.container.items.front().quantity = 7;
+                        o.container.items.pop_back();
+                        o.container.lootProfileKey = profile;
+                    }
+                const bool saved2 = database->save(reloaded, second, summary, error);
+                const WorldContent reloaded2 = database->loadMap(content.mapContextId);
+                const PlacedObject* r2 = findContainer(reloaded2);
+                const bool changedOk = r2 && r && r2->id == r->id && r2->container.items.size() == 1 && r2->container.items[0].quantity == 7 &&
+                                       r2->container.lootProfileKey == profile;
+                std::printf("b22b4a4d save test 2: saved %d (%d changed%s%s), container change %s (profile \"%s\"), id given %s (largest before %lld)\n", saved2,
+                            summary.updated, error.empty() ? "" : ": ", error.c_str(), changedOk ? "ok" : "FAILED", profile.c_str(),
+                            r && r->id == largest + 1 ? "largest + 1" : "NOT largest + 1", static_cast<long long>(largest));
+                const bool restored = database->save(reloaded2, original, summary, error);
+                const WorldContent back = database->loadMap(content.mapContextId);
+                size_t containerItems = 0;
+                if (database->hasTable("world_container_item")) {
+                    const DbTable items = database->loadTable("world_container_item");
+                    containerItems = items.rows.size();
+                }
+                std::printf("b22b4a4d save test restore: %d (%d deleted%s%s), draws %s, local links %s, container %s, world_container_item rows %zu\n", restored,
+                            summary.deleted, error.empty() ? "" : ": ", error.c_str(), sameDraws(original.draws, back.draws) ? "original back" : "NOT RESTORED",
+                            sameLinks(original.localTeleporterLinks, back.localTeleporterLinks) ? "original back" : "NOT RESTORED",
+                            findContainer(back) ? "STILL THERE" : "gone", containerItems);
+                content = back;
+                scene.setServerContent(&content, database.get(), [&](int32_t id) { return data.classMeshName(id); },
+                                       [&](const Creature& c) { return resolveAvatar(data, *database, c); });
+            }
             // RASA_MARKERS=1: the client's map-screen markers of this map (uimapmarker.factionedmarkers) and their map_marker bindings, with
             // the distance from the marker to the bound object recomputed against the stored match_distance.
             if (envValue("RASA_MARKERS")) {
@@ -2199,12 +2307,15 @@ int main(int argc, char** argv) {
                     target->creature.action8 = database->creatureActions().empty() ? 0 : database->creatureActions().front().id;
                     target->hasStat = false;
                     target->appearance.front().colour = 0xff112233;
+                    const bool barkTable = database->hasTable("npc_bark");
+                    if (barkTable) target->barks = {22, 94};                   // npc_bark (development b22b4a4d)
                     const int32_t expectLevel = target->creature.level, expectAction8 = target->creature.action8;
                     CreatureDefinition added = *target;
                     added.creature.id = edited.back().creature.id + 1;
                     added.creature.comment = "save test creature";
                     added.hasStat = true;
                     added.stat = CreatureStat{1, 2, 3, 4, 5};
+                    if (barkTable) added.barks = {852};
                     edited.push_back(added);
                     WorldDatabase::SaveSummary summary;
                     std::string error;
@@ -2216,6 +2327,16 @@ int main(int argc, char** argv) {
                                     !database->appearance(id).empty() && database->appearance(id).front().colour == 0xff112233u && n &&
                                     n->comment == "save test creature" && ns && ns->armor == 5 &&
                                     database->appearance(added.creature.id).size() == added.appearance.size();
+                    bool barksOk = !barkTable;
+                    if (barkTable) {
+                        bool targetOk = false, addedOk = false;
+                        for (const CreatureDefinition& d : database->creatureDefinitions()) {
+                            if (d.creature.id == id) targetOk = d.barks == std::vector<int32_t>{22, 94};
+                            if (d.creature.id == added.creature.id) addedOk = d.barks == std::vector<int32_t>{852};
+                        }
+                        barksOk = targetOk && addedOk;
+                        std::printf("creature save test: barks %s\n", barksOk ? "match" : "DIFFER");
+                    }
                     std::printf("creature save test: saved %d (%d added, %d changed, %d deleted%s%s), checks %s\n", saved, summary.inserted,
                                 summary.updated, summary.deleted, error.empty() ? "" : ": ", error.c_str(), ok ? "passed" : "FAILED");
                 }

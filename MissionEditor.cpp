@@ -129,7 +129,9 @@ const std::vector<MissionEditor::TableSpec> kSpecs = {
      {F{"requirement", "Requirement", K::Enum, &kRequirement}, F{"experience", "Experience", K::Int}, F{"credits", "Credits", K::Int},
       F{"prestige", "Prestige", K::Int}, F{"selection_count", "Selection count", K::Int}, F{"comment", "Comment", K::Text}}},
     {"mission_reward_item", "Items", "mission_reward_definition", "item_id", nullptr,
-     {F{"kind", "Kind", K::Enum, &kRewardItem}, F{"item_template_id", "Item template", K::ItemTemplate}, F{"quantity", "Quantity", K::Int}}},
+     {F{"kind", "Kind", K::Enum, &kRewardItem}, F{"item_template_id", "Item template", K::ItemTemplate}, F{"quantity", "Quantity", K::Int},
+      // Rasa.NET MissionRewardItemEntry (development b22b4a4d): module_class ids the item is given with, 0 = an empty slot.
+      F{"module_1", "Module 1", K::Int}, F{"module_2", "Module 2", K::Int}, F{"module_3", "Module 3", K::Int}, F{"module_4", "Module 4", K::Int}}},
     {"mission_spawn_group", "Spawn groups", "mission_content_definition", "spawn_group_id", nullptr,
      {F{"requirement", "Requirement", K::Enum, &kRequirement}, F{"map_context_id", "Map", K::MapContext}, F{"area_id", "Area", K::Int},
       F{"enabled", "Enabled", K::Bool}, F{"respawn_seconds", "Respawn (s)", K::Int}, F{"spawn_policy", "Policy", K::Enum, &kSpawnPolicy},
@@ -206,6 +208,13 @@ void MissionEditor::load(const WorldDatabase& database) {
     references_ = MissionReferences::load(database);
     placeholderTextId_ = -1;
     teleporters_.clear();
+    modules_.clear();
+    if (database.hasTable("module_class")) {
+        const DbTable mc = database.loadTable("module_class");
+        const int id = mc.column("id"), comment = mc.column("comment");
+        for (const auto& r : mc.rows)
+            if (id >= 0) modules_.emplace_back(r[size_t(id)].asInt(), comment >= 0 ? r[size_t(comment)].t : std::string());
+    }
     if (database.hasTable("teleporter")) {
         const DbTable tp = database.loadTable("teleporter");
         const int id = tp.column("id"), description = tp.column("description"), map = tp.column("map_context_id");
@@ -279,6 +288,7 @@ const MissionValidationResult& MissionEditor::validation() {
 void MissionEditor::clear() {
     tables_.clear();
     teleporters_.clear();
+    modules_.clear();
     selectedMission_ = -1;
 }
 
@@ -1037,6 +1047,9 @@ bool MissionEditor::drawRowFields(EditorContext& ctx, const WorldDatabase& datab
                     source = lookup::entityClass(ctx);
                 } else if (f.kind == FieldKind::MapContext) {
                     source = lookup::map(database);
+                } else if (std::strncmp(f.column, "module_", 7) == 0) {
+                    source = pairsSource(std::make_shared<std::vector<std::pair<int64_t, std::string>>>(modules_));   // module_class
+                    source.none = "(empty)";
                 } else if (std::strcmp(f.column, "npc_package_id") == 0) {
                     source = lookup::npcPackage(database);
                     source.allowOther = true;

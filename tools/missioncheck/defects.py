@@ -86,5 +86,22 @@ defect('indicator radius 0', f'select objective_id, indicator_id from mission_in
        lambda m, r, row: c.execute(f'update mission_indicator set radius=0 where {K} and objective_id=?3 and indicator_id=?4', (m, r, *row)))
 defect('timer duration 0', f'select objective_id, transition_id, trigger_id from mission_trigger where {K} and kind=5',
        lambda m, r, row: c.execute(f'update mission_trigger set duration_seconds=0 where {K} and objective_id=?3 and transition_id=?4 and trigger_id=?5', (m, r, *row)))
+# Reward item modules (MissionContentValidator.ValidateRewardModules, development b22b4a4d; worlds with module_1..module_4 only).
+if any(col[1] == 'module_1' for col in c.execute('pragma table_info(mission_reward_item)')):
+    MODIFIABLE = (f'select i.reward_id, i.item_id, m.class_set_id from mission_reward_item i join itemtemplate_itemclass t on t.itemTemplateId=i.item_template_id '
+                  f'join modifiable_class m on m.id=t.itemClassId where i.{K.replace(" and ", " and i.")} and m.class_set_id=212')
+    def modules(m, r, row, ids):
+        c.execute(f'update mission_reward_item set module_1=?5, module_2=?6, module_3=?7, module_4=?8 where {K} and reward_id=?3 and item_id=?4',
+                  (m, r, row[0], row[1], *ids))
+    armor = [row[0] for row in c.execute('select id from module_class where class_set_id=212 and variant_id=4 order by id limit 2')]
+    weapon = c.execute('select id from module_class where class_set_id<>212 and class_set_id<>0 order by id limit 1').fetchone()[0]
+    defect('reward module slot gap', MODIFIABLE, lambda m, r, row: modules(m, r, row, (0, armor[0], 0, 0)))
+    defect('reward module missing', MODIFIABLE, lambda m, r, row: modules(m, r, row, (999999, 0, 0, 0)))
+    defect('reward module wrong kind', MODIFIABLE, lambda m, r, row: modules(m, r, row, (weapon, 0, 0, 0)))
+    defect('reward module duplicate variant', MODIFIABLE, lambda m, r, row: modules(m, r, row, (armor[0], armor[1], 0, 0)))
+    defect('reward item takes no modules',
+           f'select i.reward_id, i.item_id from mission_reward_item i join itemtemplate_itemclass t on t.itemTemplateId=i.item_template_id '
+           f'where i.{K.replace(" and ", " and i.")} and t.itemClassId not in (select id from modifiable_class)',
+           lambda m, r, row: modules(m, r, row, (armor[0], 0, 0, 0)))
 c.commit()
 for name, m in applied: print(f'{m:6d} {name}')

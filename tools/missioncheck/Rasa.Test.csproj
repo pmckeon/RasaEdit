@@ -5,8 +5,8 @@
          copy Rasa.Game\bin\Debug\net10.0\* (recursively) to a folder F, and runtimes\win-x64\native\e_sqlite3.dll into F
          dotnet build tools/missioncheck -p:RasaBin=F\
          dotnet F\Rasa.Test.dll <World database path without ".db">
-         dotnet F\Rasa.Test.dll --schema <out.json>          (the scene documents' JSON contract, for make_scene_schema.py)
-         dotnet F\Rasa.Test.dll --read <scene|experience> <file>   (one document per line: "ok" or the exception) -->
+         dotnet F\Rasa.Test.dll [dash-dash]schema <out.json>          (the scene documents' JSON contract, for make_scene_schema.py)
+         dotnet F\Rasa.Test.dll [dash-dash]read <scene|experience> <file>   (one document per line: "ok" or the exception) -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0</TargetFramework>

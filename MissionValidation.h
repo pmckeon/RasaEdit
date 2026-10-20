@@ -49,6 +49,8 @@ struct MissionReferences {
     std::set<int64_t> spawnPoolIds;                  // spawnpool.id (scene public spawns)
     std::set<int64_t> itemTemplateIds;               // itemtemplate.id
     std::map<int64_t, int64_t> itemClassStackSizes;  // itemclass: id -> stack_size
+    std::map<int64_t, std::pair<int64_t, int64_t>> moduleClasses;  // module_class: id -> (variant_id, class_set_id); first row of an id
+    std::map<int64_t, int64_t> modifiableClasses;    // modifiable_class: item class -> class_set_id
     struct Experience {                              // enabled mission_experience_binding rows (read-only in the editor)
         std::string key;
         int64_t mapContextId = 0;

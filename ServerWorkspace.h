@@ -176,6 +176,10 @@ private:
     std::vector<CreatureDefinition> creatureDefsSaved_;
     std::map<int32_t, int32_t> classCries_, classCriesSaved_;     // creature_battlecry scope 1 (class id -> package)
     void drawBattlecry(CreatureDefinition& d);
+    void drawBarks(CreatureDefinition& d);
+    void drawLocalTeleporterLink(const Teleporter& t);
+    void drawContainerClass(PlacedObject& o);
+    void drawContainer(PlacedObject& o);
     std::map<int32_t, std::set<int32_t>> classFlags_, classFlagsSaved_;   // creature_class_flag (class id -> flag ids)
     std::vector<std::pair<int32_t, std::string>> creatureFlagNames_;      // generated.client.constant.creatureflag (value, name)
     void drawClassFlags(const CreatureDefinition& d);
