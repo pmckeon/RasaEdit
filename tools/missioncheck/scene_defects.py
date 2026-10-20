@@ -163,7 +163,40 @@ def radio_target_inactive(c):      # the mission a scene offers by radio becomes
     c.execute('update mission_channel_policy set acceptance_channel=1 where mission_id=701 and content_revision=?', (enabled_revision(c, 701),))
 
 
-cases = [item_drop_objective, action_intent_kind, radio_target_inactive, no_scene_scenario, shareable_scripted, public_spawn_missing, dialogue_branch, radio_offer, radio_requirement, experience_trigger,
+# The document itself unreadable by the server's deserialiser (MissionContentLoader / the catalog: System.Text.Json with
+# MissionContentCodec.Options) - MissionValidation.cpp missionSceneReadError.
+def scene_unmapped_member(c):      # a member the codec cannot map (unmapped members are disallowed)
+    edit_document(c, 1994, lambda d: d.update(scriptVersion=1))
+
+
+def scene_required_member(c):      # a mission item binding without its [JsonRequired] scope
+    edit_document(c, 479, lambda d: d['items'][0].pop('scope'))
+
+
+def scene_discriminator(c):        # a requirement whose "$kind" is not its first member
+    def change(d):
+        r = d['requirement']
+        d['requirement'] = {k: v for k, v in r.items() if k != '$kind'}
+        d['requirement']['$kind'] = r['$kind']
+    edit_document(c, 1392, change)
+
+
+def scene_value_type(c):           # a credit policy's mode as an unknown enum name
+    def change(d):
+        key = next(iter(d['credit']))
+        d['credit'][key]['mode'] = 'Party'
+    edit_document(c, 1449, change)
+
+
+def experience_unmapped_member(c):  # the Bootcamp experience with a member its scene type lacks
+    row = c.execute('select experience_key, bindings from mission_experience_binding').fetchone()
+    document = json.loads(row[1])
+    document['scene']['actors'][next(iter(document['scene']['actors']))]['facing'] = 0
+    c.execute('update mission_experience_binding set bindings=? where experience_key=?', (json.dumps(document), row[0]))
+
+
+cases = [scene_unmapped_member, scene_required_member, scene_discriminator, scene_value_type, experience_unmapped_member,
+         item_drop_objective, action_intent_kind, radio_target_inactive, no_scene_scenario, shareable_scripted, public_spawn_missing, dialogue_branch, radio_offer, radio_requirement, experience_trigger,
          item_intent_key, acceptance_quantity, unknown_script, inconsistent_script, duplicate_operation, timer_target, credit_objective,
          object_conversation, gameplay_policy, route_actor]
 
@@ -196,7 +229,11 @@ for case in cases:
     c.close()
     server = server_failure(db)
     editor = editor_failures(db)
-    ok = server is not None and server in editor
+    # The deserialiser's messages end in " Path: $... | LineNumber: ..."; the editor gives the path its own way, and words a value it
+    # cannot convert by the value's type (the deserialiser names the record whose constructor takes it): either must match.
+    head = server.split(' Path: ', 1)[0] if server else None
+    path = server.split(' Path: ', 1)[1].split(' | ', 1)[0] if server and ' Path: ' in server else None
+    ok = server is not None and any(head in e or (path and 'could not be converted' in head and f' at {path} ' in e) for e in editor)
     passed += ok
     print(f'{"PASS" if ok else "FAIL"} {case.__name__}')
     print(f'     server: {server}')

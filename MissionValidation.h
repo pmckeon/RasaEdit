@@ -14,7 +14,8 @@
 //     mission_experience_binding rows, radio offers, shared actors, actor gameplay policies, and every operational mission's
 //     requirements and item operations - all start-up errors (the server throws).
 // The diagnostic codes and texts are the server's. Only enabled rows are checked (the server reads one enabled revision per
-// mission). Not ported: a schema check of the scene documents (members the codec would not map - they are read-only here), the
+// mission). The scene documents are first read against the server's own System.Text.Json contract (MissionSceneSchema.h, dumped
+// by tools/missioncheck --schema; missionSceneReadError). Not ported: the
 // built-in recovered mission definitions (MissionDefinitionCatalog.CreateRecoveredInactiveDefinitions), and the GetTypedScenarioIds
 // test for scripted scenarios still accepts any binding whose script key and state version agree with its row.
 
@@ -67,3 +68,9 @@ struct MissionValidationResult {
 
 // tables: the mission content tables by name (mission_content_definition and the children the editor loads).
 MissionValidationResult validateMissionContent(const std::map<std::string, const DbTable*>& tables, const MissionReferences& references);
+
+struct JsonValue;
+// Why the server's deserialiser (System.Text.Json with MissionContentCodec.Options) cannot read `document` as a MissionSceneDefinition
+// (experience: a MissionExperienceDefinition) - unmapped members, wrong value types, discriminators, required members, the
+// constructors that throw; "" when it can. MissionContentLoader / MissionContentCatalog stop the server on such a document.
+std::string missionSceneReadError(const JsonValue& document, bool experience);

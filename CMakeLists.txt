@@ -20,6 +20,9 @@ find_package(SDL3 CONFIG REQUIRED)
 find_package(SDL3_mixer CONFIG REQUIRED)       # asset preview sounds: WAV, Ogg Vorbis (libvorbis), MP3 (mpg123)
 find_package(imgui CONFIG REQUIRED)
 find_package(Freetype REQUIRED)               # UI text (UiCanvas): hinted glyphs like the game's GDI ones
+# stb_image (header-only): the asset preview's .tga / .jpg images
+find_path(STB_INCLUDE_DIRS "stb_image.h" REQUIRED)
+include_directories(${STB_INCLUDE_DIRS})
 # SQLite for the server (World) database: vcpkg's port, or a system package elsewhere.
 find_package(unofficial-sqlite3 CONFIG QUIET)
 if (TARGET unofficial::sqlite3::sqlite3)

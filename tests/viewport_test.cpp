@@ -13,6 +13,7 @@
 #include "geofile.h"
 #include "image.h"
 #include "ModelExchange.h"
+#include "Json.h"
 #include "MissionValidation.h"
 #include "WorldDatabase.h"
 
@@ -63,6 +64,26 @@ static std::string writeTestTextPatch(const tr::GameData& data, const std::strin
 }
 
 int main(int argc, char** argv) {
+    // RASA_SCENEREAD=<scene|experience>,<file> (no other arguments needed): each line of the file is one document, read as the
+    // server's deserialiser would (missionSceneReadError); prints "ok" or "FAIL <why>" per line - the mirror of the mission check
+    // harness's --read (tools/missioncheck/scene_fuzz.py compares the two).
+    if (const char* spec = envValue("RASA_SCENEREAD")) {
+        const std::string text = spec;
+        const size_t comma = text.find(',');
+        const bool experience = text.substr(0, comma) == "experience";
+        std::ifstream in(std::filesystem::u8path(text.substr(comma + 1)), std::ios::binary);
+        std::string line;
+        while (std::getline(in, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            JsonValue document;
+            std::string error;
+            if (!parseJson(line, document, error)) { std::printf("FAIL not JSON: %s\n", error.c_str()); continue; }
+            const std::string why = missionSceneReadError(document, experience);
+            if (why.empty()) std::puts("ok");
+            else std::printf("FAIL %s\n", why.c_str());
+        }
+        return 0;
+    }
     if (argc < 13) { std::puts("usage: viewport_test root game.zip map out.rgba w h ex ey ez tx ty tz"); return 1; }
     if (!SDL_Init(SDL_INIT_VIDEO)) { std::printf("SDL_Init: %s\n", SDL_GetError()); return 1; }
     SDL_GPUDevice* device = createGpuDevice(SDL_GPU_SHADERFORMAT_SPIRV | SDL_GPU_SHADERFORMAT_DXIL, true);
@@ -887,6 +908,30 @@ int main(int argc, char** argv) {
             } catch (const std::exception& e) {
                 std::printf("glm write test FAILED: %s\n", e.what());
             }
+        }
+        // RASA_CATSCAN=1: parse every asset catalogue (tr::readCatalog); the load list's first record, duplicates, direct assets in it.
+        if (envValue("RASA_CATSCAN")) {
+            size_t files = 0, failed = 0, loadFirst = 0, directInLoad = 0, records = 0, assetsListed = 0;
+            for (const std::string& name : assets.namesWithExtension(".cat")) {
+                ++files;
+                try {
+                    const tr::Catalog c = tr::readCatalog(assets.read(name));
+                    records += c.records.size();
+                    if (!c.records.empty() && c.records.front().owner.empty()) {
+                        ++loadFirst;
+                        const std::set<std::string> load(c.records.front().assets.begin(), c.records.front().assets.end());
+                        bool all = true;
+                        for (const tr::CatalogAsset& a : c.direct) all = all && load.count(a.name) != 0;
+                        directInLoad += all ? 1 : 0;
+                    }
+                    for (const tr::CatalogRecord& r : c.records) assetsListed += r.assets.size();
+                } catch (const std::exception& e) {
+                    if (++failed <= 5) std::printf("cat %s: %s\n", name.c_str(), e.what());
+                }
+            }
+            std::printf("catalogues: %zu files, %zu failed, %zu with the load list first, %zu with every direct asset in it, %zu records, %zu "
+                        "assets listed\n", files, failed, loadFirst, directInLoad, records, assetsListed);
+            return 0;
         }
         // RASA_MKRSCAN=1: parse every animation marker file; markers per type, files whose markers lie past their animation's end.
         if (envValue("RASA_MKRSCAN")) {
@@ -2795,7 +2840,7 @@ int main(int argc, char** argv) {
                         entities, ok, dropped, boxes, spheres, outPath.c_str());
         }
         // RASA_INGAMEREVERT=1: removes RASA_INGAMEPREP's test light, emitter (by name) and entity (the largest id) from the map folder's
-        // files in the game folder (written without new backups).
+        // files in the game folder (written without new backups) and puts its test region name back in the text patch.
         if (envValue("RASA_INGAMEREVERT")) {
             namespace fs = std::filesystem;
             auto writeFile = [](const fs::path& path, const tr::Bytes& bytes) {
@@ -2821,6 +2866,28 @@ int main(int argc, char** argv) {
                         data.classMeshName(edited.entities[newest].classId).c_str());
             edited.entities.erase(edited.entities.begin() + std::ptrdiff_t(newest));
             writeFile(folder / (map.name + ".map"), tr::writeMap(edited));
+            // The region name: the English uielementlanguage as the game reads it (the text patch first) with every "Luna Cavern RASAEDIT
+            // TEST" put back to "Luna Cavern", written into the patch the same way (its other edits kept; game.zip untouched).
+            try {
+                const std::string module = "generated.client.language.english.uielementlanguage";
+                tr::py::Ref restored = tr::py::deepCopy(std::shared_ptr<tr::py::Object>(&const_cast<tr::py::Object&>(data.module(module)), [](tr::py::Object*) {}));
+                tr::py::Object* lookup = const_cast<tr::py::Object*>(tr::py::dictGet(restored.get(), "lookup"));
+                size_t changed = 0;
+                for (auto& e : lookup->entries)
+                    if (e.second && tr::py::asString(tr::py::item(e.second.get(), 0)) == "Luna Cavern RASAEDIT TEST") {
+                        e.second = tr::py::makeList({tr::py::makeText("Luna Cavern")});
+                        ++changed;
+                    }
+                if (changed == 0) {
+                    std::printf("in-game revert: no test region name in %s\n", data.moduleArchivePath(module).c_str());
+                } else {
+                    std::string registered;
+                    const std::string patch = writeTestTextPatch(data, argv[1], {{module, restored}}, "revert", registered);
+                    std::printf("in-game revert: %zu region name(s) put back in %s\n", changed, patch.c_str());
+                }
+            } catch (const std::exception& e) {
+                std::printf("in-game revert: region name FAILED: %s\n", e.what());
+            }
             return 0;
         }
         // RASA_INGAMEFIX=<floor y>: puts RASA_INGAMEPREP's test light / emitter / entity (found by name, name, the largest entity id) on

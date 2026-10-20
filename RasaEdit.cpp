@@ -1,8 +1,41 @@
+#include <algorithm>
 #include "RasaEdit.h"
 #include "Editor.h"
 #include "Renderer.h"
 
 // Main loop follows imgui 1.92.8's examples/example_sdl3_sdlgpu3.
+// ImGui sizes a TrueType font so its hhea ascent - descent spans the requested pixel size (stb_truetype ScaleForPixelHeight).
+// The CJK system fonts reserve a lot of room above and below their em (Malgun Gothic's ascent - descent is ~1.3 em), so merged at
+// the default font's size their glyphs came out far smaller than the Latin text. This reads that ratio from the font's own tables
+// (the first face of a .ttc): (hhea ascender - descender) / head unitsPerEm; 1 when the file cannot be read.
+static float fontEmScale(const char* path) {
+    SDL_IOStream* io = SDL_IOFromFile(path, "rb");
+    if (!io) return 1.0f;
+    auto u16 = [&](Sint64 at) {
+        Uint8 b[2] = {};
+        if (SDL_SeekIO(io, at, SDL_IO_SEEK_SET) < 0 || SDL_ReadIO(io, b, 2) != 2) return 0u;
+        return unsigned(b[0]) << 8 | unsigned(b[1]);
+    };
+    auto u32 = [&](Sint64 at) { return (u16(at) << 16) | u16(at + 2); };
+    Sint64 face = 0;
+    if (u32(0) == 0x74746366u) face = Sint64(u32(12));          // 'ttcf': the first font's offset
+    const unsigned tables = u16(face + 4);
+    unsigned unitsPerEm = 0;
+    int ascender = 0, descender = 0;
+    for (unsigned t = 0; t < tables && t < 64; ++t) {
+        const Sint64 record = face + 12 + Sint64(t) * 16;
+        const unsigned tag = u32(record), offset = u32(record + 8);
+        if (tag == 0x68656164u) unitsPerEm = u16(offset + 18);                    // 'head'
+        if (tag == 0x68686561u) {                                                   // 'hhea'
+            ascender = int(int16_t(u16(offset + 4)));
+            descender = int(int16_t(u16(offset + 6)));
+        }
+    }
+    SDL_CloseIO(io);
+    if (unitsPerEm == 0 || ascender - descender <= 0) return 1.0f;
+    return std::clamp(float(ascender - descender) / float(unitsPerEm), 1.0f, 2.0f);
+}
+
 int main(int argc, char* argv[])
 {
     (void)argc;
@@ -66,6 +99,7 @@ int main(int argc, char* argv[])
                 if (SDL_GetPathInfo(path, nullptr)) {
                     ImFontConfig merge;
                     merge.MergeMode = true;
+                    merge.ExtraSizeScale = fontEmScale(path);     // its em the size of the text around it
                     io.Fonts->AddFontFromFileTTF(path, 0.0f, &merge);
                     break;
                 }

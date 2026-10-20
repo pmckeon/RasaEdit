@@ -2000,6 +2000,54 @@ AnimationMarkers readAnimationMarkers(const Bytes& data) {
     return result;
 }
 
+Catalog readCatalog(const Bytes& data) {
+    if (data.size() < 8 || std::memcmp(data.data(), "CHNK", 4) != 0) throw FormatError("not a chunk file (no CHNK header)");
+    if (data[4] != 'B') throw FormatError("text chunk files are not supported");
+    ByteReader r(data, 8);
+    const Chunk ctlg = expectChunk(r, fourcc("CTLG"));
+    Catalog result;
+    result.version = ctlg.version;
+    // An asset id chunk: ISTR (a C string) or INON (none); false for INON.
+    const auto assetId = [&](std::string& name) {
+        const Chunk c = readChunk(r);
+        bool named = false;
+        if (c.tag == fourcc("ISTR")) {
+            name = r.cstr();
+            named = true;
+        } else if (c.tag == fourcc("INON")) {
+            name.clear();
+        } else {
+            throw FormatError("expected ISTR or INON but found " + tagName(c.tag) + " at offset " + std::to_string(c.start));
+        }
+        r.seek(c.end);
+        return named;
+    };
+    r.u32();                                   // 1
+    const uint32_t direct = r.u32();
+    for (uint32_t k = 0; k < direct; ++k) {
+        CatalogAsset a;
+        assetId(a.name);
+        a.count = r.u32();
+        result.direct.push_back(a);
+    }
+    r.u32();                                   // 1
+    while (r.tell() < ctlg.end) {
+        CatalogRecord record;
+        const bool named = assetId(record.owner);
+        const uint32_t n = r.u32();
+        if (!named && n == 0) break;           // the terminator
+        for (uint32_t k = 0; k < n; ++k) {
+            std::string name;
+            assetId(name);
+            record.assets.push_back(name);
+        }
+        result.records.push_back(std::move(record));
+    }
+    if (r.tell() != ctlg.end)
+        throw FormatError("CTLG ends at " + std::to_string(r.tell()) + ", its chunk at " + std::to_string(ctlg.end));
+    return result;
+}
+
 Bytes writeAnimationMarkers(const AnimationMarkers& markers, const Bytes& header) {
     Bytes out;
     if (header.size() == 8) out = header;

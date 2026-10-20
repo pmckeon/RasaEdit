@@ -25,6 +25,7 @@
       "name": "freetype",
       "default-features": false
     },
+    "stb",
     "zlib",
     "sqlite3",
     "libmariadb"

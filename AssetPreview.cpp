@@ -7,9 +7,22 @@
 #include "imgui.h"
 
 #include <algorithm>
+#include <cctype>
+#include <cstdlib>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <stdexcept>
+
+// stb_image (vcpkg "stb"): the plain images the game ships beside its .dds textures - 20 .tga (32-bit icons and the soldier /
+// specialist colour palettes) and trlogo.jpg - and any .png / .bmp. Only these decoders are compiled in.
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_JPEG
+#define STBI_ONLY_TGA
+#define STBI_ONLY_PNG
+#define STBI_ONLY_BMP
+#define STBI_NO_STDIO
+#include "stb_image.h"
 
 namespace {
 
@@ -33,6 +46,20 @@ const char* primitiveName(uint8_t p) {
         case 4: return "oriented sprite";
         default: return "?";
     }
+}
+
+// A catalogue's records: the first (owner INON) is the load list, the rest an asset's dependencies.
+struct CatalogRecordsSplit {
+    std::vector<std::string> load;
+    std::vector<const tr::CatalogRecord*> dependencies;
+};
+CatalogRecordsSplit splitCatalogRecords(const tr::Catalog& c) {
+    CatalogRecordsSplit out;
+    for (size_t k = 0; k < c.records.size(); ++k) {
+        if (k == 0 && c.records[k].owner.empty()) out.load = c.records[k].assets;
+        else out.dependencies.push_back(&c.records[k]);
+    }
+    return out;
 }
 
 }  // namespace
@@ -100,6 +127,8 @@ void AssetPreview::select(EditorContext& ctx, const std::string& name) {
     kind_ = Kind::None;
     text_.clear();
     summary_.clear();
+    contents_.clear();
+    contentsFilter_[0] = 0;
     name_ = name;
     device_ = ctx.device;
     if (name.empty() || !ctx.assets) return;
@@ -145,6 +174,55 @@ void AssetPreview::select(EditorContext& ctx, const std::string& name) {
                         std::to_string(header.mipCount) + " mip levels\n";
             buildTextureView();
             kind_ = Kind::Texture;
+        } else if (ext == ".tga" || ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".bmp") {
+            int w = 0, h = 0, channels = 0;
+            stbi_uc* rgba = stbi_load_from_memory(data.data(), int(data.size()), &w, &h, &channels, 4);
+            if (!rgba) throw std::runtime_error(std::string("not decodable: ") + stbi_failure_reason());
+            pixels_.resize(size_t(w) * size_t(h));
+            for (size_t k = 0; k < pixels_.size(); ++k) {
+                pixels_[k].red = rgba[4 * k];
+                pixels_[k].green = rgba[4 * k + 1];
+                pixels_[k].blue = rgba[4 * k + 2];
+                pixels_[k].alpha = rgba[4 * k + 3];
+            }
+            stbi_image_free(rgba);
+            textureWidth_ = uint32_t(w);
+            textureHeight_ = uint32_t(h);
+            static const char* const kinds[] = {"", "grey", "grey + alpha", "RGB", "RGBA"};
+            summary_ += "\n" + std::to_string(w) + " x " + std::to_string(h) + ", " + (channels >= 1 && channels <= 4 ? kinds[channels] : "?") + "\n";
+            buildTextureView();
+            kind_ = Kind::Texture;
+        } else if (ext == ".bik") {
+            // Bink video (RAD Game Tools; the game's intro, logos and the movies data/movies names after maps): the header only, as
+            // FFmpeg's bink demuxer reads it - "BIK" + revision, u32 size - 8, u32 frames, u32 largest frame, u32 frames, u32 width,
+            // u32 height, u32 fps numerator, u32 denominator, u32 video flags, u32 audio tracks; per track u32 (decoded size), then
+            // u16 sample rate + u16 flags (0x2000 stereo, 0x1000 DCT) each, then a u32 id each. Not played: Bink has no decoder here.
+            tr::ByteReader r(data);
+            const uint32_t magic = r.u32();
+            if ((magic & 0xFFFFFF) != 0x4B4942 && (magic & 0xFFFFFF) != 0x32424B) throw std::runtime_error("not a Bink file");
+            const char version = char(magic >> 24);
+            r.u32();
+            const uint32_t frames = r.u32(), largest = r.u32();
+            r.u32();
+            const uint32_t width = r.u32(), height = r.u32(), fpsNum = r.u32(), fpsDen = r.u32();
+            r.u32();
+            const uint32_t tracks = r.u32();
+            const double fps = fpsDen ? double(fpsNum) / double(fpsDen) : 0.0;
+            char line[256];
+            std::snprintf(line, sizeof line, "\nBink %s video (revision %c): %u x %u, %u frames at %.3f fps = %.1f s, largest frame %u bytes\n",
+                          (magic & 0xFFFFFF) == 0x32424B ? "2" : "1", version, width, height, frames, fps, fps > 0 ? frames / fps : 0.0, largest);
+            summary_ += line;
+            if (tracks < 16) {
+                r.skip(4 * size_t(tracks));
+                for (uint32_t t = 0; t < tracks; ++t) {
+                    const uint32_t rate = r.u16(), flags = r.u16();
+                    std::snprintf(line, sizeof line, "audio track %u: %u Hz, %s, %s\n", t + 1, rate, (flags & 0x2000) ? "stereo" : "mono",
+                                  (flags & 0x1000) ? "DCT" : "RDFT");
+                    summary_ += line;
+                }
+            }
+            summary_ += "(Bink is not played: no Bink decoder in the editor)\n";
+            kind_ = Kind::Info;
         } else if (ext == ".wav" || ext == ".ogg" || ext == ".mp3") {
             // Decoded on the fly while playing, from the file kept in memory (the stream reads soundFile_).
             if (!mixerInitialised_) mixerInitialised_ = MIX_Init();
@@ -220,6 +298,110 @@ void AssetPreview::select(EditorContext& ctx, const std::string& name) {
             packageBodies_.emplace_back("the effect proxy (particle_proxy.geo: every HPS_ point at its origin)", "particle_proxy.geo");
             package_ = true;
             openPackageBody(ctx);
+        } else if (ext == ".cat") {
+            const tr::Catalog c = tr::readCatalog(data);
+            // What it preloads for: class<id> = an entity class, ability<id>+<n> / action<id>+<n>, startup.
+            const std::string base = name.substr(0, name.size() - 4);
+            if (ctx.gameData && base.rfind("class", 0) == 0 && base.size() > 5 &&
+                std::all_of(base.begin() + 5, base.end(), [](unsigned char ch) { return std::isdigit(ch) != 0; })) {
+                const int32_t classId = int32_t(std::strtol(base.c_str() + 5, nullptr, 10));
+                const std::string className = ctx.gameData->className(classId);
+                summary_ += "\npreload list of entity class " + std::to_string(classId) + (className.empty() ? "" : " " + className) + "\n";
+            }
+            const CatalogRecordsSplit split = splitCatalogRecords(c);
+            summary_ += "\n" + std::to_string(c.direct.size()) + " direct assets, load list of " + std::to_string(split.load.size()) +
+                        ", " + std::to_string(split.dependencies.size()) + " assets with dependencies\n";
+            std::vector<std::vector<std::string>> rows;
+            for (const tr::CatalogAsset& a : c.direct) rows.push_back({a.name, std::to_string(a.count)});
+            addContentSection(ctx, "Direct assets", {"Asset", "Listed"}, std::move(rows), {0});
+            rows.clear();
+            for (size_t k = 0; k < split.load.size(); ++k) rows.push_back({std::to_string(k + 1), split.load[k]});
+            addContentSection(ctx, "Load list", {"#", "Asset"}, std::move(rows), {1});
+            rows.clear();
+            for (const tr::CatalogRecord* r : split.dependencies)
+                for (const std::string& a : r->assets) rows.push_back({r->owner, a});
+            addContentSection(ctx, "Dependencies", {"Asset", "Needs"}, std::move(rows), {0, 1});
+            kind_ = Kind::Info;
+        } else if (ext == ".map") {
+            const tr::MapFile m = tr::readMap(data);
+            char line[256];
+            const int start = m.startingSkyTime, day = m.dayLengthSeconds;
+            const double hours = day > 0 ? 24.0 * double(start) / double(day) : 0.0;
+            std::snprintf(line, sizeof line, "\nmap %u.%u, template version %d, status %d\nday %d s, starts at %d s (%02d:%02d)\n", m.majorVersion,
+                          m.minorVersion, m.templateVersion, m.status, day, start, int(hours), int((hours - int(hours)) * 60.0 + 0.5) % 60);
+            summary_ += line;
+            std::string terrain;
+            for (int32_t id : m.terrainIds) terrain += (terrain.empty() ? "" : ", ") + std::to_string(id);
+            summary_ += "terrain " + (terrain.empty() ? std::string("none") : terrain) + "\n" + std::to_string(m.entities.size()) + " entities, " +
+                        std::to_string(m.regions.size()) + " regions, " + std::to_string(m.generatedAbvs.size()) + " generated collision volumes, " +
+                        std::to_string(m.cameraScripts.size()) + " camera scripts\n";
+            std::vector<std::vector<std::string>> rows;
+            for (const tr::MapEntity& e : m.entities) {
+                std::snprintf(line, sizeof line, "%.2f %.2f %.2f", e.location.x, e.location.y, e.location.z);
+                const std::string className = ctx.gameData ? ctx.gameData->className(e.classId) : std::string();
+                const std::string mesh = ctx.gameData ? ctx.gameData->classMeshName(e.classId) : std::string();
+                char scale[32];
+                std::snprintf(scale, sizeof scale, "%g", e.scale);
+                rows.push_back({std::to_string(e.entityId), std::to_string(e.classId), className, mesh, line, scale, std::to_string(e.cullLayer),
+                                std::to_string(e.flags)});
+            }
+            addContentSection(ctx, "Entities", {"Entity id", "Class", "Class name", "Mesh", "Position", "Scale", "Cull layer", "Flags"},
+                              std::move(rows), {3});
+            rows.clear();
+            for (const tr::MapRegion& r : m.regions) {
+                const std::string sky = ctx.gameData && r.sky ? ctx.gameData->stringById(r.sky) : std::string();
+                const std::string env = ctx.gameData && r.environmentMap ? ctx.gameData->stringById(r.environmentMap) : std::string();
+                const std::string shown = ctx.gameData && r.displayName ? ctx.gameData->regionDisplayName(r.displayName) : std::string();
+                std::snprintf(line, sizeof line, "0x%x", unsigned(r.enabledFlags));
+                rows.push_back({std::to_string(r.regionId), std::to_string(r.priority), line, sky, env, shown});
+            }
+            addContentSection(ctx, "Regions", {"Region", "Priority", "Flags", "Sky", "Environment map", "Name"}, std::move(rows), {3, 4});
+            rows.clear();
+            for (const tr::MapGeneratedAbv& a : m.generatedAbvs) {
+                std::snprintf(line, sizeof line, "%.2f %.2f %.2f", a.extents.x, a.extents.y, a.extents.z);
+                rows.push_back({std::to_string(a.entityId), std::to_string(int(a.shape)), line});
+            }
+            addContentSection(ctx, "Generated collision volumes", {"Entity id", "Shape", "Extents"}, std::move(rows));
+            rows.clear();
+            for (const tr::MapCameraScript& c : m.cameraScripts)
+                rows.push_back({std::to_string(c.id), std::to_string(c.keyframes.size()), std::to_string(c.returnTimeMs)});
+            addContentSection(ctx, "Camera scripts", {"Script", "Keyframes", "Return (ms)"}, std::move(rows));
+            kind_ = Kind::Info;
+        } else if (ext == ".vis") {
+            const tr::VisFile v = tr::readVis(data);
+            size_t leaves = 0, withData = 0;
+            double density = 0;
+            for (const tr::VisNode& n : v.nodes) leaves += n.isLeaf() ? 1 : 0;
+            std::vector<std::vector<std::string>> rows;
+            char line[256];
+            for (const tr::VisNode& n : v.nodes) {
+                if (!n.isLeaf()) continue;
+                std::string seen = "all (no data)";
+                if (n.leafIndex < v.rows.size() && tr::pvsHasData(v.rows[n.leafIndex])) {
+                    size_t visible = 0;
+                    for (uint32_t k = 0; k < v.leafCount; ++k) visible += tr::pvsLeafVisible(v.rows[n.leafIndex], k) ? 1 : 0;
+                    seen = std::to_string(visible);
+                    ++withData;
+                    density += v.leafCount ? double(visible) / double(v.leafCount) : 0.0;
+                }
+                std::snprintf(line, sizeof line, "%.1f %.1f %.1f .. %.1f %.1f %.1f", n.bounds.min.x, n.bounds.min.y, n.bounds.min.z, n.bounds.max.x,
+                              n.bounds.max.y, n.bounds.max.z);
+                rows.push_back({std::to_string(n.leafIndex), line, seen});
+            }
+            std::snprintf(line, sizeof line, "\n%zu tree nodes, %zu leaves; PVS v%u: %zu rows with data (mean %.0f %% of the leaves seen), the rest see every leaf\n",
+                          v.nodes.size(), leaves, v.pvsVersion, withData, withData ? 100.0 * density / double(withData) : 0.0);
+            summary_ += line;
+            addContentSection(ctx, "Leaves", {"Leaf", "Bounds", "Leaves seen"}, std::move(rows));
+            kind_ = Kind::Info;
+        } else if (ext == ".mkr") {
+            const tr::AnimationMarkers m = tr::readAnimationMarkers(data);
+            const std::string anm = name.substr(0, name.size() - 4) + ".anm";
+            summary_ += "\n" + std::to_string(m.markers.size()) + " markers of " + anm + "\n";
+            std::vector<std::vector<std::string>> rows;
+            for (const tr::AnimMarker& k : m.markers) rows.push_back({std::to_string(k.timeMs), std::to_string(int(k.type)), tr::animMarkerTypeName(k.type)});
+            addContentSection(ctx, "Markers", {"Time (ms)", "Type", "Name"}, std::move(rows));
+            if (ctx.assets->exists(anm)) addContentSection(ctx, "Animation", {"File"}, {{anm}}, {0});
+            kind_ = Kind::Info;
         }
     } catch (const std::exception& e) {
         summary_ += std::string("\nparse error: ") + e.what() + "\n";
@@ -340,8 +522,86 @@ void AssetPreview::draw(EditorContext& ctx) {
         default: break;
     }
     ImGui::TextWrapped("%s", summary_.c_str());
+    drawContents(ctx);
     if (kind_ == Kind::Text) {
         ImGui::InputTextMultiline("##assettext", text_.data(), text_.size() + 1, ImVec2(-1, -1), ImGuiInputTextFlags_ReadOnly);
+    }
+}
+
+void AssetPreview::addContentSection(EditorContext& ctx, std::string title, std::vector<std::string> columns,
+                                     std::vector<std::vector<std::string>> rows, std::vector<int> assetColumns) {
+    ContentSection section;
+    section.title = std::move(title);
+    section.columns = std::move(columns);
+    section.rows.reserve(rows.size());
+    for (std::vector<std::string>& cells : rows) {
+        ContentRow row;
+        for (int c : assetColumns)
+            if (c < int(cells.size()) && !cells[size_t(c)].empty() && ctx.assets && ctx.assets->exists(cells[size_t(c)])) row.links |= 1u << c;
+        row.cells = std::move(cells);
+        section.rows.push_back(std::move(row));
+    }
+    contents_.push_back(std::move(section));
+    filterContents();
+}
+
+// Rows with a cell containing the filter text (case-insensitive), in every section.
+void AssetPreview::filterContents() {
+    const std::string filter = tr::toLowerAscii(contentsFilter_);
+    for (ContentSection& section : contents_) {
+        section.shown.clear();
+        for (size_t r = 0; r < section.rows.size(); ++r) {
+            bool match = filter.empty();
+            for (const std::string& cell : section.rows[r].cells)
+                if (!match && tr::toLowerAscii(cell).find(filter) != std::string::npos) match = true;
+            if (match) section.shown.push_back(int(r));
+        }
+    }
+}
+
+void AssetPreview::drawContents(EditorContext& ctx) {
+    if (contents_.empty()) return;
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if (ImGui::InputTextWithHint("##contentsfilter", "Filter the contents", contentsFilter_, sizeof contentsFilter_)) filterContents();
+    for (size_t s = 0; s < contents_.size(); ++s) {
+        ContentSection& section = contents_[s];
+        if (section.rows.empty()) continue;
+        const std::string header = section.title + " (" +
+                                   (section.shown.size() == section.rows.size() ? std::to_string(section.rows.size())
+                                                                                : std::to_string(section.shown.size()) + " of " + std::to_string(section.rows.size())) +
+                                   ")###contents" + std::to_string(s);
+        if (!ImGui::CollapsingHeader(header.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) continue;
+        if (section.shown.empty()) continue;
+        const float rowHeight = ImGui::GetTextLineHeightWithSpacing();
+        const float height = rowHeight * float(std::min<size_t>(section.shown.size(), 16) + 1) + ImGui::GetStyle().CellPadding.y * 2.0f;
+        const ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_Resizable |
+                                      ImGuiTableFlags_ScrollY | ImGuiTableFlags_ScrollX | ImGuiTableFlags_SizingFixedFit;
+        ImGui::PushID(int(s));
+        if (ImGui::BeginTable("##contents", int(section.columns.size()), flags, ImVec2(0, height))) {
+            ImGui::TableSetupScrollFreeze(0, 1);
+            for (const std::string& column : section.columns) ImGui::TableSetupColumn(column.c_str());
+            ImGui::TableHeadersRow();
+            ImGuiListClipper clipper;
+            clipper.Begin(int(section.shown.size()));
+            while (clipper.Step())
+                for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+                    const ContentRow& row = section.rows[size_t(section.shown[size_t(i)])];
+                    ImGui::TableNextRow();
+                    for (size_t c = 0; c < row.cells.size() && c < section.columns.size(); ++c) {
+                        ImGui::TableSetColumnIndex(int(c));
+                        if ((row.links >> c) & 0x1) {
+                            ImGui::PushID(i * 64 + int(c));
+                            if (ImGui::TextLink(row.cells[c].c_str())) ctx.showAssetRequest = row.cells[c];
+                            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Open %s", row.cells[c].c_str());
+                            ImGui::PopID();
+                        } else {
+                            ImGui::TextUnformatted(row.cells[c].c_str());
+                        }
+                    }
+                }
+            ImGui::EndTable();
+        }
+        ImGui::PopID();
     }
 }
 

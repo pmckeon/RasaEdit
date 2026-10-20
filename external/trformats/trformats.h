@@ -747,7 +747,28 @@ AnimationMarkers readAnimationMarkers(const Bytes& data);
 // The inverse: "CHNKBLXX" (or `header`, the first 8 bytes of a file read), AMRK chunk { u32 count, count x (u8 type, u32 ms) }.
 // Byte-identical on every shipped .mkr (viewport_test RASA_MKRSCAN).
 Bytes writeAnimationMarkers(const AnimationMarkers& markers, const Bytes& header = {});
-const char* animMarkerTypeName(int type);   // the engine's names ("Strike", "Footstep1", ...); "unknown" outside 0-60
+const char* animMarkerTypeName(int type);
+
+// Asset catalogues (.cat, catalogs.glm, 5,205 files - the preload lists the client reads for an entity class / ability / action /
+// start-up; named class<id>, ability<id>+<n>, action<id>+<n>, startup). Chunk file CTLG v3 {
+//   u32 1, u32 N, N x (asset id, u32 count)          - the direct assets and how often each is listed
+//   u32 1, records: (asset id, u32 n, n x asset id)  - ended by (INON, 0); the first record (owner INON) is the load list, the
+//                                                      others a .pfx / .geo's dependencies (shaders, textures) }
+// An asset id is a chunk: ISTR (a file name, C string) or INON (none). Grammar checked exactly on every shipped file.
+struct CatalogAsset {
+    std::string name;
+    uint32_t count = 0;
+};
+struct CatalogRecord {
+    std::string owner;                 // "" = INON (the load list)
+    std::vector<std::string> assets;
+};
+struct Catalog {
+    uint32_t version = 0;
+    std::vector<CatalogAsset> direct;
+    std::vector<CatalogRecord> records;
+};
+Catalog readCatalog(const Bytes& data);   // the engine's names ("Strike", "Footstep1", ...); "unknown" outside 0-60
 const AnimTrack* findTrack(const Animation& animation, const std::string& boneName);
 // Interpolated key at time (clamped to the track's range): linear scale/translation, normalised lerp rotation.
 AnimKey sampleTrack(const AnimTrack& track, float time);

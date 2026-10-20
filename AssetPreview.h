@@ -62,6 +62,25 @@ private:
     void drawTexture();
     void drawSound();
 
+    // Decoded contents of a structured asset (.cat, .map, .vis, .mkr): titled tables, filtered together; a cell that names an asset
+    // the archives hold is a link that opens it (EditorContext::showAssetRequest).
+    struct ContentRow {
+        std::vector<std::string> cells;
+        uint32_t links = 0;                   // bit n: cell n opens an asset
+    };
+    struct ContentSection {
+        std::string title;
+        std::vector<std::string> columns;
+        std::vector<ContentRow> rows;
+        std::vector<int> shown;               // rows passing the filter
+    };
+    void addContentSection(EditorContext& ctx, std::string title, std::vector<std::string> columns,
+                           std::vector<std::vector<std::string>> rows, std::vector<int> assetColumns = {});
+    void filterContents();
+    void drawContents(EditorContext& ctx);
+    std::vector<ContentSection> contents_;
+    char contentsFilter_[128] = {};
+
     Kind kind_ = Kind::None;
     std::string name_;
     std::string summary_;                     // text above the preview (size, archive, parsed details)

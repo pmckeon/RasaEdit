@@ -18,6 +18,8 @@ namespace Harness
     {
         private static int Main(string[] args)
         {
+            if (args.Length == 2 && args[0] == "--schema") return SceneSchema.Write(args[1]);
+            if (args.Length == 3 && args[0] == "--read") return SceneSchema.Read(args[1], args[2]);
             var connection = new DatabaseConnectionConfiguration { Database = args[0] };
             var options = Options.Create(new DatabaseConfiguration { Provider = "Sqlite", Auth = connection, Char = connection, World = connection });
             using var context = new SqliteWorldContext(options, new SqliteDbContextConfigurationService(new SqliteConnectionStringFactory()),

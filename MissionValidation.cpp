@@ -1,11 +1,16 @@
 #include "MissionValidation.h"
 
 #include "Json.h"
+#include "MissionSceneSchema.h"
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
+#include <cmath>
+#include <cstring>
 #include <cstdlib>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <regex>
 #include <stdexcept>
@@ -191,6 +196,7 @@ struct Definition {
     std::set<int64_t> typedScenarios;
     // mission_scene_binding of this revision: its document and the row's script_key / state_version.
     bool hasScene = false;
+    bool sceneUnreadable = false;        // the loader could not read it (a start-up error already)
     JsonValue scene;
     std::string sceneScriptKey;
     int64_t sceneStateVersion = 0;
@@ -1311,6 +1317,9 @@ std::string documentReadError(const JsonValue& scene) {
     return "";
 }
 
+// (below: the deserialiser's reading of a scene / experience document)
+std::string sceneReadError(const JsonValue& document, bool experience);
+
 // The scene scripts Rasa.Missions registers ([MissionScript] classes, SceneScriptRegistry.Discover).
 bool scriptRegistered(const std::string& key, int64_t version) {
     static const std::set<std::string> scripts = {
@@ -1972,7 +1981,7 @@ void validateCatalogScenes(const std::map<int64_t, Definition>& definitions, con
     for (const auto& b : bound) objectDialogue(*b.first, b.second->d->missionId);
     // (a binding that failed above has already stopped the server: judged by its document)
     for (const auto& dp : definitions)
-        if (!dp.second.scenarios.empty() && (!dp.second.hasScene || blank(str(mem(&dp.second.scene, "script")))))
+        if (!dp.second.scenarios.empty() && !dp.second.sceneUnreadable && (!dp.second.hasScene || blank(str(mem(&dp.second.scene, "script")))))
             fail("Mission " + std::to_string(dp.first) + " requires a migrated scene script binding.", dp.first, dp.second.revision);
     // Experiences
     std::vector<JsonValue> experienceDocuments(refs.experiences.size());
@@ -1981,8 +1990,13 @@ void validateCatalogScenes(const std::map<int64_t, Definition>& definitions, con
         const MissionReferences::Experience& row = refs.experiences[i];
         JsonValue& doc = experienceDocuments[i];
         std::string error;
-        if (!parseJson(row.bindings, doc, error) || !doc.isObject()) {
-            fail("Experience " + row.key + " has no binding definition (" + (error.empty() ? "not an object" : error) + ").", -1, "");
+        if (!parseJson(row.bindings, doc, error) || doc.isNull()) {
+            fail("Experience " + row.key + " has no binding definition" + (error.empty() ? std::string(".") : " (" + error + ")."), -1, "");
+            continue;
+        }
+        // JsonSerializer.Deserialize<MissionExperienceDefinition>(bindings, MissionContentCodec.Options) ?? throw.
+        if (std::string e = sceneReadError(doc, true); !e.empty()) {
+            fail("Experience " + row.key + " binding cannot be read: " + e, -1, "");
             continue;
         }
         const JsonValue* privateValue = mem(&doc, "privatePerCharacter");
@@ -2132,7 +2146,430 @@ void validateCatalogScenes(const std::map<int64_t, Definition>& definitions, con
 
 std::string keyOf(int64_t mission, const std::string& revision) { return std::to_string(mission) + "\x1f" + revision; }
 
+// ---- Reading a scene document as System.Text.Json does ------------------------------------------------------------------------
+// MissionContentLoader (and the catalog after it) read each mission_scene_binding document as a MissionSceneDefinition, each
+// experience as a MissionExperienceDefinition, with MissionContentCodec.Options; any failure is an exception and the server does
+// not start. The contract is the server's own (MissionSceneSchema.h, dumped from JsonTypeInfo by tools/missioncheck); the reading
+// rules below were measured against the real deserialiser (tools/missioncheck/scene_fuzz.py compares the two on generated
+// documents): camelCase names, case-sensitive; unmapped members are errors; a "$kind" discriminator must come first in a
+// polymorphic object, be a string and name a derived type (case-sensitive), and no other "$" member may follow; numbers read as
+// integers only from plain integer literals in range (no fraction or exponent, no strings); floats take any number (an overflow
+// is infinity); null only for reference types and nullables; enums (JsonStringEnumConverter) take an integer in the int range or
+// a string read as Enum.TryParse with ignoreCase (a trimmed integer, or comma-separated names - only a trailing empty part is
+// allowed); dictionary keys: uint digits only (leading zeros allowed), int an optional sign and digits, enum keys as enum
+// strings; read-only members are skipped unread; missing [JsonRequired] members are errors; after its members are read, an
+// object's constructor runs, and five of them throw on bad values (MissionHistoryAggregation, MissionObjectiveAggregation,
+// MissionCreditPolicy, AuthoredLootProfile, MissionItemDropDefinition). The first failure in document order is reported (an
+// object's own required / constructor checks after its members), as the deserialiser stops at it.
+
+struct SchemaObject;
+struct SchemaType {
+    enum class Kind { String, Bool, UInt, Int, ULong, Long, UShort, Short, Byte, SByte, Float, Double, Json, Enum, Nullable, List, Dict, Object, Unsupported };
+    Kind kind = Kind::Unsupported;
+    std::string name;                                            // enum / object / unsupported name
+    std::vector<std::pair<std::string, int64_t>> enumValues;
+    const SchemaType* inner = nullptr;                           // nullable / list element / dictionary value
+    const SchemaType* key = nullptr;                             // dictionary key
+    const SchemaObject* object = nullptr;
+};
+struct SchemaProperty {
+    std::string name;
+    const SchemaType* type = nullptr;
+    bool required = false, settable = true;
+};
+struct SchemaObject {
+    std::string key;                                             // full .NET name
+    bool isAbstract = false;
+    std::vector<SchemaProperty> properties;
+    std::string discriminator;                                   // "" = not polymorphic
+    std::vector<std::pair<std::string, const SchemaObject*>> derived;
+    const SchemaProperty* property(const std::string& name) const {
+        for (const SchemaProperty& p : properties)
+            if (p.name == name) return &p;
+        return nullptr;
+    }
+};
+struct SceneSchema {
+    std::vector<std::unique_ptr<SchemaType>> types;
+    std::map<std::string, std::unique_ptr<SchemaObject>> objects;
+    const SchemaObject* scene = nullptr;
+    const SchemaObject* experience = nullptr;
+
+    SchemaObject* objectNamed(const std::string& key) {
+        std::unique_ptr<SchemaObject>& o = objects[key];
+        if (!o) {
+            o = std::make_unique<SchemaObject>();
+            o->key = key;
+        }
+        return o.get();
+    }
+    // A type expression of the dump ("dict:uint:obj:Rasa...", "enum:Name:flags:A=0,B=1", ...), read from `at`.
+    const SchemaType* parse(const std::string& text, size_t& at) {
+        const auto token = [&]() {
+            const size_t end = std::min(text.find(':', at), text.size());
+            std::string t = text.substr(at, end - at);
+            at = end < text.size() ? end + 1 : end;
+            return t;
+        };
+        auto t = std::make_unique<SchemaType>();
+        const std::string head = token();
+        static const std::map<std::string, SchemaType::Kind> leaves = {
+            {"string", SchemaType::Kind::String}, {"bool", SchemaType::Kind::Bool},     {"uint", SchemaType::Kind::UInt},
+            {"int", SchemaType::Kind::Int},       {"ulong", SchemaType::Kind::ULong},   {"long", SchemaType::Kind::Long},
+            {"ushort", SchemaType::Kind::UShort}, {"short", SchemaType::Kind::Short},   {"byte", SchemaType::Kind::Byte},
+            {"sbyte", SchemaType::Kind::SByte},   {"float", SchemaType::Kind::Float},   {"double", SchemaType::Kind::Double},
+            {"json", SchemaType::Kind::Json}};
+        if (const auto leaf = leaves.find(head); leaf != leaves.end()) t->kind = leaf->second;
+        else if (head == "enum") {
+            t->kind = SchemaType::Kind::Enum;
+            t->name = token();
+            token();                                             // [Flags]: read the same way by Enum.TryParse
+            std::string list = token(), part;
+            for (size_t p = 0; p <= list.size(); ++p) {
+                if (p < list.size() && list[p] != ',') { part += list[p]; continue; }
+                if (const size_t eq = part.find('='); eq != std::string::npos)
+                    t->enumValues.emplace_back(part.substr(0, eq), std::strtoll(part.c_str() + eq + 1, nullptr, 10));
+                part.clear();
+            }
+        } else if (head == "nullable") {
+            t->kind = SchemaType::Kind::Nullable;
+            t->inner = parse(text, at);
+        } else if (head == "list") {
+            t->kind = SchemaType::Kind::List;
+            t->inner = parse(text, at);
+        } else if (head == "dict") {
+            t->kind = SchemaType::Kind::Dict;
+            t->key = parse(text, at);
+            t->inner = parse(text, at);
+        } else if (head == "obj") {
+            t->kind = SchemaType::Kind::Object;
+            t->name = text.substr(at);                           // the rest: object names hold no ':'
+            at = text.size();
+            t->object = objectNamed(t->name);
+        } else {
+            t->name = text;
+            at = text.size();
+        }
+        types.push_back(std::move(t));
+        return types.back().get();
+    }
+
+    SceneSchema() {
+        JsonValue dump;
+        std::string error;
+        if (!parseJson(missionSceneSchemaJson(), dump, error)) throw std::logic_error("MissionSceneSchema.h: " + error);
+        for (const auto& entry : entries(dump.member("types"))) {
+            SchemaObject* o = objectNamed(entry.first);
+            const JsonValue* a = entry.second.member("abstract");
+            o->isAbstract = a && a->boolean;
+            for (const JsonValue& p : elements(entry.second.member("properties"))) {
+                SchemaProperty prop;
+                prop.name = str(p.member("name"));
+                size_t at = 0;
+                prop.type = parse(str(p.member("type")), at);
+                const JsonValue* r = p.member("required");
+                const JsonValue* s = p.member("settable");
+                prop.required = r && r->boolean;
+                prop.settable = !s || s->boolean;
+                o->properties.push_back(prop);
+            }
+            o->discriminator = str(entry.second.member("discriminator"));
+            for (const JsonValue& d : elements(entry.second.member("derived"))) {
+                std::string type = str(d.member("type"));
+                if (type.rfind("obj:", 0) == 0) type = type.substr(4);
+                o->derived.emplace_back(str(d.member("id")), objectNamed(type));
+            }
+        }
+        scene = objectNamed("Rasa.Missions.Content.MissionSceneDefinition");
+        experience = objectNamed("Rasa.Missions.Content.MissionExperienceDefinition");
+    }
+};
+const SceneSchema& sceneSchema() {
+    static const SceneSchema schema;
+    return schema;
+}
+
+// A JSON integer literal (no fraction, no exponent) in [low, high].
+bool integerLiteral(const JsonValue& v, int64_t low, uint64_t high) {
+    if (!v.isNumber() || v.text.find_first_of(".eE") != std::string::npos) return false;
+    const bool negative = !v.text.empty() && v.text[0] == '-';
+    if (negative && low >= 0) return false;                       // "-0" is not a uint either
+    const std::string digits = v.text.substr(negative ? 1 : 0);
+    if (digits.empty() || digits.size() > 20) return false;
+    errno = 0;
+    const unsigned long long magnitude = std::strtoull(digits.c_str(), nullptr, 10);
+    if (errno == ERANGE) return false;
+    if (negative) return magnitude <= static_cast<unsigned long long>(-(low + 1)) + 1ULL;
+    return magnitude <= high;
+}
+// Digits with an optional sign (allowed signs given) in [low, high]: dictionary keys and enum strings.
+bool integerText(const std::string& text, const char* signs, int64_t low, int64_t high) {
+    size_t p = 0;
+    bool negative = false;
+    if (p < text.size() && std::strchr(signs, text[p]) && text[p] != '\0') negative = text[p++] == '-';
+    if (p == text.size() || text.size() - p > 19) return false;
+    for (size_t i = p; i < text.size(); ++i)
+        if (!std::isdigit(static_cast<unsigned char>(text[i]))) return false;
+    const long long magnitude = std::strtoll(text.c_str() + p, nullptr, 10);
+    const long long value = negative ? -magnitude : magnitude;
+    return value >= low && value <= high;
+}
+std::string trimmed(const std::string& text) {
+    size_t a = 0, b = text.size();
+    while (a < b && std::isspace(static_cast<unsigned char>(text[a]))) ++a;
+    while (b > a && std::isspace(static_cast<unsigned char>(text[b - 1]))) --b;
+    return text.substr(a, b - a);
+}
+bool sameIgnoringCase(const std::string& a, const std::string& b) {
+    return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
+               return std::tolower(static_cast<unsigned char>(x)) == std::tolower(static_cast<unsigned char>(y));
+           });
+}
+// An enum string (Enum.TryParse, ignoreCase); the value's -1 when it names more than one constant or none is needed.
+bool enumText(const std::string& text, const SchemaType& t, int64_t* value) {
+    const std::string s = trimmed(text);
+    if (s.empty()) return false;
+    if (std::isdigit(static_cast<unsigned char>(s[0])) || s[0] == '+' || s[0] == '-') {
+        if (!integerText(s, "+-", -2147483648LL, 2147483647LL)) return false;
+        if (value) *value = std::strtoll(s.c_str(), nullptr, 10);
+        return true;
+    }
+    int64_t combined = 0;
+    size_t start = 0;
+    while (true) {
+        const size_t comma = s.find(',', start);
+        const std::string part = trimmed(s.substr(start, comma == std::string::npos ? std::string::npos : comma - start));
+        const bool last = comma == std::string::npos;
+        if (part.empty()) {
+            if (!last || start == 0) return false;               // ",A" fails, "A," reads as A
+        } else {
+            bool found = false;
+            for (const auto& e : t.enumValues)
+                if (sameIgnoringCase(e.first, part)) {
+                    combined |= e.second;
+                    found = true;
+                    break;
+                }
+            if (!found) return false;
+        }
+        if (last) break;
+        start = comma + 1;
+    }
+    if (value) *value = combined;
+    return true;
+}
+std::string pathMember(const std::string& path, const std::string& name) {
+    const bool plain = !name.empty() && std::all_of(name.begin(), name.end(), [](unsigned char ch) { return std::isalnum(ch) || ch == '_' || ch == '$' || ch == '-' || ch == '+'; });
+    return plain ? path + "." + name : path + "['" + name + "']";
+}
+std::string typeLabel(const SchemaType& t) {
+    switch (t.kind) {
+        case SchemaType::Kind::String: return "a string";
+        case SchemaType::Kind::Bool: return "true / false";
+        case SchemaType::Kind::UInt: return "a uint";
+        case SchemaType::Kind::Int: return "an int";
+        case SchemaType::Kind::ULong: return "a ulong";
+        case SchemaType::Kind::Long: return "a long";
+        case SchemaType::Kind::UShort: return "a ushort";
+        case SchemaType::Kind::Short: return "a short";
+        case SchemaType::Kind::Byte: return "a byte";
+        case SchemaType::Kind::SByte: return "an sbyte";
+        case SchemaType::Kind::Float:
+        case SchemaType::Kind::Double: return "a number";
+        case SchemaType::Kind::Json: return "any JSON";
+        case SchemaType::Kind::Enum: return t.name;
+        case SchemaType::Kind::Nullable: return typeLabel(*t.inner) + " or null";
+        case SchemaType::Kind::List: return "a list";
+        case SchemaType::Kind::Dict: return "an object (dictionary)";
+        case SchemaType::Kind::Object: return t.name.substr(t.name.rfind('.') + 1);
+        case SchemaType::Kind::Unsupported: return t.name;
+    }
+    return "?";
+}
+std::string cannotConvert(const std::string& path, const SchemaType& t) {
+    return "The JSON value at " + path + " could not be converted to " + typeLabel(t) + ".";
+}
+std::string shortName(const std::string& key) { return key.substr(key.rfind('.') + 1); }
+
+// The constructors that validate (run once the object's members are read). Values as the constructor gets them: absent = default.
+std::string constructorError(const SchemaObject& o, const JsonValue& v) {
+    const auto uints = [](const JsonValue* list, bool& isNull) {
+        std::vector<int64_t> out;
+        isNull = !list || !list->isArray();
+        for (const JsonValue& x : elements(list)) out.push_back(num(&x));
+        return out;
+    };
+    const auto distinctNonZero = [](const std::vector<int64_t>& ids) {
+        std::set<int64_t> seen;
+        for (int64_t id : ids)
+            if (id == 0 || !seen.insert(id).second) return false;
+        return true;
+    };
+    const std::string& k = o.key;
+    if (k == "Rasa.Missions.Definitions.MissionHistoryAggregation") {
+        const JsonValue* groups = mem(&v, "groups");
+        if (!groups || !groups->isArray() || groups->items.empty())
+            return "History aggregates require at least one mission group. (Parameter 'groups')";
+        std::set<std::vector<int64_t>> seen;
+        for (const JsonValue& g : groups->items) {
+            bool isNull = false;
+            std::vector<int64_t> ids = uints(&g, isNull);
+            if (isNull || ids.empty() || !distinctNonZero(ids)) return "History groups require distinct non-zero mission IDs. (Parameter 'groups')";
+            std::sort(ids.begin(), ids.end());
+            if (!seen.insert(ids).second) return "History aggregates cannot repeat a mission group. (Parameter 'groups')";
+        }
+    } else if (k == "Rasa.Missions.Definitions.MissionObjectiveAggregation") {
+        bool isNull = false;
+        const std::vector<int64_t> ids = uints(mem(&v, "childObjectiveIds"), isNull);
+        if (isNull || ids.empty() || !distinctNonZero(ids))
+            return "Aggregates require distinct non-zero child objectives. (Parameter 'childObjectiveIds')";
+        const int64_t target = num(mem(&v, "targetCount"));
+        if (target == 0 || target > static_cast<int64_t>(ids.size()))
+            return "Specified argument was out of the range of valid values. (Parameter 'targetCount')";
+    } else if (k == "Rasa.Missions.Runtime.MissionCreditPolicy") {
+        int64_t mode = 0;
+        const JsonValue* m = mem(&v, "mode");
+        if (present(m) && !m->integer(mode)) {
+            const SchemaProperty* p = o.property("mode");
+            if (!p || !enumText(m->text, *p->type, &mode)) mode = -1;
+        }
+        const JsonValue* r = mem(&v, "radius");
+        const float radius = r ? std::strtof(r->text.c_str(), nullptr) : 0.0f;
+        if (mode < 0 || mode > 2 || !std::isfinite(radius) || radius < 0 || (mode != 0 && radius == 0))
+            return "Group credit needs an explicit positive finite radius.";
+    } else if (k == "Rasa.Missions.Definitions.AuthoredLootProfile") {
+        const JsonValue* drops = mem(&v, "drops");
+        bool bad = !drops || !drops->isArray();
+        for (const JsonValue& d : elements(drops)) {
+            const int64_t chance = num(mem(&d, "chancePercent")), minimum = num(mem(&d, "minimum")), maximum = num(mem(&d, "maximum"));
+            bad = bad || !d.isObject() || num(mem(&d, "templateId")) == 0 || chance < 0 || chance > 100 || minimum < 1 || maximum < minimum ||
+                  maximum == kIntMax;
+        }
+        if (bad) return "Invalid authored loot distribution. (Parameter 'drops')";
+    } else if (k == "Rasa.Missions.Definitions.MissionItemDropDefinition") {
+        bool isNull = false;
+        const std::vector<int64_t> ids = uints(mem(&v, "creatureIds"), isNull);
+        const int64_t chance = num(mem(&v, "chancePercent"));
+        if (isNull || ids.empty() || !distinctNonZero(ids) || num(mem(&v, "mapContextId")) == 0 || chance < 0 || chance > 100 ||
+            num(mem(&v, "quantity")) == 0)
+            return "Invalid mission item drop source, map, chance or quantity.";
+    }
+    return "";
+}
+
+std::string readAs(const JsonValue& v, const SchemaType& t, const std::string& path);
+
+std::string readObject(const JsonValue& v, const SchemaObject& declared, const std::string& path) {
+    const SchemaObject* o = &declared;
+    size_t first = 0;
+    if (!declared.discriminator.empty()) {
+        const std::string& name = declared.discriminator;
+        if (v.members.empty() || v.members.front().first != name)
+            return "The JSON payload for polymorphic interface or abstract type '" + declared.key + "' must specify a type discriminator. Path: " + path;
+        const JsonValue& id = v.members.front().second;
+        if (!id.isString()) return "The '" + name + "' metadata property must be a JSON string. Path: " + pathMember(path, name);
+        o = nullptr;
+        for (const auto& d : declared.derived)
+            if (d.first == id.text) o = d.second;
+        if (!o) return "Read unrecognized type discriminator id '" + id.text + "'. Path: " + path;
+        first = 1;
+    } else if (declared.isAbstract)
+        return "Deserialization of interface or abstract type '" + declared.key + "' is not supported. Path: " + path;
+    std::set<std::string> seen;
+    for (size_t i = first; i < v.members.size(); ++i) {
+        const std::string& name = v.members[i].first;
+        if (!declared.discriminator.empty() && !name.empty() && name[0] == '$') {
+            if (name == declared.discriminator)
+                return "Deserialized object contains a duplicate '" + name + "' metadata property. Path: " + pathMember(path, name);
+            return "The metadata property is either not supported by the type or is not the first property in the deserialized JSON object. Path: " +
+                   pathMember(path, name);
+        }
+        const SchemaProperty* p = o->property(name);
+        if (!p) return "The JSON property '" + name + "' could not be mapped to any .NET member contained in type '" + o->key + "'.";
+        seen.insert(name);
+        if (!p->settable) continue;                                 // read-only: skipped unread
+        if (std::string e = readAs(v.members[i].second, *p->type, pathMember(path, name)); !e.empty()) return e;
+    }
+    std::vector<std::string> missing;
+    for (const SchemaProperty& p : o->properties)
+        if (p.required && !seen.count(p.name)) missing.push_back("'" + p.name + "'");
+    if (!missing.empty()) {
+        if (missing.size() > 5) missing.resize(5);                  // the deserialiser lists at most five
+        return "JSON deserialization for type '" + o->key + "' was missing required properties including: " + join(missing, ", ") + ".";
+    }
+    return constructorError(*o, v);
+}
+
+std::string readKey(const std::string& text, const SchemaType& t, const std::string& path) {
+    bool ok = true;
+    switch (t.kind) {
+        case SchemaType::Kind::String: break;
+        case SchemaType::Kind::UInt: ok = integerText(text, "", 0, 4294967295LL); break;
+        case SchemaType::Kind::Int: ok = integerText(text, "+-", -2147483648LL, 2147483647LL); break;
+        case SchemaType::Kind::Enum: ok = enumText(text, t, nullptr); break;
+        default: ok = false;
+    }
+    return ok ? "" : "The dictionary key '" + text + "' at " + path + " could not be converted to " + typeLabel(t) + ".";
+}
+
+std::string readAs(const JsonValue& v, const SchemaType& t, const std::string& path) {
+    using K = SchemaType::Kind;
+    if (v.isNull()) {
+        switch (t.kind) {
+            case K::String: case K::Json: case K::Nullable: case K::List: case K::Dict: case K::Object: return "";
+            default: return cannotConvert(path, t);
+        }
+    }
+    bool ok = true;
+    switch (t.kind) {
+        case K::String: ok = v.isString(); break;
+        case K::Bool: ok = v.type == JsonValue::Type::Bool; break;
+        case K::UInt: ok = integerLiteral(v, 0, 4294967295ULL); break;
+        case K::Int: ok = integerLiteral(v, -2147483648LL, 2147483647ULL); break;
+        case K::ULong: ok = integerLiteral(v, 0, 18446744073709551615ULL); break;
+        case K::Long: ok = integerLiteral(v, INT64_MIN, 9223372036854775807ULL); break;
+        case K::UShort: ok = integerLiteral(v, 0, 65535); break;
+        case K::Short: ok = integerLiteral(v, -32768, 32767); break;
+        case K::Byte: ok = integerLiteral(v, 0, 255); break;
+        case K::SByte: ok = integerLiteral(v, -128, 127); break;
+        case K::Float: case K::Double: ok = v.isNumber(); break;
+        case K::Json: break;
+        case K::Enum: ok = v.isNumber() ? integerLiteral(v, -2147483648LL, 2147483647ULL) : v.isString() && enumText(v.text, t, nullptr); break;
+        case K::Nullable: return readAs(v, *t.inner, path);
+        case K::List:
+            if (!v.isArray()) return cannotConvert(path, t);
+            for (size_t i = 0; i < v.items.size(); ++i)
+                if (std::string e = readAs(v.items[i], *t.inner, path + "[" + std::to_string(i) + "]"); !e.empty()) return e;
+            return "";
+        case K::Dict:
+            if (!v.isObject()) return cannotConvert(path, t);
+            for (const auto& m : v.members) {
+                const std::string at = pathMember(path, m.first);
+                if (std::string e = readKey(m.first, *t.key, at); !e.empty()) return e;
+                if (std::string e = readAs(m.second, *t.inner, at); !e.empty()) return e;
+            }
+            return "";
+        case K::Object:
+            if (!v.isObject()) return cannotConvert(path, t);
+            return readObject(v, *t.object, path);
+        case K::Unsupported: return "";                             // a custom converter: not checked (none in the contract)
+    }
+    return ok ? "" : cannotConvert(path, t);
+}
+
+// "" when the deserialiser reads the document; "null" documents read as null (the callers report "no binding document").
+std::string sceneReadError(const JsonValue& document, bool experience) {
+    const SceneSchema& schema = sceneSchema();
+    SchemaType root;
+    root.kind = SchemaType::Kind::Object;
+    root.object = experience ? schema.experience : schema.scene;
+    root.name = root.object->key;
+    return readAs(document, root, "$");
+}
+
 }  // namespace
+
+std::string missionSceneReadError(const JsonValue& document, bool experience) { return sceneReadError(document, experience); }
 
 MissionReferences MissionReferences::load(const WorldDatabase& database) {
     MissionReferences r;
@@ -2225,6 +2662,18 @@ MissionValidationResult validateMissionContent(const std::map<std::string, const
             std::string error;
             if (!parseJson(s.s("bindings"), scene, error)) {
                 fatal("Mission " + std::to_string(d.missionId) + " scene binding is not readable JSON (" + error + ").", d.missionId, d.revision);
+                d.sceneUnreadable = true;
+                continue;
+            }
+            // MissionContentLoader: JsonSerializer.Deserialize<MissionSceneDefinition>(bindings, MissionContentCodec.Options) ?? throw.
+            if (scene.isNull()) {
+                fatal("Mission " + std::to_string(d.missionId) + " has no binding document.", d.missionId, d.revision);
+                d.sceneUnreadable = true;
+                continue;
+            }
+            if (std::string e = sceneReadError(scene, false); !e.empty()) {
+                fatal("Mission " + std::to_string(d.missionId) + " scene binding cannot be read: " + e, d.missionId, d.revision);
+                d.sceneUnreadable = true;
                 continue;
             }
             hasScene = true;

@@ -36,7 +36,7 @@ struct ViewSettings {
     bool showClutter = true;     // terrain clutter (tribbles: grass, ferns, flowers, debris)
     bool gameDistances = true;   // map entities culled by distance per culling layer, as the game does
     bool animate = true;         // world animation: light modifiers, object / material animations, creature idles, particles
-    bool showPlaceholders = true;
+    bool showPlaceholders = false;    // off by default (user, 2026-10-20): stand-in boxes of model-less entities
     bool lightMarkers = false;   // the map's lights as selectable boxes (Client workspace)
     bool soundMarkers = false;   // the map's sound emitters as selectable boxes (Client workspace)
     bool collision = false;      // map entities' collision as the game uses it (SceneView::showCollision)
