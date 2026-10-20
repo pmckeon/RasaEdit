@@ -198,6 +198,12 @@ void AssetPreview::select(EditorContext& ctx, const std::string& name) {
                 summary_ += "  light " + std::string(l.spot ? "spot" : "point") + ", " + (l.durationMs ? std::to_string(l.durationMs) + " ms" : std::string("persistent")) + "\n";
             for (const tr::SfxBeam& b : p.beams)
                 summary_ += "  beam " + b.texture + ", " + (b.durationMs ? std::to_string(b.durationMs) + " ms" : std::string("persistent")) + "\n";
+            for (const tr::SfxParticleTowards& t : p.towards)
+                summary_ += "  particles towards " + t.file + (t.sourceTarget == 0 && t.targetTarget == 0 ? "" : " (aimed at another body: not played)") + "\n";
+            for (const tr::SfxTracer& t : p.tracers)
+                summary_ += "  tracer " + t.asset + " (a trail swept by two moving points: not drawn)\n";
+            for (const tr::SfxProjectile& pr : p.projectiles)
+                summary_ += "  projectile " + (pr.assets.empty() ? std::string() : pr.assets.front()) + " (not drawn)\n";
             for (const tr::SfxSound& s : p.sounds) packageSounds_.push_back(int32_t(s.audioSet));
             // The bodies it plays on: objects whose usable state (or a transition into it) attaches it, then the effect proxy.
             if (ctx.gameData) {

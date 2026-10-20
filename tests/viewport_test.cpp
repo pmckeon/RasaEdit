@@ -431,7 +431,9 @@ int main(int argc, char** argv) {
             size_t packages = 0, failed = 0, accessories = 0, particles = 0, lights = 0, beams = 0, opacities = 0, sounds = 0;
             std::map<uint32_t, size_t> tags;                     // every event chunk's tag (decoded or not)
             std::map<uint32_t, std::string> tagExample;
-            std::map<uint32_t, std::map<uint32_t, size_t>> markers;
+            std::map<uint32_t, std::map<uint32_t, size_t>> markers;   // tag -> first byte (the marker) -> events
+            size_t tracers = 0, towards = 0, projectiles = 0;
+            std::map<uint32_t, size_t> tracerTargets, towardsTargets;   // tracers by target; towards by source x 100 + target
             std::map<uint32_t, size_t> timerFires;
             size_t timersAtOnce = 0;   // tag -> first byte (the marker) -> events
             for (const std::string& name : assets.namesWithExtension(".pkg")) {
@@ -444,11 +446,26 @@ int main(int argc, char** argv) {
                         if (!tagExample.count(t)) tagExample[t] = name;
                     }
                     accessories += p.accessories.size();
+                    tracers += p.tracers.size();
+                    towards += p.towards.size();
+                    projectiles += p.projectiles.size();
+                    for (const tr::SfxTracer& t : p.tracers) ++tracerTargets[t.target];
+                    for (const tr::SfxParticleTowards& t : p.towards) ++towardsTargets[t.sourceTarget * 100 + t.targetTarget];
                     particles += p.particles.size();
                     lights += p.lights.size();
                     beams += p.beams.size();
                     opacities += p.opacities.size();
                     sounds += p.sounds.size();
+                    // RASA_PKGSCAN=tracers: packages with an accessory tracer or a particles-towards event, with their assets.
+                    if (std::string(envValue("RASA_PKGSCAN")) == "tracers") {
+                        for (const tr::SfxTracer& t : p.tracers)
+                            std::printf("tracer package %s: %s target %u points %u -> %u, %u ms, + 0x28 %u, marker %u\n", name.c_str(), t.asset.c_str(),
+                                        t.target, t.contactPoint1, t.contactPoint2, t.durationMs, t.value28, t.marker);
+                        for (const tr::SfxParticleTowards& t : p.towards)
+                            if (t.sourceTarget == 0 && t.targetTarget == 0)
+                                std::printf("towards package %s: %s points %u -> %u, marker %u\n", name.c_str(), t.file.c_str(), t.sourceContactPoint,
+                                            t.targetContactPoint, t.marker);
+                    }
                     // RASA_PKGSCAN=timers: packages with a TIME event, with the markers and files of their particle attaches.
                     if (std::string(envValue("RASA_PKGSCAN")) == "timers" && !p.timers.empty()) {
                         std::printf("timer package %s: timers", name.c_str());
@@ -473,6 +490,11 @@ int main(int argc, char** argv) {
             }
             std::printf("pkg scan: %zu packages, %zu failed; %zu accessories, %zu particle attaches, %zu lights, %zu beams, %zu opacities, %zu sounds\n",
                         packages, failed, accessories, particles, lights, beams, opacities, sounds);
+            std::printf("pkg parsed: %zu tracers (targets", tracers);
+            for (const auto& [t, n] : tracerTargets) std::printf(" %u x%zu", t, n);
+            std::printf("), %zu particles-towards (source,target", towards);
+            for (const auto& [t, n] : towardsTargets) std::printf(" %u,%u x%zu", t / 100, t % 100, n);
+            std::printf("), %zu projectiles\n", projectiles);
             std::printf("pkg timers: %zu fire at once; fire markers", timersAtOnce);
             for (const auto& [m, c] : timerFires) std::printf(" %u x%zu", m, c);
             std::printf("\n");
@@ -917,6 +939,12 @@ int main(int argc, char** argv) {
                 for (const tr::SfxParticleAttach& a : p.particles)
                     std::printf("pkg %s particles %s target %u contact point %u (v%u, marker %u, unknown2 %u, flag %d)\n", pkg, a.file.c_str(), a.target,
                                 a.contactPoint, a.version, a.marker, a.unknown2, int(a.flag));
+                for (const tr::SfxTracer& t : p.tracers)
+                    std::printf("pkg %s tracer %s target %u points %u -> %u, %u ms, + 0x28 %u (v%u, marker %u)\n", pkg, t.asset.c_str(), t.target,
+                                t.contactPoint1, t.contactPoint2, t.durationMs, t.value28, t.version, t.marker);
+                for (const tr::SfxParticleTowards& t : p.towards)
+                    std::printf("pkg %s towards %s from %u:%u to %u:%u (v%u, marker %u, flag %d)\n", pkg, t.file.c_str(), t.sourceTarget,
+                                t.sourceContactPoint, t.targetTarget, t.targetContactPoint, t.version, t.marker, int(t.flag29));
                 std::printf("pkg %s: %zu lights\n", pkg, p.lights.size());
                 for (const tr::SfxLight& l : p.lights) {
                     std::printf("  light duration %u ms target %u contact point %u spot %d shadows %d priority %.2f\n", l.durationMs,

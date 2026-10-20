@@ -553,7 +553,13 @@ private:
         float startTime = 0;            // lightTime when it fired
         bool warm = false;              // started with the world's 3 s warm-up (a long-running state seen at an arbitrary moment)
         bool spent = false;             // a copy fired again whose particles are gone (its slot is reused by the next firing)
+        // A particles-towards event (PFXT) from the body to itself: the system at contactPoint, turned to face this connection point.
+        bool towards = false;
+        uint32_t towardsContactPoint = 0;
     };
+    // The frame a state particle system starts in, in the body's space (false: a connection point is missing): its connection point,
+    // and for a particles-towards event the look-at towards its target point (SfxParticleTowardsEvent FUN_00768190 -> FUN_00443250).
+    static bool stateParticleFrame(const StateParticle& sp, const Model* model, Mat4& frame);
     struct StateLight {
         Model* body = nullptr;
         tr::SfxLight event;

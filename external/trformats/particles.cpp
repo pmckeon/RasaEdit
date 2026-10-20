@@ -638,6 +638,54 @@ SfxPackage readSfxPackage(const Bytes& data) {
             package.timers.push_back(t);
         } else if (event.tag == fourcc("STOP")) {
             package.stops.push_back(r.u8());
+        } else if (event.tag == fourcc("ACTR") && event.version >= 1 && event.version <= 2) {
+            SfxTracer t;
+            t.version = event.version;
+            t.marker = r.u8();
+            t.asset = readAsset(r);
+            t.target = r.u8();
+            t.durationMs = r.u32();
+            t.value28 = r.u32();
+            if (event.version >= 2) {
+                t.contactPoint1 = r.u8();
+                t.contactPoint2 = r.u8();
+            }
+            finish(r, event);
+            package.tracers.push_back(t);
+        } else if (event.tag == fourcc("PFXT") && event.version >= 1 && event.version <= 2) {
+            SfxParticleTowards t;
+            t.version = event.version;
+            t.marker = r.u8();
+            t.file = readAsset(r);
+            t.sourceTarget = r.u8();
+            t.sourceContactPoint = r.u8();
+            t.targetTarget = r.u8();
+            t.targetContactPoint = r.u8();
+            if (event.version == 2) t.flag29 = r.u8() != 0;
+            finish(r, event);
+            package.towards.push_back(t);
+        } else if (event.tag == fourcc("PROJ") && event.version >= 2 && event.version <= 9) {
+            SfxProjectile p;
+            p.version = event.version;
+            p.marker = r.u8();
+            p.assets.push_back(readAsset(r));
+            if (event.version > 2) p.assets.push_back(readAsset(r));
+            p.value = r.f32();
+            p.byte68 = r.u8();
+            p.byte6c = r.u8();
+            if (event.version > 2) p.byteC = r.u8();
+            if (event.version > 3) p.value4 = r.u32();
+            if (event.version > 4) p.assets.push_back(readAsset(r));
+            if (event.version > 5) p.assets.push_back(readAsset(r));
+            if (event.version > 6) {
+                p.byte64 = r.u8();
+                p.assets.push_back(readAsset(r));
+                p.assets.push_back(readAsset(r));
+            }
+            if (event.version > 7) p.value8 = r.f32();
+            if (event.version > 8) p.assets.push_back(readAsset(r));
+            finish(r, event);
+            package.projectiles.push_back(p);
         }
         r.seek(event.end);
     }

@@ -2424,8 +2424,7 @@ void SceneView::advanceParticles(float dt) {
             const StateParticle& sp = s.stateParticles[m];
             if (sp.event.target != 0 || sp.spent) continue;
             Mat4 frame;
-            tr::Quat rotation;
-            if (!contactFrame(sp.body ? sp.body : s.model, sp.event.contactPoint, 1, frame, rotation)) continue;
+            if (!stateParticleFrame(sp, s.model, frame)) continue;
             const tr::ParticleSystem* system = particleSystem(sp.event.file);
             if (!system) continue;
             LiveParticles l;
@@ -2494,8 +2493,7 @@ void SceneView::advanceParticles(float dt) {
             const StateParticle& sp = p.stateParticles[m];
             if (sp.event.target != 0 || sp.spent) continue;
             Mat4 frame;
-            tr::Quat rotation;
-            if (!contactFrame(sp.body ? sp.body : p.model, sp.event.contactPoint, 1, frame, rotation)) continue;
+            if (!stateParticleFrame(sp, p.model, frame)) continue;
             start(particleSystem(sp.event.file), multiply(p.world, frame), -1, m, sp.warm);
         }
         for (size_t b = 0; b < p.stateAccessories.size(); ++b) {
@@ -3091,6 +3089,35 @@ SceneView::StateEffects SceneView::stateEffects(int32_t classId, int32_t stateId
     return effects;
 }
 
+// FUN_00443250 (traced 2026-10-20): z = the direction from the source point to the target point; x = normalize(up x z) with up
+// (0, 1, 0), else (1, 0, 0), else (0, 0, -1) when z is (nearly) parallel to it; y = z x x. The first up vector comes in a register the
+// caller sets (taken to be world up) and the cross products' order is read from the call sequence only - the roll about z is UNVERIFIED.
+bool SceneView::stateParticleFrame(const StateParticle& sp, const Model* model, Mat4& frame) {
+    tr::Quat rotation;
+    const Model* body = sp.body ? sp.body : model;
+    if (!contactFrame(body, sp.event.contactPoint, 1, frame, rotation)) return false;
+    if (!sp.towards) return true;
+    Mat4 target;
+    tr::Quat targetRotation;
+    if (!contactFrame(body, sp.towardsContactPoint, 1, target, targetRotation)) return false;
+    const tr::Vec3 from{frame.row0.w, frame.row1.w, frame.row2.w}, to{target.row0.w, target.row1.w, target.row2.w};
+    tr::Vec3 z = subtract(to, from);
+    if (dot(z, z) < 1e-10f) return true;                       // the same point: the source frame as it is
+    z = scaled(z, 1.0f / std::sqrt(dot(z, z)));
+    auto cross = [](const tr::Vec3& a, const tr::Vec3& b) { return tr::Vec3{a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x}; };
+    tr::Vec3 x = cross(tr::Vec3{0, 1, 0}, z);
+    if (dot(x, x) < 1e-5f) x = cross(tr::Vec3{1, 0, 0}, z);
+    if (dot(x, x) < 1e-5f) x = cross(tr::Vec3{0, 0, -1}, z);
+    x = scaled(x, 1.0f / std::sqrt(dot(x, x)));
+    const tr::Vec3 y = cross(z, x);
+    // Column-vector convention (GpuMath.h): the columns are the system's axes, the last column its position.
+    frame.row0 = Vec4f{x.x, y.x, z.x, from.x};
+    frame.row1 = Vec4f{x.y, y.y, z.y, from.y};
+    frame.row2 = Vec4f{x.z, y.z, z.z, from.z};
+    frame.row3 = Vec4f{0, 0, 0, 1};
+    return true;
+}
+
 bool SceneView::beamEnds(const StateBeam& beam, const Model* model, const Mat4& world, tr::Vec3& start, tr::Vec3& end) const {
     const Model* body = beam.body ? beam.body : model;
     Mat4 a, b;
@@ -3130,6 +3157,22 @@ void SceneView::addPackageEffects(const std::string& package, Model* body, int d
             e.marker = markerOf(b.marker);
             e.eventIndex = effects.beams.size();
             effects.beams.push_back(e);
+        }
+        // Particles towards (PFXT) from the body to itself (27 of the 199 shipped; the others aim at an attacker / victim, which the
+        // editor does not model): played as a particle attach whose frame faces the target point.
+        for (const tr::SfxParticleTowards& t : p.towards) {
+            if (t.sourceTarget != 0 || t.targetTarget != 0) continue;
+            StateParticle e;
+            e.body = body;
+            e.event.version = t.version;
+            e.event.marker = t.marker;
+            e.event.file = t.file;
+            e.event.contactPoint = t.sourceContactPoint;
+            e.marker = markerOf(t.marker);
+            e.towards = true;
+            e.towardsContactPoint = t.targetContactPoint;
+            e.eventIndex = effects.particles.size();
+            effects.particles.push_back(e);
         }
         for (tr::SfxTimer t : p.timers) {
             t.marker = markerOf(t.marker);

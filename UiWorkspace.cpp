@@ -4,6 +4,7 @@
 #include "GpuTexture.h"
 
 #include "imgui_internal.h"   // DockBuilder
+#include <SDL3/SDL_keyboard.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -610,8 +611,8 @@ void UiWorkspace::drawCanvasPanel() {
             }
             if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) stepBar_ = nullptr;
             // Edit boxes (editbox.cpp, traced 2026-10-20; see UiCanvas::layoutEdit). A press on an enabled box gives it the keyboard
-            // (elsewhere takes it away) and puts the caret at the character under the mouse (vtable + 0x204, NOT read: the nearest
-            // boundary); with Shift it extends the selection from its anchor, else clears it, and starts a drag that extends it while the
+            // (elsewhere takes it away) and puts the caret at the character under the mouse (vtable + 0x204, FUN_008d21b0: the first character of the window whose middle is
+            // right of the mouse - the nearest boundary); with Shift it extends the selection from its anchor, else clears it, and starts a drag that extends it while the
             // button is held (FUN_008d0ec0 / FUN_008d1040 / FUN_008d0fe0; the select flag + 0x138 is 1 from the constructor).
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                 const tr::XmlNode* box = nullptr;
@@ -682,15 +683,17 @@ void UiWorkspace::drawCanvasPanel() {
                 insert(std::u32string(1, char32_t(c)));
             }
             // Navigation (FUN_008d1f20; keys FUN_008ddc30): Left / Right one character, or to the start / end with Ctrl (modifier bit 4);
-            // Home / End; Up / Down keep the caret. With Shift (bit 1) the selection runs from its anchor (the caret if none) to the new
-            // caret, otherwise any selection is cleared.
+            // Home / End; Up / Down keep the caret; with NumLock off the keypad's 4 / 6 / 7 / 1 / 8 / 2 too (with it on they type digits).
+            // With Shift (bit 1) the selection runs from its anchor (the caret if none) to the new caret, otherwise any selection is cleared.
             int nav = 0;
-            if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) nav = 1;
-            else if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) nav = 2;
-            else if (ImGui::IsKeyPressed(ImGuiKey_UpArrow)) nav = 3;
-            else if (ImGui::IsKeyPressed(ImGuiKey_DownArrow)) nav = 4;
-            else if (ImGui::IsKeyPressed(ImGuiKey_Home)) nav = 5;
-            else if (ImGui::IsKeyPressed(ImGuiKey_End)) nav = 6;
+            const bool numLock = (SDL_GetModState() & SDL_KMOD_NUM) != 0;
+            auto pressed = [&](ImGuiKey key, ImGuiKey keypad) { return ImGui::IsKeyPressed(key) || (!numLock && ImGui::IsKeyPressed(keypad)); };
+            if (pressed(ImGuiKey_LeftArrow, ImGuiKey_Keypad4)) nav = 1;
+            else if (pressed(ImGuiKey_RightArrow, ImGuiKey_Keypad6)) nav = 2;
+            else if (pressed(ImGuiKey_UpArrow, ImGuiKey_Keypad8)) nav = 3;
+            else if (pressed(ImGuiKey_DownArrow, ImGuiKey_Keypad2)) nav = 4;
+            else if (pressed(ImGuiKey_Home, ImGuiKey_Keypad7)) nav = 5;
+            else if (pressed(ImGuiKey_End, ImGuiKey_Keypad1)) nav = 6;
             if (nav != 0) {
                 size_t to = caret;
                 if (nav == 1 && caret > 0) to = io.KeyCtrl ? 0 : caret - 1;
@@ -714,21 +717,9 @@ void UiWorkspace::drawCanvasPanel() {
                 if (hasSelection()) deleteSelection();
                 else if (caret > 0) text.erase(--caret, 1);
             }
-            // Ctrl + X / C / V (the keys FUN_008ddd40 maps to cut / copy / paste - the handlers are NOT read): through the clipboard.
-            if (io.KeyCtrl && !io.KeyShift && !io.KeyAlt) {
-                const size_t lo = std::min(std::min(editAnchor_, editEnd_), text.size()), hi = std::min(std::max(editAnchor_, editEnd_), text.size());
-                if ((ImGui::IsKeyPressed(ImGuiKey_C) || ImGui::IsKeyPressed(ImGuiKey_X)) && lo < hi && focusedEdit_->tag != "PasswordBox") {
-                    ImGui::SetClipboardText(toUtf8(text.substr(lo, hi - lo)).c_str());
-                    if (ImGui::IsKeyPressed(ImGuiKey_X)) deleteSelection();
-                }
-                if (ImGui::IsKeyPressed(ImGuiKey_V))
-                    if (const char* clip = ImGui::GetClipboardText()) {
-                        std::u32string pasted;
-                        for (char32_t c : toU32(clip))
-                            if (c >= 0x20 && c != 0x7F) pasted += c;
-                        insert(pasted);
-                    }
-            }
+            // Ctrl + X / C / V: FUN_008ddd40 maps them to edit commands 1-3, but the EditBox's handler (FUN_008d20e0) acts only on 4 / 5
+            // (Delete / Backspace) - they do nothing (the exe never reads the clipboard: no GetClipboardData import; its one
+            // SetClipboardData copies an assert message, FUN_004083d0).
             editCaret_ = caret;
             if (text != before || editCaret_ != oldCaret || editAnchor_ != oldAnchor || editEnd_ != oldEnd) {
                 utf8 = toUtf8(text);

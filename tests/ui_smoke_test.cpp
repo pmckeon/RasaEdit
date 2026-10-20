@@ -1136,6 +1136,13 @@ int main() {
                 check(atStart == 0 && afterTick == 2 && timersAfterTick == 1 && timer && afterTimer == 0 && afterSecondTick == 2 &&
                           std::fabs(timerAt - tickAt - 3.3f) < 0.1f && stopped,
                       "a package's events wait for their markers (Tick, Timer1, Stop)");
+                // Particles towards (PFXT) from the body to itself: vfx_damage_human.pkg's blood splat (connection point 38 towards 11) starts
+                // at Start on the effect proxy.
+                assets.showAsset("vfx_damage_human.pkg");
+                frames(editor, device, 5);
+                const size_t towardsSystems = p.scene_ ? p.scene_->liveParticleSystems() : 0;
+                std::printf("      particles towards: %zu systems\n", towardsSystems);
+                check(towardsSystems >= 1, "a particles-towards event plays (vfx_damage_human.pkg's blood splat)");
             }
             {
                 // Out and back: Extract writes the file as the game reads it; a texture goes out as PNG and comes back encoded like the

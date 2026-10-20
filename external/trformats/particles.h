@@ -323,6 +323,42 @@ struct SfxSound {
 // constructor's default 53 = Timer1). When fired, the trigger makes one product per selected body: its countdown starts at 0 with
 // fireAtOnce, else uniform random in [minDelay, maxDelay] (FUN_00788250); each update takes the elapsed seconds off and, at or below
 // 0, fires `fires` into the package (SfxPackage vtable slot 3) and draws a new delay; with a duration > 0 it ends once that has passed.
+// `ACTR` accessory tracer v1-2 (TRasa::SfxAccessoryTracerEvent, unserializer FUN_00767f40, trigger FUN_00767940; constructor defaults at
+// factory 0x00753780: connection points 28 / 29, duration 1500): u8 marker (+ 8), asset (+ 0xc), u8 target (+ 0x18), u32 durationMs
+// (+ 0x24), u32 (+ 0x28, ms), [v2: u8 contactPoint1 (+ 0x1c), u8 contactPoint2 (+ 0x20)]. The trigger finds both connection points
+// (type 1, usage 1) on the body `target` selects and makes a tracer between them with the VFX manager (FUN_007edac0: the asset, the
+// two points' frames, durationMs x 0.001, the + 0x28 value x 0.001), kept as an SfxAccessoryTracerProduct.
+struct SfxTracer {
+    uint32_t version = 0;
+    uint32_t marker = 0;
+    std::string asset;
+    uint32_t target = 0;
+    uint32_t durationMs = 1500;
+    uint32_t value28 = 0;                        // + 0x28, ms (use NOT traced)
+    uint32_t contactPoint1 = 28, contactPoint2 = 29;
+};
+// `PFXT` particles towards v1-2 (TRasa::SfxParticleTowardsEvent, unserializer FUN_00768ab0, trigger FUN_00768190): u8 marker (+ 8),
+// asset .pfx (+ 0xc), u8 sourceTarget (+ 0x18), u8 sourceContactPoint (+ 0x1c), u8 targetTarget (+ 0x20), u8 targetContactPoint (+ 0x24),
+// [v2: u8 flag (+ 0x29)]. The trigger starts the system at the source body's connection point, turned to face the target body's
+// connection point (D3DXQuaternionRotationMatrix of a look-at from source to target); 0 = the body itself.
+struct SfxParticleTowards {
+    uint32_t version = 0;
+    uint32_t marker = 0;
+    std::string file;
+    uint32_t sourceTarget = 0, sourceContactPoint = 0, targetTarget = 0, targetContactPoint = 0;
+    bool flag29 = false;
+};
+// `PROJ` projectile v2-9 (TRasa::SfxProjectileEvent, unserializer FUN_00762700, trigger FUN_00760f70): u8 marker (+ 8), asset (+ 0x10),
+// [v3+: asset (+ 0x1c)], f32, u8 (+ 0x68), u8 (+ 0x6c), [v3+: u8 (+ 0xc)], [v4+: u32], [v5+: asset (+ 0x28)], [v6+: asset (+ 0x40)],
+// [v7+: u8 (+ 0x64), asset (+ 0x34), asset (+ 0x4c)], [v8+: f32], [v9: asset (+ 0x70)]. What the fields do is NOT traced (a projectile
+// flies from the source to a hit / miss body; nothing of it is drawn).
+struct SfxProjectile {
+    uint32_t version = 0;
+    uint32_t marker = 0;
+    std::vector<std::string> assets;             // in file order
+    float value = 0, value8 = 0;
+    uint32_t byte68 = 0, byte6c = 0, byteC = 0, value4 = 0, byte64 = 0;
+};
 struct SfxTimer {
     uint32_t marker = 0;
     float duration = 0, minDelay = 1, maxDelay = 1;
@@ -348,6 +384,9 @@ struct SfxPackage {
     std::vector<SfxSound> sounds;
     std::vector<SfxTimer> timers;
     std::vector<uint32_t> stops;                 // `STOP` events' markers
+    std::vector<SfxTracer> tracers;
+    std::vector<SfxParticleTowards> towards;
+    std::vector<SfxProjectile> projectiles;
 };
 SfxPackage readSfxPackage(const Bytes& data);
 

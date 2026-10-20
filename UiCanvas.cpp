@@ -1203,8 +1203,8 @@ std::string utf8Of(const std::vector<uint32_t>& cps, size_t from, size_t to) {
 
 // EditBox layout (FUN_008d2710, traced 2026-10-20). The visible window [+ 0x184, + 0x188) follows the caret (+ 0x144): a caret before the
 // window's start becomes the start and the end is worked out from it (vtable + 0x20c); one past the end (or an end past the text)
-// becomes the end and the start is worked out back from it (+ 0x208) - both NOT read: the editor fits as many whole characters as the
-// box's width holds. The window's text is laid out as runs (+ 0x134, 0x30 bytes: string, highlighted + 0x1c, x / y): without a
+// becomes the end and the start is worked out back from it (+ 0x208) - both (FUN_008d2570 / FUN_008d23a0) take the longest run of whole
+// characters from the fixed end that fits the box's width (+ 0x13c) less the prefix's. The window's text is laid out as runs (+ 0x134, 0x30 bytes: string, highlighted + 0x1c, x / y): without a
 // selection (+ 0x13c == + 0x140) one run and the Highlight (+ 0xf4) hidden; with one, the text before it, the selection clipped to the
 // window (highlighted), then the rest; the Highlight is shown, placed at the selection's run (Widget + 0x148) and sized to it (+ 0x128:
 // the run's width x the font height, from FUN_008f9d70). The caret goes to (width of the window's text before it + the prefix,
