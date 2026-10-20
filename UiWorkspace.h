@@ -187,7 +187,10 @@ private:
     std::vector<uint8_t> rgba_;
     std::vector<UiCanvas::DrawnWidget> drawn_;
     SDL_GPUTexture* texture_ = nullptr;
-    int zoom_ = 0;                          // 0 fit, 1 50 %, 2 100 %, 3 200 %
+    int zoom_ = 0;                          // 0 fit, 1 50 %, 2 100 %, 3 200 %, 4 zoomScale_ (Ctrl + wheel)
+    float zoomScale_ = 1.0f;                // screen pixels per canvas pixel for zoom_ 4
+    ImVec2 canvasScroll_{};                 // set before the canvas's next frame after a wheel zoom, so the point under the cursor stays
+    bool canvasScrollPending_ = false;
     int screen_ = 0;                        // the screen-size choice (Options::screenWidth / screenHeight)
     // Edit mode: every widget in its exported state - no animation, no mouse effects; clicks select. Interactive mode: animations
     // play, the wires glow around the mouse, buttons highlight / push / toggle under it; clicks press buttons.

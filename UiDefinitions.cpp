@@ -1159,8 +1159,9 @@ void UiWorkspace::drawTextureEditor(size_t index) {
                       std::clamp(std::round((m.y - origin.y) / scale), 0.0f, float(previewHeight_)));
     };
     const ImVec2 under((mouse.x - origin.x) / scale, (mouse.y - origin.y) / scale);     // texture position (fractional)
-    // Wheel zooms around the cursor; right or middle drag pans.
-    if (hovered && ImGui::GetIO().MouseWheel != 0.0f)
+    // Ctrl + wheel zooms around the cursor (the plain wheel scrolls the panel; with Ctrl held the view owns the wheel, so the panel
+    // does not scroll as well); right or middle drag pans.
+    if (ImGui::GetIO().KeyCtrl && ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY) && ImGui::GetIO().MouseWheel != 0.0f)
         zoomTo(scale * std::pow(1.25f, ImGui::GetIO().MouseWheel), under, ImVec2(mouse.x - clipMin.x, mouse.y - clipMin.y));
     if (ImGui::IsWindowHovered() && (ImGui::IsMouseDragging(ImGuiMouseButton_Right, 0.0f) || ImGui::IsMouseDragging(ImGuiMouseButton_Middle, 0.0f))) {
         const ImVec2 d = ImGui::GetIO().MouseDelta;

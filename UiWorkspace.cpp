@@ -471,7 +471,18 @@ void UiWorkspace::drawCanvasPanel() {
     ImGui::Combo("##background", &options_.background, "Black\0Grey\0Checkerboard\0");
     ImGui::SameLine();
     ImGui::SetNextItemWidth(90);
-    ImGui::Combo("##zoom", &zoom_, "Fit\0" "50%\0" "100%\0" "200%\0");
+    {
+        static const char* const zooms[] = {"Fit", "50%", "100%", "200%"};
+        char custom[32];
+        std::snprintf(custom, sizeof custom, "%.0f%%", zoomScale_ * 100.0f);
+        if (ImGui::BeginCombo("##zoom", zoom_ == 4 ? custom : zooms[std::clamp(zoom_, 0, 3)])) {
+            for (int z = 0; z < 4; ++z)
+                if (ImGui::Selectable(zooms[z], zoom_ == z)) zoom_ = z;
+            if (zoom_ == 4) ImGui::Selectable(custom, true);
+            ImGui::EndCombo();
+        }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Ctrl + wheel over the canvas zooms about the cursor");
+    }
     ImGui::SameLine();
     ImGui::SetNextItemWidth(170);
     // The screen the UI is drawn for: the export's 1280 x 960 at one pixel per unit, or a real screen size (wider than 1.5 the
@@ -515,12 +526,27 @@ void UiWorkspace::drawCanvasPanel() {
     }
     const float w = float(canvas_.pixelWidth()), h = float(canvas_.pixelHeight());
     const float sx = float(canvas_.pixelWidth()) / float(std::max(1, canvas_.width())), sy = float(canvas_.pixelHeight()) / float(std::max(1, canvas_.height()));
+    if (canvasScrollPending_) ImGui::SetNextWindowScroll(canvasScroll_);
+    canvasScrollPending_ = false;
     ImGui::BeginChild("canvas", ImVec2(0, 0), ImGuiChildFlags_None, ImGuiWindowFlags_HorizontalScrollbar);
     const ImVec2 avail = ImGui::GetContentRegionAvail();
-    float scale = zoom_ == 1 ? 0.5f : zoom_ == 2 ? 1.0f : zoom_ == 3 ? 2.0f : std::max(0.05f, std::min(avail.x / w, avail.y / h));
+    float scale = zoom_ == 1 ? 0.5f : zoom_ == 2 ? 1.0f : zoom_ == 3 ? 2.0f : zoom_ == 4 ? zoomScale_
+                                                                                  : std::max(0.05f, std::min(avail.x / w, avail.y / h));
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     ImGui::Image(ImTextureRef((ImTextureID)(intptr_t)texture_), ImVec2(w * scale, h * scale));
     const bool hovered = ImGui::IsItemHovered();
+    // Ctrl + wheel zooms about the cursor (the plain wheel scrolls the canvas, and in Interactive mode drives the UI's scroll bars);
+    // with Ctrl held the canvas owns the wheel. The new scroll keeps the canvas point under the cursor: scroll' = p z' - (mouse - origin
+    // - scroll), p = (mouse - origin) / z.
+    if (ImGui::GetIO().KeyCtrl && ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY) && ImGui::GetIO().MouseWheel != 0.0f) {
+        const float z = std::clamp(scale * std::pow(1.25f, ImGui::GetIO().MouseWheel), 0.05f, 16.0f);
+        const ImVec2 m = ImGui::GetMousePos();
+        const ImVec2 view(m.x - origin.x - ImGui::GetScrollX(), m.y - origin.y - ImGui::GetScrollY());
+        canvasScroll_ = ImVec2(std::max(0.0f, (m.x - origin.x) / scale * z - view.x), std::max(0.0f, (m.y - origin.y) / scale * z - view.y));
+        canvasScrollPending_ = true;
+        zoomScale_ = z;
+        zoom_ = 4;
+    }
     // Toolbox drops onto the canvas (the drop target must follow the image item).
     if (!interactive_ && ImGui::BeginDragDropTarget()) {
         const ImVec2 m = ImGui::GetMousePos();

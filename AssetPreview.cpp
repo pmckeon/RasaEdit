@@ -727,13 +727,15 @@ void AssetPreview::drawModel(EditorContext& ctx) {
         const float metresPerPixel = 2.0f * distance_ * std::tan(camera.fovY * 0.5f) / size.y;
         target_ = add(target_, add(scaled(camera.right(), -d.x * metresPerPixel), scaled(camera.up(), d.y * metresPerPixel)));
     }
-    if (!frontEndCamera_ && ImGui::IsItemHovered() && ImGui::GetIO().MouseWheel != 0) distance_ *= std::pow(0.85f, ImGui::GetIO().MouseWheel);
+    // Ctrl + wheel zooms (the plain wheel scrolls the panel); with Ctrl held the preview owns the wheel, so the panel does not scroll too.
+    if (!frontEndCamera_ && ImGui::GetIO().KeyCtrl && ImGui::SetItemKeyOwner(ImGuiKey_MouseWheelY) && ImGui::GetIO().MouseWheel != 0)
+        distance_ *= std::pow(0.85f, ImGui::GetIO().MouseWheel);
     modelVisible_ = true;
     const size_t total = scene_->modelsTotal(), loaded = scene_->modelsLoaded(), failed = scene_->modelsFailed();
     if (failed > 0) ImGui::TextColored(ImVec4(1, 0.5f, 0.4f, 1), "The model failed to load.");
     else if (loaded < total) ImGui::TextDisabled("Loading...");
     else if (frontEndCamera_) ImGui::TextDisabled("The game's front-end camera (fixed).");
-    else ImGui::TextDisabled("Drag to turn, middle drag to move, wheel to zoom.");
+    else ImGui::TextDisabled("Drag to turn, middle drag to move, Ctrl + wheel to zoom.");
     ImGui::SameLine();
     if (ImGui::SmallButton("Reset view")) modelFitted_ = false;
     if (particlesOnly_ || !animationFile_.empty()) {
