@@ -155,6 +155,7 @@ void UiWorkspace::beginFrame() {
     if (doc_ && validatedRevision_ != doc_->revision() && ImGui::GetTime() - lastEditTime_ > 0.5) validateNow();
     if (!dirty_ || !doc_ || !hasBranch_) return;
     dirty_ = false;
+    options_.focusedEdit = interactive_ ? focusedEdit_ : nullptr;
     drawn_ = canvas_.render(branch_, options_, rgba_);
     // Replaced between frames: no draw list of this frame references the old texture yet.
     if (texture_) SDL_ReleaseGPUTexture(ctx_.device, texture_);
@@ -359,11 +360,15 @@ void UiWorkspace::drawCanvasPanel() {
         toggled_.clear();
         scrollValues_.clear();
         thumbBar_ = nullptr;
+        stepBar_ = nullptr;
+        editTexts_.clear();
+        focusedEdit_ = nullptr;
         pushed_ = nullptr;
         options_.interactiveButtons = interactive_;
         options_.hoveredButton = options_.pushedButton = nullptr;
         options_.toggledButtons = &toggled_;
         options_.scrollValues = interactive_ ? &scrollValues_ : nullptr;
+        options_.editTexts = interactive_ ? &editTexts_ : nullptr;
         options_.mouseHighlight = interactive_;
         options_.animTime = interactive_ ? 0.0f : -1.0f;
         if (interactive_) options_.mouseX = options_.mouseY = -10000.0f;     // until the mouse is over the canvas
@@ -505,8 +510,7 @@ void UiWorkspace::drawCanvasPanel() {
             // over it toggles a toggle button.
             const tr::XmlNode* button = canvas_.buttonAt(x, y);
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) pushed_ = button;
-            // Scroll bar / slider thumbs follow a drag along their track (the thumb layout backwards, UiCanvas::thumbRatioAt). Arrow
-            // buttons and track clicks do not step them: their step sizes are not traced.
+            // Scroll bar / slider thumbs follow a drag along their track (the thumb layout backwards, UiCanvas::thumbRatioAt).
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left))
                 if (const tr::XmlNode* thumb = canvas_.thumbAt(x, y)) {
                     UiCanvas::Rect r{0, 0, 0, 0};
@@ -514,6 +518,75 @@ void UiWorkspace::drawCanvasPanel() {
                     grabX_ = x - r.x0;
                     grabY_ = y - r.y0;
                 }
+            // Scroll bar arrow buttons and track: one value unit per press, repeated while held (600 ms, then every 100 ms; the
+            // track re-tests the mouse against the thumb each time) - UiCanvas::scrollStepAt.
+            const auto stepScroll = [&]() {
+                const tr::XmlNode* bar = nullptr;
+                int step = 0;
+                if (!canvas_.scrollStepAt(x, y, bar, step) || bar != stepBar_ || step == 0) return;
+                const auto old = scrollValues_.find(bar);
+                const float ratio = UiCanvas::scrollRatioStepped(*bar, old == scrollValues_.end() ? -1.0f : old->second, step);
+                if (old == scrollValues_.end() || old->second != ratio) {
+                    scrollValues_[bar] = ratio;
+                    dirty_ = true;
+                }
+            };
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !thumbBar_) {
+                int step = 0;
+                stepBar_ = nullptr;
+                if (canvas_.scrollStepAt(x, y, stepBar_, step) && stepBar_) {
+                    stepHeld_ = 0.0;
+                    stepScroll();
+                }
+            } else if (stepBar_ && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                stepHeld_ += double(ImGui::GetIO().DeltaTime) * 1000.0;
+                if (stepHeld_ > 599.0) {
+                    stepHeld_ -= 100.0;
+                    stepScroll();
+                }
+            }
+            if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) stepBar_ = nullptr;
+            // Edit boxes: a click on one gives it the keyboard (elsewhere takes it away); typed characters go in (up to lengthLimit),
+            // Backspace removes the last, Enter / Escape let go.
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                const tr::XmlNode* box = nullptr;
+                for (std::vector<int32_t> p = under; !p.empty() && !box; p.pop_back()) {
+                    const tr::XmlNode* n = canvas_.node(p);
+                    if (n && (n->tag == "EditBox" || n->tag == "PasswordBox") && n->attribute("enabled") == "true") box = n;
+                }
+                if (box != focusedEdit_) {
+                    focusedEdit_ = box;
+                    dirty_ = true;
+                }
+            }
+            if (focusedEdit_) {
+            ImGuiIO& io = ImGui::GetIO();
+            std::string& text = editTexts_[focusedEdit_];
+            const long limit = focusedEdit_->hasAttribute("lengthLimit") ? std::strtol(focusedEdit_->attribute("lengthLimit").c_str(), nullptr, 10) : -1;
+            auto count = [](const std::string& s) {
+                size_t n = 0;
+                for (unsigned char ch : s) n += (ch & 0xC0) != 0x80;
+                return n;
+            };
+            for (int k = 0; k < io.InputQueueCharacters.Size; ++k) {
+                const ImWchar c = io.InputQueueCharacters[k];
+                if (c < 0x20 || c == 0x7F || (limit >= 0 && count(text) >= size_t(limit))) continue;
+                if (c < 0x80) text += char(c);
+                else if (c < 0x800) { text += char(0xC0 | (c >> 6)); text += char(0x80 | (c & 0x3F)); }
+                else { text += char(0xE0 | (c >> 12)); text += char(0x80 | ((c >> 6) & 0x3F)); text += char(0x80 | (c & 0x3F)); }
+                dirty_ = true;
+            }
+            if (ImGui::IsKeyPressed(ImGuiKey_Backspace) && !text.empty()) {
+                size_t end = text.size() - 1;
+                while (end > 0 && (static_cast<unsigned char>(text[end]) & 0xC0) == 0x80) --end;
+                text.erase(end);
+                dirty_ = true;
+            }
+            if (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+                focusedEdit_ = nullptr;
+                dirty_ = true;
+            }
+            }
             if (thumbBar_ && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
                 const float ratio = canvas_.thumbRatioAt(*thumbBar_, x - grabX_, y - grabY_);
                 const auto old = scrollValues_.find(thumbBar_);
@@ -865,6 +938,9 @@ void UiWorkspace::syncWithDocument() {
     toggled_.clear();
     scrollValues_.clear();
     thumbBar_ = nullptr;
+    stepBar_ = nullptr;
+    editTexts_.clear();
+    focusedEdit_ = nullptr;
     pushed_ = nullptr;
     options_.hoveredButton = options_.pushedButton = nullptr;
     options_.dragNode = nullptr;
@@ -1624,7 +1700,7 @@ void UiWorkspace::handleShortcuts() {
         ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Z, ImGuiInputFlags_RouteGlobal))
         runEdit([&] { doc_->redo(); });
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_S, ImGuiInputFlags_RouteGlobal) && hasUnsavedChanges()) saveChanges();
-    if (ImGui::GetIO().WantTextInput) return;
+    if (ImGui::GetIO().WantTextInput || (interactive_ && focusedEdit_)) return;   // typing into an edit box on the canvas
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_D, ImGuiInputFlags_RouteGlobal)) duplicateSelection();
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_C, ImGuiInputFlags_RouteGlobal)) copySelection();
     if (ImGui::Shortcut(ImGuiMod_Ctrl | ImGuiKey_X, ImGuiInputFlags_RouteGlobal)) cutSelection();

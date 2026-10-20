@@ -66,6 +66,10 @@ public:
         // Animations (Definitions/Animations, see sampleAnimation): milliseconds since every widget's animation started; below 0: none
         // applied (the export's own state).
         float animTime = -1.0f;
+        // Interactive mode: text typed into edit boxes (EditBox / PasswordBox, UTF-8) and the box that has the keyboard (its caret
+        // shows); see drawEditText.
+        const std::map<const tr::XmlNode*, std::string>* editTexts = nullptr;
+        const tr::XmlNode* focusedEdit = nullptr;
         // Edit mode: the widget being dragged and by how much (logical units), drawn moved before the edit is written.
         const tr::XmlNode* dragNode = nullptr;
         int32_t dragX = 0, dragY = 0;          // added to its anchorOffset
@@ -130,6 +134,11 @@ public:
     const tr::XmlNode* parentOf(const tr::XmlNode* child) const;
     bool drawnRect(const tr::XmlNode* widget, Rect& rect) const;     // where the last draw put it
     float thumbRatioAt(const tr::XmlNode& bar, int32_t x, int32_t y) const;
+    // A press on a scroll bar's arrow button or track in the last render (see the .cpp): the bar and the step it makes (+1 / -1, 0 =
+    // on the track at the thumb); false if (x, y) is on none. scrollRatioStepped: the thumb ratio after `step` value units from
+    // `ratio` (below 0: the exported currentValue), clamped as the game's setValue.
+    bool scrollStepAt(int32_t x, int32_t y, const tr::XmlNode*& bar, int& step) const;
+    static float scrollRatioStepped(const tr::XmlNode& bar, float ratio, int step);
     static bool isButton(const tr::XmlNode& n) { return n.hasAttribute("UpTextureDef"); }
     // Whether the last render sampled an animation that has not come to rest (repeat / pingpong, or before its end).
     bool animating() const { return animating_; }
@@ -166,6 +175,14 @@ private:
     void drawText(const tr::XmlNode& widget, const Rect& rect, const Rect& clip, Target& target);
     void fillBackground(Target& target) const;                      // options_.background / backgroundRgba
     void finish(const Target& target, std::vector<uint8_t>& rgba) const;
+    // Edit boxes (drawEditText): drawText measures without drawing (measureOnly_), keeps the end of a text too long for the box
+    // (scrollTail_, instead of "..."), and reports the width / em of the line it laid out (pixels).
+    bool measureOnly_ = false, scrollTail_ = false;
+    int32_t measuredWidth_ = 0, measuredEm_ = 0;
+    std::map<const tr::XmlNode*, std::string> textOverrides_;
+    bool editText(const tr::XmlNode& box, std::string& text) const;
+    void placeCaret(const tr::XmlNode& box, const Rect& rect, const Rect& clip, Target& target);
+    void drawEditText(const tr::XmlNode& box, const Rect& rect, const Rect& clip, Target& target);
     const tr::XmlNode* sampleNode_ = nullptr;                       // renderDetached's widget, whose text is sampleText_
     std::string sampleText_;
 
@@ -178,6 +195,7 @@ private:
     // A button's state applied to its Bitmap / Text children (drawWidget): texture, text colour, text offset.
     struct ButtonOverride {
         bool texture = false, colour = false, offset = false, size = false;
+        bool show = false;                  // drawn although visible="false" (an edit box's caret while focused)
         std::string textureDef;
         float rgba[4] = {1, 1, 1, 1};
         int32_t offsetX = 0, offsetY = 0;

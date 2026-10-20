@@ -775,6 +775,59 @@ void UiWorkspace::showSample(const std::string& key) {
     if (f < 1.0f && ImGui::IsItemHovered()) ImGui::SetTooltip("Shown at %d %% (the panel is narrower than the sample)", int(f * 100.0f));
 }
 
+// The texture definition drawn as the game draws a Bitmap of it (UiCanvas: the region, stretched or tiled per modeU / modeV) at a
+// widget size chosen here (0 = the region's own size), over a checkerboard.
+void UiWorkspace::drawTextureSample(size_t index) {
+    const std::string id = definitionId(tr::UiSection::Textures, index);
+    if (!ImGui::CollapsingHeader("As the game draws it", ImGuiTreeNodeFlags_DefaultOpen)) return;
+    const tr::UiExport* ex = ui();
+    const auto def = ex ? ex->textures.find(id) : decltype(ex->textures.end()){};
+    if (!ex || def == ex->textures.end()) {
+        ImGui::TextDisabled("No texture definition by this id.");
+        return;
+    }
+    int32_t regionW = def->second.right > def->second.left ? def->second.right - def->second.left : 0;
+    int32_t regionH = def->second.bottom > def->second.top ? def->second.bottom - def->second.top : 0;
+    if (regionW <= 0 && previewLoaded_ == def->second.name) regionW = previewWidth_;
+    if (regionH <= 0 && previewLoaded_ == def->second.name) regionH = previewHeight_;
+    if (regionW <= 0) regionW = 64;
+    if (regionH <= 0) regionH = 64;
+    int size[2] = {texSampleW_ > 0 ? texSampleW_ : regionW, texSampleH_ > 0 ? texSampleH_ : regionH};
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9.0f);
+    if (ImGui::DragInt2("Widget size", size, 1.0f, 1, 2048)) {
+        texSampleW_ = size[0];
+        texSampleH_ = size[1];
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Region size")) texSampleW_ = texSampleH_ = 0;
+    ImGui::SameLine();
+    if (ImGui::SmallButton("x 2")) {
+        texSampleW_ = size[0] * 2;
+        texSampleH_ = size[1] * 2;
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Twice the size: shows how modeU / modeV stretch or tile the region");
+    SampleRequest& r = sampleWanted_;
+    r.widget = tr::XmlNode{};
+    r.widget.tag = "Bitmap";
+    setAttr(r.widget, "textureDef", id);
+    setAttr(r.widget, "childAnchor", "8");
+    setAttr(r.widget, "parentAnchor", "8");
+    setAttr(r.widget, "sizeW", std::to_string(size[0]));
+    setAttr(r.widget, "sizeH", std::to_string(size[1]));
+    const float frameW = float(size[0]) + 16.0f, frameH = float(size[1]) + 16.0f;
+    const float availW = std::max(ImGui::GetContentRegionAvail().x, 64.0f);
+    const float scale = std::min({1.0f, availW / frameW, 240.0f / frameH});
+    r.width = std::max(int32_t(frameW * scale), 16);
+    r.height = std::max(int32_t(frameH * scale), 16);
+    r.scale = scale;
+    r.animTime = -1.0f;
+    r.text.clear();
+    r.key = "tex:" + id + "|" + std::to_string(doc_->revision()) + "|" + std::to_string(size[0]) + "x" + std::to_string(size[1]) + "|" +
+            std::to_string(r.width);
+    showSample(r.key);
+    if (scale < 1.0f) ImGui::TextDisabled("Shown at %d %%.", int(scale * 100.0f));
+}
+
 // A colour definition with its alpha over a checkerboard, beside the colour opaque.
 void UiWorkspace::drawColourSwatch(const float rgba[4]) {
     const float w = std::max(ImGui::GetContentRegionAvail().x, 64.0f), h = ImGui::GetFrameHeight() * 2.5f;
@@ -918,8 +971,31 @@ void UiWorkspace::drawAnimationSample(size_t index) {
         setAttr(r.widget, "sizeW", "96");
         setAttr(r.widget, "sizeH", "64");
     } else {
-        ImGui::TextDisabled("No Bitmap uses it: nothing to play it on (a Bitmap animation moves its texture).");
-        return;
+        // No Bitmap uses it: played on a texture definition chosen here (a Bitmap animation moves its texture's region / rotation).
+        const tr::UiExport* ex = ui();
+        if (!ex || ex->textures.empty()) {
+            ImGui::TextDisabled("No Bitmap uses it, and the layout has no texture definitions to play it on.");
+            return;
+        }
+        if (!ex->textures.count(animTexture_)) animTexture_ = ex->textures.begin()->first;
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::BeginCombo("##animtexture", ("On texture " + animTexture_).c_str(), ImGuiComboFlags_HeightLarge)) {
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            ImGui::InputTextWithHint("##filter", "filter", animTextureFilter_, sizeof animTextureFilter_);
+            const std::string filter = lower(animTextureFilter_);
+            for (const auto& entry : ex->textures) {
+                if (!filter.empty() && lower(entry.first).find(filter) == std::string::npos) continue;
+                if (ImGui::Selectable(entry.first.c_str(), entry.first == animTexture_)) animTexture_ = entry.first;
+            }
+            ImGui::EndCombo();
+        }
+        const tr::UiTextureDef& def = ex->textures.at(animTexture_);
+        r.widget = tr::XmlNode{};
+        r.widget.tag = "Bitmap";
+        setAttr(r.widget, "textureDef", animTexture_);
+        const int32_t w = def.right > def.left ? def.right - def.left : 128, h = def.bottom > def.top ? def.bottom - def.top : 128;
+        setAttr(r.widget, "sizeW", std::to_string(std::clamp(w, 16, 512)));
+        setAttr(r.widget, "sizeH", std::to_string(std::clamp(h, 16, 512)));
     }
     // Centred in the preview, visible, at its own size (a widget sized by its parent gets 64 x 64).
     for (const char* a : {"anchorOffsetX", "anchorOffsetY", "resizeToParent", "visible"}) eraseAttr(r.widget, a);
@@ -940,10 +1016,10 @@ void UiWorkspace::drawAnimationSample(size_t index) {
     // The playback rule (sampleAnimation) loops, mirrors or holds the last frame.
     r.animTime = length > 0 ? std::max(t, 0.0f) : -1.0f;
     r.key = "anim:" + id + "|" + std::to_string(doc_->revision()) + "|" + std::to_string(animShownOn_) + "|" + std::to_string(r.width) + "|" +
-            std::to_string(int32_t(r.animTime));
+            std::to_string(int32_t(r.animTime)) + "|" + (source ? std::string() : animTexture_);
     showSample(r.key);
     if (length == 0) ImGui::TextDisabled("No keys: nothing moves.");
-    if (!source) ImGui::TextDisabled("Not used by any element: shown on a plain white box.");
+    if (!source) ImGui::TextDisabled(bitmap ? "Not used by any Bitmap: shown on the texture chosen above." : "Not used by any element: shown on a plain white box.");
 }
 
 void UiWorkspace::drawColourEditor(size_t index) {
@@ -1001,6 +1077,7 @@ void UiWorkspace::drawTextureEditor(size_t index) {
         }
         ImGui::EndTable();
     }
+    drawTextureSample(index);
     n = doc_->node(tr::UiSection::Textures, path);
     if (!n) return;
     if (ImGui::Button("Whole texture")) {

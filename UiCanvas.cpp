@@ -752,6 +752,7 @@ void UiCanvas::drawColour(const tr::XmlNode& widget, const Rect& rect, const Rec
 
 std::string UiCanvas::text(const tr::XmlNode& widget) {
     if (&widget == sampleNode_) return sampleText_;          // a Definitions preview's sample
+    if (const auto o = textOverrides_.find(&widget); o != textOverrides_.end()) return o->second;   // an edit box's typed text
     const std::string id = widget.attribute("textId");
     if (id.empty() || !game_) return "";
     std::string s;
@@ -836,6 +837,13 @@ void UiCanvas::drawText(const tr::XmlNode& widget, const Rect& rect, const Rect&
                     setFont(*best);
                     if (!baseFace) return;
                 }
+            } else if (scrollTail_) {
+                // An edit box keeps its caret (at the end) in view: the leading characters scroll out (UNVERIFIED rule - the game
+                // moves its visible window, + 0x184 / + 0x188, only as far as the caret needs; FUN_008d2710).
+                int32_t used = total;
+                size_t drop = 0;
+                while (drop < items.size() && used > px.width()) used -= advance(drop++);
+                items.erase(items.begin(), items.begin() + std::ptrdiff_t(drop));
             } else {
                 // Keep the characters that fit, then drop more until "..." fits too.
                 int32_t used = 0;
@@ -882,9 +890,13 @@ void UiCanvas::drawText(const tr::XmlNode& widget, const Rect& rect, const Rect&
     if (vert == "center") y += (px.height() - blockHeight) / 2;
     else if (vert == "bottom") y += px.height() - blockHeight;
     const Rect area = intersect(px, target.pixels(clip));
+    measuredEm_ = baseEm;
+    measuredWidth_ = 0;
     for (const auto& line : lines) {
         int32_t lineWidth = 0;
         for (size_t i = line.first; i < line.second; ++i) lineWidth += advance(i);
+        measuredWidth_ = std::max(measuredWidth_, lineWidth);
+        if (measureOnly_) continue;
         int32_t x = px.x0;
         if (horiz == "center") x += (px.width() - lineWidth) / 2;
         else if (horiz == "right") x += px.width() - lineWidth;
@@ -1092,7 +1104,10 @@ void UiCanvas::applyScroll(const tr::XmlNode& bar) {
 
 void UiCanvas::drawWidget(const tr::XmlNode& widget, std::vector<int32_t>& path, const Placed& parent, const Rect& clip, bool branchRoot,
                           Target& target) {
-    if (!branchRoot && !options_.showHidden && widget.attribute("visible") == "false") return;
+    if (!branchRoot && !options_.showHidden && widget.attribute("visible") == "false") {
+        const auto shown = buttonOverrides_.find(&widget);
+        if (shown == buttonOverrides_.end() || !shown->second.show) return;
+    }
     applyButtonState(widget);
     applyProgress(widget);
     applyScroll(widget);
@@ -1110,6 +1125,7 @@ void UiCanvas::drawWidget(const tr::XmlNode& widget, std::vector<int32_t>& path,
         drawText(widget, rect, clip, target);
         visual = !text(widget).empty();
     }
+    if (widget.tag == "EditBox" || widget.tag == "PasswordBox") placeCaret(widget, rect, clip, target);
     drawn_.push_back(DrawnWidget{path, rect, visual});
     // clipChildren defaults to true: the WidgetComposite constructor (FUN_008ae750) sets + 0xB0 = 1 and its loader (FUN_008ae9c0) only
     // overwrites it when the attribute is present (the export writes only "false"); the composite render (FUN_008aee70) clips its
@@ -1122,6 +1138,81 @@ void UiCanvas::drawWidget(const tr::XmlNode& widget, std::vector<int32_t>& path,
         drawWidget(widget.children[k], path, placed, childClip, false, target);
         path.pop_back();
     }
+    if (widget.tag == "EditBox" || widget.tag == "PasswordBox") drawEditText(widget, rect, childClip, target);
+}
+
+// Edit boxes (tabula_rasa.exe editbox.cpp, traced 2026-10-20): EditBox (constructor FUN_008ce7a0, loader FUN_008cebb0) owns a
+// Highlight (+ 0xf0, selection) and a Caret (+ 0xf4) Bitmap; the loader sizes the caret 3 x the font's height and hides it. Its render
+// (vtable + 0x1b8, FUN_008cfb70; WidgetComposite's is FUN_008aee70) draws the composite (children) first, then the text: the prepared
+// runs (FUN_008d2710) at x = the width of a prefix string (+ 0x11c, set by scripts - empty here) and y = (height - font height) / 2,
+// in TextColor (+ 0xdc; default 0xFFFFFFFF, DAT_00d08b54 - no exported box sets it) and TextColorHighlighted for selected runs; the
+// caret is placed (Widget slot + 0x148) at (width of the text before it + the prefix, (height - font height) / 2). A PasswordBox draws
+// drawableChar for every character. UNVERIFIED: the font height is taken as the em (the game reads the font's + 0x10 x the UI scale),
+// the text colour is multiplied by the render context like a Text's, the caret blink (+ 0x18c) is not drawn, the scrolling rule.
+bool UiCanvas::editText(const tr::XmlNode& box, std::string& text) const {
+    text.clear();
+    if (options_.editTexts) {
+        const auto it = options_.editTexts->find(&box);
+        if (it != options_.editTexts->end()) text = it->second;
+    }
+    if (box.tag == "PasswordBox" && !text.empty()) {
+        const uint32_t cp = uint32_t(std::strtoul(box.attribute("drawableChar").c_str(), nullptr, 10));
+        std::string glyph;
+        auto put = [&glyph](uint32_t c) {
+            if (c < 0x80) glyph += char(c);
+            else if (c < 0x800) { glyph += char(0xC0 | (c >> 6)); glyph += char(0x80 | (c & 0x3F)); }
+            else { glyph += char(0xE0 | (c >> 12)); glyph += char(0x80 | ((c >> 6) & 0x3F)); glyph += char(0x80 | (c & 0x3F)); }
+        };
+        put(cp ? cp : '*');
+        const size_t n = codepoints(text).size();
+        text.clear();
+        for (size_t k = 0; k < n; ++k) text += glyph;
+    }
+    return !text.empty() || options_.focusedEdit == &box;
+}
+
+void UiCanvas::placeCaret(const tr::XmlNode& box, const Rect& rect, const Rect& clip, Target& target) {
+    const tr::XmlNode* caret = nullptr;
+    for (const tr::XmlNode& c : box.children)
+        if (c.tag == "Caret") caret = &c;
+    if (!caret || options_.focusedEdit != &box) return;
+    std::string text;
+    editText(box, text);
+    tr::XmlNode line;
+    line.tag = "Text";
+    line.attributes = {{"fontId", box.attribute("fontId")}, {"vertAlign", "center"}};
+    textOverrides_[&line] = text.empty() ? std::string(" ") : text;
+    measureOnly_ = scrollTail_ = true;
+    drawText(line, rect, clip, target);
+    measureOnly_ = scrollTail_ = false;
+    textOverrides_.erase(&line);
+    const int32_t width = text.empty() ? 0 : measuredWidth_;
+    const int32_t emLogical = std::max(1, int32_t(std::lround(float(measuredEm_) / std::max(target.sy, 0.01f))));
+    ButtonOverride& o = buttonOverrides_[caret];
+    o.show = true;
+    o.offset = true;
+    o.offsetX = int32_t(float(width) / std::max(target.sx, 0.01f));
+    o.offsetY = (rect.height() - emLogical) / 2;
+    o.size = true;
+    o.width = 3;
+    o.height = emLogical;
+}
+
+void UiCanvas::drawEditText(const tr::XmlNode& box, const Rect& rect, const Rect& clip, Target& target) {
+    std::string text;
+    if (!editText(box, text) || text.empty()) return;
+    tr::XmlNode line;
+    line.tag = "Text";
+    line.attributes = {{"fontId", box.attribute("fontId")}, {"vertAlign", "center"}};
+    for (const char* c : {"R", "G", "B", "A"}) {
+        const std::string name = std::string("TextColor") + c;
+        if (box.hasAttribute(name)) line.attributes.emplace_back(std::string("color") + c, box.attribute(name));
+    }
+    textOverrides_[&line] = text;
+    scrollTail_ = true;
+    drawText(line, rect, clip, target);
+    scrollTail_ = false;
+    textOverrides_.erase(&line);
 }
 
 void UiCanvas::fillBackground(Target& target) const {
@@ -1286,6 +1377,53 @@ float UiCanvas::thumbRatioAt(const tr::XmlNode& bar, int32_t x, int32_t y) const
     }
     const int32_t lead = barRect.x0 + (bar.tag == "ScrollBar" && down ? intAttribute(*down, "sizeW") : 0);
     return trackW > thumbW ? std::clamp(float(x - lead) / float(trackW - thumbW), 0.0f, 1.0f) : 0.0f;
+}
+
+// Scroll bar presses (tabula_rasa.exe scrollbar.cpp, traced 2026-10-20). The loader (FUN_008d6ce0) keeps its parts at + 0xcc
+// LesserButton / ScrollDownBtn, + 0xc8 GreaterButton / ScrollUpBtn, + 0xd0 Track, + 0xd4 Thumb; the press handler (0x008d7cd0)
+// on ScrollDownBtn sets value + 1, on ScrollUpBtn max(min, value - 1), on the Track (FUN_008d8690) value - 1 when the mouse is
+// before the thumb along the bar (x for horizontal, style 0; y for vertical) and value + 1 when after it, nothing on the thumb;
+// setValue (FUN_008d79e0) clamps to min .. max - pageSize + 1 (min when that is not above min). The control held keeps firing
+// (FUN_008d7c00): elapsed ms summed, past 599 it fires again and 100 is taken off - repeats at 600, 700, 800 ... ms, the track
+// re-testing the mouse against the thumb each time. Sliders are not handled (their loader is not read).
+bool UiCanvas::scrollStepAt(int32_t x, int32_t y, const tr::XmlNode*& bar, int& step) const {
+    bar = nullptr;
+    step = 0;
+    for (auto it = drawn_.rbegin(); it != drawn_.rend(); ++it) {
+        if (!it->rect.contains(x, y) || it->path.empty()) continue;
+        const tr::XmlNode* n = node(it->path);
+        if (!n || (n->tag != "ScrollUpBtn" && n->tag != "ScrollDownBtn" && n->tag != "Track" && n->tag != "Thumb")) continue;
+        std::vector<int32_t> up = it->path;
+        up.pop_back();
+        const tr::XmlNode* parent = up.empty() ? nullptr : node(up);
+        if (!parent || parent->tag != "ScrollBar") continue;
+        bar = parent;
+        if (n->tag == "ScrollDownBtn") step = 1;
+        else if (n->tag == "ScrollUpBtn") step = -1;
+        else if (n->tag == "Track") {
+            const tr::XmlNode* thumb = nullptr;
+            for (const tr::XmlNode& c : parent->children)
+                if (c.tag == "Thumb") thumb = &c;
+            Rect t{0, 0, 0, 0};
+            if (!thumb || !drawnRect(thumb, t)) return true;
+            const bool horizontal = parent->attribute("style") == "horizontal";
+            const int32_t at = horizontal ? x : y, low = horizontal ? t.x0 : t.y0, high = horizontal ? t.x1 : t.y1;
+            step = at < low ? -1 : at >= high ? 1 : 0;
+        }
+        return true;
+    }
+    return false;
+}
+
+float UiCanvas::scrollRatioStepped(const tr::XmlNode& bar, float ratio, int step) {
+    const int32_t minimum = intAttribute(bar, "minRange"), maximum = intAttribute(bar, "maxRange"), page = intAttribute(bar, "pageSize");
+    const int32_t top = maximum - page + 1;                        // setValue's upper limit
+    if (top <= minimum) return 0.0f;
+    const float span = float(top - minimum);                        // (max - min + 1) - pageSize, the thumb ratio's denominator
+    if (ratio < 0) ratio = std::clamp(float(intAttribute(bar, "currentValue") - minimum) / span, 0.0f, 1.0f);   // as exported
+    int32_t value = minimum + int32_t(std::lround(std::clamp(ratio, 0.0f, 1.0f) * span)) + step;
+    value = std::clamp(value, minimum, top);
+    return float(value - minimum) / span;
 }
 
 const tr::XmlNode* UiCanvas::buttonAt(int32_t x, int32_t y) const {

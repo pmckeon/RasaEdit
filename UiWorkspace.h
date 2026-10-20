@@ -139,6 +139,7 @@ private:
     void updateDefinitionPreview();         // between frames: the selected textureDef's file as a GPU texture
     void updateSamplePreview();             // between frames: the font / animation sample asked for while drawing (sampleWanted_)
     void drawColourSwatch(const float rgba[4]);
+    void drawTextureSample(size_t index);
     void drawFontSample(size_t index);
     void drawAnimationSample(size_t index);
     void showSample(const std::string& key);   // the sample texture, once it holds `key`, fitted to the panel's width
@@ -196,6 +197,10 @@ private:
     std::map<const tr::XmlNode*, float> scrollValues_;   // interactive mode: each scroll bar's / slider's thumb (0..1), once dragged
     const tr::XmlNode* thumbBar_ = nullptr;              // interactive mode: the bar whose thumb is being dragged
     int32_t grabX_ = 0, grabY_ = 0;                      // the mouse's offset into that thumb when it was grabbed
+    const tr::XmlNode* stepBar_ = nullptr;               // interactive mode: the scroll bar whose arrow / track is held
+    double stepHeld_ = 0.0;                              // milliseconds summed while held (the game's repeat counter)
+    std::map<const tr::XmlNode*, std::string> editTexts_;   // interactive mode: text typed into edit boxes (UTF-8)
+    const tr::XmlNode* focusedEdit_ = nullptr;           // the edit box that has the keyboard
     char filter_[128] = {};
     // Definitions panel.
     tr::UiSection defSection_ = tr::UiSection::Textures;
@@ -242,5 +247,8 @@ private:
     float animPausedAt_ = 0.0f;             // milliseconds (paused)
     std::string animFor_;                   // the animation the clock belongs to
     int animShownOn_ = 0;                   // which element using it the preview copies
+    std::string animTexture_;               // the texture definition an unused Bitmap animation is shown on
+    char animTextureFilter_[64] = {};
+    int32_t texSampleW_ = 0, texSampleH_ = 0;   // the texture preview's widget size (0: the region's)
     bool zoomPreviewToRegion_ = false;      // once the preview is shown (RASAEDIT_UI_DEFINITION=...@zoom)     // previewScroll_ applied with the new content size before the view's next frame
 };

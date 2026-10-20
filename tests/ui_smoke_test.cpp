@@ -205,6 +205,12 @@ int main() {
                 allMatch = allMatch && got == spot.region;
             }
             check(allMatch, "radar region switches at the cave mouth as in game");
+            // Kraftwerks stations are in use state 46 (Rasa.NET), whose package (arch_hum_craftstation_on_v01.pkg) has a persistent
+            // accessory beam between connection points 28 and 31.
+            size_t stationBeams = 0;
+            for (const std::string& line : ctx.scene->stateBeamList())
+                if (line.find("vfx_beam_lightning_blue.dds cp 28 -> 31") != std::string::npos) ++stationBeams;
+            check(stationBeams >= 3, ("the craft stations carry their accessory beam (" + std::to_string(stationBeams) + ")").c_str());
             server.overview_.radarChoice_ = 33;
             frames(editor, device, 2);
             server.overview_.radarChoice_ = -1;
@@ -1230,6 +1236,87 @@ int main() {
                 }
                 check(thumbMoved, "UI interactive scroll bar: a thumb value moves the thumb");
                 check(thumbRoundTrip, "UI interactive scroll bar: the thumb under the mouse and its ratio read back");
+                // Arrow buttons and the track step the value by one unit (scrollbar.cpp 0x008d7cd0): ScrollDownBtn +1, ScrollUpBtn -1,
+                // the track towards the press; the ratio moves by 1 / ((max - min + 1) - pageSize) and stays within 0..1.
+                bool arrows = false, track = false, ratios = false;
+                if (ui.showBranch("InGame/HUD/ChatWindow")) {
+                    frames(editor, device, 2);
+                    const tr::XmlNode* bar = nullptr;
+                    for (const auto& d : ui.drawnWidgets()) {
+                        const tr::XmlNode* n = ui.canvas_.node(d.path);
+                        if (n && n->tag == "ScrollBar" && n->hasAttribute("maxRange")) { bar = n; break; }
+                    }
+                    if (bar) {
+                        std::map<const tr::XmlNode*, float> values{{bar, 0.6f}};
+                        UiCanvas::Options moved;
+                        moved.scrollValues = &values;
+                        std::vector<uint8_t> a;
+                        ui.canvas_.render(ui.branch_, moved, a);
+                        const tr::XmlNode *up = nullptr, *down = nullptr, *thumb = nullptr;
+                        for (const tr::XmlNode& c : bar->children) {
+                            if (c.tag == "ScrollUpBtn") up = &c;
+                            if (c.tag == "ScrollDownBtn") down = &c;
+                            if (c.tag == "Thumb") thumb = &c;
+                        }
+                        UiCanvas::Rect ru{0, 0, 0, 0}, rd{0, 0, 0, 0}, rt{0, 0, 0, 0};
+                        const tr::XmlNode* hit = nullptr;
+                        int stepUp = 0, stepDown = 0, stepTrack = 0;
+                        if (up && down && ui.canvas_.drawnRect(up, ru) && ui.canvas_.drawnRect(down, rd)) {
+                            ui.canvas_.scrollStepAt((ru.x0 + ru.x1) / 2, (ru.y0 + ru.y1) / 2, hit, stepUp);
+                            const bool upHit = hit == bar;
+                            ui.canvas_.scrollStepAt((rd.x0 + rd.x1) / 2, (rd.y0 + rd.y1) / 2, hit, stepDown);
+                            arrows = upHit && hit == bar && stepUp == -1 && stepDown == 1;
+                        }
+                        if (thumb && ui.canvas_.drawnRect(thumb, rt) && rt.y0 > ru.y1 + 1) {
+                            ui.canvas_.scrollStepAt((rt.x0 + rt.x1) / 2, rt.y0 - 1, hit, stepTrack);
+                            track = hit == bar && stepTrack == -1;
+                        }
+                        const int span = (std::atoi(bar->attribute("maxRange").c_str()) - std::atoi(bar->attribute("minRange").c_str()) + 1) -
+                                         std::atoi(bar->attribute("pageSize").c_str());
+                        const float next = UiCanvas::scrollRatioStepped(*bar, 0.6f, 1);
+                        ratios = span > 0 && std::fabs(next - (std::lround(0.6f * float(span)) + 1) / float(span)) < 1e-4f &&
+                                 UiCanvas::scrollRatioStepped(*bar, 1.0f, 1) == 1.0f && UiCanvas::scrollRatioStepped(*bar, 0.0f, -1) == 0.0f;
+                        std::printf("      chat scroll bar: up %d down %d track %d, span %d, 0.6 + 1 -> %.4f\n", stepUp, stepDown, stepTrack, span, next);
+                    }
+                }
+                check(arrows, "UI interactive scroll bar: the arrow buttons step by -1 / +1");
+                check(track, "UI interactive scroll bar: a press on the track before the thumb steps back");
+                check(ratios, "UI interactive scroll bar: one step moves the ratio by one value unit, clamped");
+            }
+            // Edit boxes: typed text is drawn in the box's font and the focused box shows its caret.
+            {
+                const tr::XmlNode* box = nullptr;
+                std::function<void(const tr::XmlNode&)> find = [&](const tr::XmlNode& n) {
+                    if (box) return;
+                    if (n.tag == "EditBox" && n.hasAttribute("fontId")) { box = &n; return; }
+                    for (const tr::XmlNode& c : n.children) find(c);
+                };
+                if (ui.canvas_.root()) find(*ui.canvas_.root());
+                bool typed = false, caret = false;
+                if (box) {
+                    tr::XmlNode copy = *box;
+                    copy.attributes.erase(std::remove_if(copy.attributes.begin(), copy.attributes.end(),
+                                                         [](const auto& a) { return a.first == "anchorOffsetX" || a.first == "anchorOffsetY"; }),
+                                          copy.attributes.end());
+                    const int32_t w = std::atoi(copy.attribute("sizeW").c_str()) + 20, h = std::atoi(copy.attribute("sizeH").c_str()) + 20;
+                    std::map<const tr::XmlNode*, std::string> texts{{&copy, "Hello 42"}};
+                    UiCanvas::Options none, withText, focused;
+                    withText.editTexts = &texts;
+                    focused.editTexts = &texts;
+                    focused.focusedEdit = &copy;
+                    std::vector<uint8_t> a, b, c;
+                    ui.canvas_.renderDetached(copy, w, h, 1.0f, none, "", a);
+                    ui.canvas_.renderDetached(copy, w, h, 1.0f, withText, "", b);
+                    ui.canvas_.renderDetached(copy, w, h, 1.0f, focused, "", c);
+                    size_t changed = 0, caretPixels = 0;
+                    for (size_t k = 0; k + 3 < a.size() && k + 3 < b.size(); k += 4) changed += a[k] != b[k] || a[k + 1] != b[k + 1] ? 1 : 0;
+                    for (size_t k = 0; k + 3 < b.size() && k + 3 < c.size(); k += 4) caretPixels += b[k] != c[k] || b[k + 1] != c[k + 1] ? 1 : 0;
+                    typed = changed > 20;
+                    caret = caretPixels > 3;
+                    std::printf("      edit box %s: text changed %zu pixels, caret %zu\n", box->attribute("uiid").c_str(), changed, caretPixels);
+                }
+                check(typed, "UI interactive edit box: typed text is drawn");
+                check(caret, "UI interactive edit box: the focused box shows its caret");
             }
 
             // Editing a COPY of the layout file: valid edits are written, invalid values refused, saving refused while the file has a
@@ -1417,6 +1504,20 @@ int main() {
                         size_t lit = 0;
                         for (size_t k = 0; k + 3 < px.size(); k += 4) lit += px[k] > 128 ? 1 : 0;
                         check(px.size() == 300u * 40u * 4u && lit > 50, ("UI definitions: a font's sample text is drawn (" + std::to_string(lit) + " pixels)").c_str());
+                    }
+                    if (used >= 0) {                     // a texture definition drawn as a Bitmap of it
+                        ui.selectDefinition(S::Textures, used);
+                        ui.focusDefinitions_ = true;
+                        frames(editor, device, 3);
+                        check(ui.sampleTexture_ && ui.sampleLoaded_.rfind("tex:" + ui.definitionId(S::Textures, size_t(used)) + "|", 0) == 0,
+                              "UI definitions: the texture is previewed as the game draws it");
+                    }
+                    if (anim >= 0 && tracks) {           // the new Bitmap animation (no Bitmap uses it) plays on a chosen texture
+                        ui.selectDefinition(S::Animations, anim);
+                        ui.focusDefinitions_ = true;
+                        frames(editor, device, 3);
+                        check(ui.sampleTexture_ && ui.sampleLoaded_.rfind("anim:", 0) == 0 && !ui.animTexture_.empty(),
+                              "UI definitions: an unused Bitmap animation is previewed on a texture");
                     }
                     if (usedAnim >= 0) {
                         ui.selectDefinition(S::Animations, usedAnim);
