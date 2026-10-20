@@ -1,6 +1,7 @@
 #pragma once
 // Editing tabula_rasa.cfg: a section's entries, and registering a file under a key the game takes before the section's other keys
 // (tr::configKeyOrder - [Paths] archives: the first key wins; [Data] zips: the first key comes first on Python's path).
+#include <map>
 #include <string>
 #include <vector>
 
@@ -27,3 +28,20 @@ std::string registerFirst(const std::string& gameRoot, const std::string& sectio
                           const std::string& fileName);
 
 }  // namespace gamecfg
+
+// The client text patch zip (CLAUDE.md "A separate Python patch zip works"): data/rasaedit_text.zip, which tabula_rasa.cfg's [Data]
+// puts on Python's path before game.zip. Shared by the Text workspace's save and viewport_test's in-game hooks.
+namespace textpatch {
+
+constexpr const char* kName = "rasaedit_text.zip";
+std::string pathBeside(const std::string& gameZipPath);   // the patch beside game.zip
+// Writes module sources (game.zip entry stems under generated/, e.g. "generated/client/language/english/uielementlanguage" -> its
+// Python source) into the patch as stored .py, merged into an existing patch (a compiled copy of a written module removed), with an
+// __init__.py for every package level that adds game.zip's same folder to the package's path (Python 2.4 binds a package to the first
+// path entry that has it - modules the patch lacks then still load from game.zip). Written beside and swapped in after a read-back.
+// Throws tr::FormatError.
+void write(const std::string& patchPath, const std::string& gameZipName, const std::map<std::string, std::string>& sources);
+// Adds the [Data] entry when the game does not take the patch first yet; "" when it already does, else what was done.
+std::string registerInConfig(const std::string& gameRoot, const std::string& patchPath);
+
+}  // namespace textpatch

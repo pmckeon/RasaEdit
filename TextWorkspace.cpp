@@ -790,43 +790,15 @@ bool TextWorkspace::saveChanges() {
         // to the first path entry that has it, so every package level the patch holds gets an __init__.py that adds the same folder
         // of game.zip to the package's path - modules the patch lacks still load from game.zip. game.zip is not touched.
         const fs::path patch = savePathForTests_.empty() ? fs::path(patchZipPath()) : fs::path(savePathForTests_);
-        const std::string gameName = fs::path(data.path()).filename().string();
-        const std::string forward = "__path__.append(__path__[0].replace('" + std::string(kTextPatchName) + "', '" + gameName + "'))\n";
-        std::map<std::string, tr::Bytes> replace;
-        for (const auto& [stem, source] : sources) {
-            if (lowerAscii(stem).rfind("generated/", 0) != 0) throw tr::FormatError(stem + " is not under generated/");
-            replace[stem + ".py"] = tr::Bytes(source.begin(), source.end());
-            for (size_t slash = stem.find('/'); slash != std::string::npos; slash = stem.find('/', slash + 1))
-                replace[stem.substr(0, slash) + "/__init__.py"] = tr::Bytes(forward.begin(), forward.end());
-        }
-        std::error_code ec;
-        fs::path temp = patch;
-        temp += ".rasaedit-new";
-        if (fs::exists(patch, ec)) {
-            tr::ZipArchive existing(patch.string());
-            std::vector<std::string> remove;                      // a compiled copy in the patch would be taken first
-            for (const auto& [stem, source] : sources)
-                for (const tr::ZipEntry& z : existing.entries())
-                    if (lowerAscii(z.name) == lowerAscii(stem + ".pyo") || lowerAscii(z.name) == lowerAscii(stem + ".pyc")) remove.push_back(z.name);
-            tr::writeZip(existing, temp.string(), replace, remove);
-        } else {
-            tr::writeZip(temp.string(), replace);
-        }
-        { tr::ZipArchive check(temp.string()); }
-        fs::rename(temp, patch, ec);
-        if (ec) throw tr::FormatError("cannot replace " + patch.string() + " (is the game running?): " + ec.message());
+        textpatch::write(patch.string(), fs::path(data.path()).filename().string(), sources);
         if (!savePathForTests_.empty()) {
             savedVersion_ = version_;
             ctx_.setStatus("Saved " + std::to_string(updated.size()) + " text module(s) to " + savePathForTests_, false);
             return true;
         }
         std::string registered;
-        if (ctx_.assets && !gamecfg::entryFirst(ctx_.assets->root(), "Data", kTextPatchName)) {
-            const fs::path relative = fs::relative(patch, fs::path(ctx_.assets->root()), ec);
-            registered = "; " + gamecfg::registerFirst(ctx_.assets->root(), "Data", "AAA_RasaEditText",
-                                                      ec || relative.empty() ? patch.generic_string() : relative.generic_string(),
-                                                      kTextPatchName);
-        }
+        if (ctx_.assets)
+            if (const std::string done = textpatch::registerInConfig(ctx_.assets->root(), patch.string()); !done.empty()) registered = "; " + done;
         std::vector<std::string> paths{patch.string()};
         for (const std::string& path : data.archivePaths())
             if (fs::path(path) != patch) paths.push_back(path);

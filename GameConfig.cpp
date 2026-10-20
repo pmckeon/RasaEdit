@@ -1,6 +1,7 @@
 #include "GameConfig.h"
 
 #include "assetlibrary.h"
+#include "gamedata.h"
 #include "trformats.h"
 
 #include <algorithm>
@@ -135,3 +136,47 @@ std::string registerFirst(const std::string& gameRoot, const std::string& sectio
 }
 
 }  // namespace gamecfg
+
+namespace textpatch {
+
+std::string pathBeside(const std::string& gameZipPath) { return (fs::path(gameZipPath).parent_path() / kName).string(); }
+
+void write(const std::string& patchPath, const std::string& gameZipName, const std::map<std::string, std::string>& sources) {
+    const fs::path patch = fs::path(patchPath);
+    const std::string forward = "__path__.append(__path__[0].replace('" + std::string(kName) + "', '" + gameZipName + "'))\n";
+    std::map<std::string, tr::Bytes> replace;
+    for (const auto& [stem, source] : sources) {
+        if (tr::toLowerAscii(stem).rfind("generated/", 0) != 0) throw tr::FormatError(stem + " is not under generated/");
+        replace[stem + ".py"] = tr::Bytes(source.begin(), source.end());
+        for (size_t slash = stem.find('/'); slash != std::string::npos; slash = stem.find('/', slash + 1))
+            replace[stem.substr(0, slash) + "/__init__.py"] = tr::Bytes(forward.begin(), forward.end());
+    }
+    std::error_code ec;
+    fs::path temp = patch;
+    temp += ".rasaedit-new";
+    if (fs::exists(patch, ec)) {
+        tr::ZipArchive existing(patch.string());
+        std::vector<std::string> remove;                      // a compiled copy in the patch would be taken first
+        for (const auto& [stem, source] : sources)
+            for (const tr::ZipEntry& z : existing.entries()) {
+                const std::string name = tr::toLowerAscii(z.name);
+                if (name == tr::toLowerAscii(stem + ".pyo") || name == tr::toLowerAscii(stem + ".pyc")) remove.push_back(z.name);
+            }
+        tr::writeZip(existing, temp.string(), replace, remove);
+    } else {
+        tr::writeZip(temp.string(), replace);
+    }
+    { tr::ZipArchive check(temp.string()); }                // reads back (a broken write throws here, before the swap)
+    fs::rename(temp, patch, ec);
+    if (ec) throw tr::FormatError("cannot replace " + patch.string() + " (is the game running?): " + ec.message());
+}
+
+std::string registerInConfig(const std::string& gameRoot, const std::string& patchPath) {
+    if (gamecfg::entryFirst(gameRoot, "Data", kName)) return {};
+    std::error_code ec;
+    const fs::path relative = fs::relative(fs::path(patchPath), fs::path(gameRoot), ec);
+    return gamecfg::registerFirst(gameRoot, "Data", "AAA_RasaEditText",
+                                  ec || relative.empty() ? fs::path(patchPath).generic_string() : relative.generic_string(), kName);
+}
+
+}  // namespace textpatch

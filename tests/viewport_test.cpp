@@ -2,6 +2,7 @@
 // target and writes the frame as raw RGBA. Runs on any Vulkan driver, including Mesa's lavapipe.
 //   viewport_test <game root> <game.zip> <map> <out.rgba> <width> <height> <eye x y z> <target x y z>
 #include "Avatar.h"
+#include "GameConfig.h"
 #include "RasaNetMapUsables.h"
 #include "SceneView.h"
 #include "ParticleSim.h"
@@ -36,6 +37,31 @@ static const char* envValue(const char* name) {
     return v && *v ? v : nullptr;
 }
 
+// The in-game hooks write client modules as the Text workspace saves them (CLAUDE.md "A separate Python patch zip works"): into
+// data/rasaedit_text.zip beside game.zip (textpatch::write), registered in tabula_rasa.cfg's [Data] on first use; game.zip is not touched.
+// An existing patch is copied to <patch>.before-<what> first. Returns the patch path; `registered` says what the cfg change was ("" none).
+static std::string writeTestTextPatch(const tr::GameData& data, const std::string& gameRoot, const std::vector<std::pair<std::string, tr::py::Ref>>& modules,
+                                      const char* what, std::string& registered) {
+    namespace fs = std::filesystem;
+    const std::string gameZip = data.path();
+    const std::string patch = textpatch::pathBeside(gameZip);
+    std::map<std::string, std::string> sources;
+    for (const auto& [module, globals] : modules) {
+        const std::string entry = data.moduleEntryName(module);
+        sources[entry.substr(0, entry.rfind('.'))] = tr::py::moduleSource(*globals);
+    }
+    std::error_code ec;
+    if (fs::exists(fs::u8path(patch), ec)) {
+        fs::path keep = fs::u8path(patch);
+        keep += std::string(".before-") + what;
+        fs::copy_file(fs::u8path(patch), keep, fs::copy_options::overwrite_existing, ec);
+        if (ec) throw std::runtime_error("cannot keep " + keep.string() + ": " + ec.message());
+    }
+    textpatch::write(patch, fs::u8path(gameZip).filename().string(), sources);
+    registered = textpatch::registerInConfig(gameRoot, patch);
+    return patch;
+}
+
 int main(int argc, char** argv) {
     if (argc < 13) { std::puts("usage: viewport_test root game.zip map out.rgba w h ex ey ez tx ty tz"); return 1; }
     if (!SDL_Init(SDL_INIT_VIDEO)) { std::printf("SDL_Init: %s\n", SDL_GetError()); return 1; }
@@ -49,7 +75,17 @@ int main(int argc, char** argv) {
         Renderer renderer(device);
         renderer.resize(width, height);
         tr::AssetLibrary assets(argv[1]);
-        tr::GameData data(argv[2]);
+        // Every [Data] zip in the client's import order (a text patch, data/rasaedit_text.zip, over game.zip), as the editor reads them -
+        // when the asset library's game.zip is the one named; otherwise that zip alone.
+        auto gameDataPaths = [&]() {
+            namespace fs = std::filesystem;
+            std::vector<std::string> paths = assets.gameDataPaths();
+            std::error_code ec;
+            for (const std::string& path : paths)
+                if (fs::equivalent(fs::u8path(path), fs::u8path(argv[2]), ec)) return paths;
+            return std::vector<std::string>{argv[2]};
+        };
+        tr::GameData data(gameDataPaths());
         // RASA_UIRENDER=<uiid>/<uiid>/...[;<another branch>...] (or "*" for every root widget): draws those branches of
         // data\xml\Tabula_Rasa_UI_EXPORT.xml in turn with UiCanvas into <out.rgba> and exits; prints what could not be resolved.
         // RASA_UIHIDDEN=1 draws hidden widgets too, RASA_UIMOUSE=<x>,<y> puts the mouse there (logical), RASA_UISCREEN=<w>x<h> draws for that screen
@@ -656,9 +692,9 @@ int main(int argc, char** argv) {
         }
         // RASA_INGAMEMISSIONTEXT=<mission id>,...: an in-game check of the client mission tables written by the editor - for each mission
         // its name / log / opening texts (missionconversation types 1-3) and every objective's name (missionobjective slot 0) are pointed at
-        // NEW missiontextlanguage entries "RASAEDIT TEST <what>: <the original text>" (English, both genders); game.zip is rewritten IN THE
-        // GAME FOLDER as the Text workspace saves it (the three tables and the English missiontext as stored .py source, their compiled
-        // copies removed), after copying the current file to game.zip.before-missiontext.
+        // NEW missiontextlanguage entries "RASAEDIT TEST <what>: <the original text>" (English, both genders); the three tables and the
+        // English missiontext go IN THE GAME FOLDER into the text patch as the Text workspace saves it (writeTestTextPatch: stored .py source,
+        // game.zip untouched; an existing patch kept as <patch>.before-missiontext).
         if (const char* spec = envValue("RASA_INGAMEMISSIONTEXT")) {
             namespace fs = std::filesystem;
             try {
@@ -715,39 +751,20 @@ int main(int argc, char** argv) {
                         ++changed;
                     }
                 }
-                std::map<std::string, tr::Bytes> replace;
-                std::vector<std::string> remove;
-                tr::ZipArchive zip(data.path());
-                for (const auto& [module, globals] : std::vector<std::pair<std::string, tr::py::Ref>>{{conv, convGlobals}, {objectives, objGlobals}, {textModule, textGlobals}}) {
-                    const std::string entry = data.moduleEntryName(module);
-                    const std::string base = entry.substr(0, entry.rfind('.'));
-                    const std::string source = tr::py::moduleSource(*globals);
-                    replace[base + ".py"] = tr::Bytes(source.begin(), source.end());
-                    for (const tr::ZipEntry& z : zip.entries())
-                        if (z.name == base + ".pyo" || z.name == base + ".pyc") remove.push_back(z.name);
-                }
-                const fs::path path = fs::u8path(data.path());
-                fs::path keep = path;
-                keep += ".before-missiontext";
-                std::error_code ec;
-                fs::copy_file(path, keep, fs::copy_options::overwrite_existing, ec);
-                if (ec) throw std::runtime_error("cannot keep " + keep.string() + ": " + ec.message());
-                fs::path temp = path;
-                temp += ".rasaedit-new";
-                tr::writeZip(zip, temp.string(), replace, remove);
-                tr::GameData check(temp.string());
+                std::string registered;
+                const std::string patch = writeTestTextPatch(data, argv[1], {{conv, convGlobals}, {objectives, objGlobals}, {textModule, textGlobals}},
+                                                             "missiontext", registered);
+                tr::GameData check(std::vector<std::string>{patch, data.path()});
                 size_t found = 0;
                 for (int64_t m : missions)
                     if (const tr::py::Object* e = tr::py::dictGetTuple(check.global(conv, "lookup"), {m, 1}))
                         found += check.missionText(int32_t(tr::py::asInt(tr::py::item(e, 0))), 1).rfind("RASAEDIT TEST", 0) == 0;
-                tr::ZipArchive written(temp.string());
+                tr::ZipArchive written(patch);
                 bool stored = true;
                 for (const tr::ZipEntry& e : written.entries()) stored = stored && e.method == 0;
-                fs::rename(temp, path, ec);
-                if (ec) throw std::runtime_error("cannot replace game.zip (is the game running?): " + ec.message());
                 std::printf("in-game mission text: %zu references changed for %zu mission(s); %zu mission names read back as test texts; all "
-                            "entries stored %s; new text ids up to %lld; previous game.zip kept as %s\n", changed, missions.size(), found,
-                            stored ? "yes" : "NO", static_cast<long long>(next - 1), keep.string().c_str());
+                            "entries stored %s; new text ids up to %lld; written to %s%s%s\n", changed, missions.size(), found,
+                            stored ? "yes" : "NO", static_cast<long long>(next - 1), patch.c_str(), registered.empty() ? "" : "; ", registered.c_str());
             } catch (const std::exception& e) {
                 std::printf("in-game mission text FAILED: %s\n", e.what());
             }
@@ -2452,8 +2469,8 @@ int main(int argc, char** argv) {
         // RASA_INGAMEPREP=x,z: writes the editor's unverified outputs INTO THE GAME FOLDER for an in-game check near (x, z), each file
         // through the editor's own code and keeping <file>.rasaedit-original on its first change: lights.xml - a copy of a point light
         // made red (range 10, intensity 4) with an added IntensityModifier blinking it once a second; audioemitters.xml - a new emitter
-        // playing an alarm audio set; the .map - a copy of an obelisk entity (new id) 6 m east; game.zip - the English region name
-        // "Luna Cavern" changed to "Luna Cavern RASAEDIT TEST" (uielementlanguage written as source, its compiled copies removed).
+        // playing an alarm audio set; the .map - a copy of an obelisk entity (new id) 6 m east; the text patch (writeTestTextPatch, game.zip
+        // untouched) - the English region name "Luna Cavern" changed to "Luna Cavern RASAEDIT TEST" (uielementlanguage as source).
         if (const char* prep = envValue("RASA_INGAMEPREP")) {
             namespace fs = std::filesystem;
             float px = 0, pz = 0;
@@ -2573,28 +2590,14 @@ int main(int argc, char** argv) {
                     }
                 }
                 if (!changed) throw std::runtime_error("no \"Luna Cavern\" text in " + module);
-                const std::string sourceText = tr::py::moduleSource(*editedModule);
-                const std::string base = entry.substr(0, entry.rfind('.'));
-                tr::ZipArchive zip(data.path());
-                std::vector<std::string> remove;
-                for (const tr::ZipEntry& z : zip.entries())
-                    if (z.name == base + ".pyo" || z.name == base + ".pyc") remove.push_back(z.name);
-                const fs::path zipPath = fs::u8path(data.path());
-                fs::path backup = zipPath;
-                backup += ".rasaedit-original";
-                std::error_code ec;
-                if (!fs::exists(backup, ec)) fs::copy_file(zipPath, backup, ec);
-                fs::path temp = zipPath;
-                temp += ".rasaedit-new";
-                tr::writeZip(zip, temp.string(), {{base + ".py", tr::Bytes(sourceText.begin(), sourceText.end())}}, remove);
-                tr::GameData check(temp.string());
+                std::string registered;
+                const std::string patch = writeTestTextPatch(data, argv[1], {{module, editedModule}}, "prep", registered);
+                tr::GameData check(std::vector<std::string>{patch, data.path()});
                 const tr::py::Object* checkLookup = check.global(module, "lookup");
                 size_t found = 0;
                 for (const auto& e : checkLookup->entries) found += tr::py::asString(tr::py::item(e.second.get(), 0)) == "Luna Cavern RASAEDIT TEST";
-                fs::rename(temp, zipPath, ec);
-                if (ec) throw std::runtime_error("cannot replace game.zip: " + ec.message());
-                std::printf("in-game prep: game.zip - %zu \"Luna Cavern\" text(s) changed in %s (was %s), %zu read back; compiled copies removed: %zu\n",
-                            changed, (base + ".py").c_str(), entry.c_str(), found, remove.size());
+                std::printf("in-game prep: %s - %zu \"Luna Cavern\" text(s) changed (module %s, from %s), %zu read back%s%s\n", patch.c_str(),
+                            changed, module.c_str(), entry.c_str(), found, registered.empty() ? "" : "; ", registered.c_str());
             } catch (const std::exception& e) {
                 std::printf("in-game prep FAILED: %s\n", e.what());
             }
@@ -2907,8 +2910,9 @@ int main(int argc, char** argv) {
         // optional): one objective "talk to the receiver" (a conversation trigger on the receiver's NPC package, player flag 1) whose
         // transition grants a small reward; given by the giver, handed in to the receiver. The client's tables (missionconversation types
         // 1-4 and 6, missionobjective, objectiveconversation (mission, 1, package, 1, completion)) and new English missiontextlanguage texts
-        // go into game.zip as the Text workspace saves them (stored .py source). Then the editor's server checks run on the saved content.
-        // Writes IN PLACE: the database is copied to <db>.before-newmission and game.zip to game.zip.before-newmission first.
+        // go into the text patch as the Text workspace saves them (writeTestTextPatch: stored .py source, game.zip untouched). Then the
+        // editor's server checks run on the saved content. Writes IN PLACE: the database is copied to <db>.before-newmission and an existing
+        // patch to <patch>.before-newmission first.
         if (const char* spec = envValue("RASA_INGAMENEWMISSION"); spec && database) {
             namespace fs = std::filesystem;
             try {
@@ -3038,18 +3042,13 @@ int main(int argc, char** argv) {
                             static_cast<long long>(mission), v.enabledMissions, own, v.startupFails ? "FAILS" : "ok", v.blocksReadiness ? "BLOCKED" : "ok");
                 if (own || v.startupFails) throw std::runtime_error("the new mission does not pass the server's checks; nothing written");
 
-                // Keep copies, then write the database and game.zip.
+                // Keep a copy, then write the database and the text patch.
                 std::error_code ec;
                 const fs::path dbPath = fs::u8path(database->path());
                 fs::path dbKeep = dbPath;
                 dbKeep += ".before-newmission";
                 fs::copy_file(dbPath, dbKeep, fs::copy_options::overwrite_existing, ec);
                 if (ec) throw std::runtime_error("cannot keep " + dbKeep.string() + ": " + ec.message());
-                const fs::path zipPath = fs::u8path(data.path());
-                fs::path zipKeep = zipPath;
-                zipKeep += ".before-newmission";
-                fs::copy_file(zipPath, zipKeep, fs::copy_options::overwrite_existing, ec);
-                if (ec) throw std::runtime_error("cannot keep " + zipKeep.string() + ": " + ec.message());
 
                 std::vector<std::pair<const DbTable*, const DbTable*>> pairs;
                 for (size_t k = 0; k < before.size(); ++k) pairs.emplace_back(&before[k], &after[k]);
@@ -3057,30 +3056,17 @@ int main(int argc, char** argv) {
                 std::string error;
                 if (!database->saveTables(pairs, summary, error)) throw std::runtime_error("database save failed: " + error);
 
-                std::map<std::string, tr::Bytes> replace;
-                std::vector<std::string> remove;
-                tr::ZipArchive zip(data.path());
-                for (const auto& [module, globals] : std::vector<std::pair<std::string, tr::py::Ref>>{
-                         {conv, convGlobals}, {objectives, objGlobals}, {objConv, objConvGlobals}, {textModule, textGlobals}}) {
-                    const std::string entry = data.moduleEntryName(module);
-                    const std::string base = entry.substr(0, entry.rfind('.'));
-                    const std::string source = tr::py::moduleSource(*globals);
-                    replace[base + ".py"] = tr::Bytes(source.begin(), source.end());
-                    for (const tr::ZipEntry& z : zip.entries())
-                        if (z.name == base + ".pyo" || z.name == base + ".pyc") remove.push_back(z.name);
-                }
-                fs::path temp = zipPath;
-                temp += ".rasaedit-new";
-                tr::writeZip(zip, temp.string(), replace, remove);
-                tr::GameData check(temp.string());
+                std::string registered;
+                const std::string patch = writeTestTextPatch(
+                    data, argv[1], {{conv, convGlobals}, {objectives, objGlobals}, {objConv, objConvGlobals}, {textModule, textGlobals}}, "newmission",
+                    registered);
+                tr::GameData check(std::vector<std::string>{patch, data.path()});
                 const tr::py::Object* nameEntry = tr::py::dictGetTuple(check.global(conv, "lookup"), {mission, 1});
                 const std::string readName = nameEntry ? check.missionText(int32_t(tr::py::asInt(tr::py::item(nameEntry, 0))), 1) : std::string();
                 const bool conversationBack = tr::py::dictGetTuple(check.global(objConv, "lookup"), {mission, 1, package, 1, 1}) != nullptr;
-                tr::ZipArchive written(temp.string());
+                tr::ZipArchive written(patch);
                 bool stored = true;
                 for (const tr::ZipEntry& e : written.entries()) stored = stored && e.method == 0;
-                fs::rename(temp, zipPath, ec);
-                if (ec) throw std::runtime_error("cannot replace game.zip (is the game running?): " + ec.message());
 
                 // Read the database back and check again, as the server will at start-up.
                 WorldDatabase reread(database->path());
@@ -3094,12 +3080,12 @@ int main(int argc, char** argv) {
                 const MissionValidationResult again = validateMissionContent(byName, MissionReferences::load(reread));
                 std::printf("new mission %lld (%s), giver %s (%lld), receiver %s (%lld, package %lld): %zu rows in the database, %d inserted; "
                             "client name read back \"%s\", objective conversation %s, all entries stored %s, texts %lld-%lld; after reload %zu "
-                            "enabled, start-up %s, readiness %s; kept %s and %s\n",
+                            "enabled, start-up %s, readiness %s; kept %s; texts in %s%s%s\n",
                             static_cast<long long>(mission), revision.c_str(), giverName.c_str(), static_cast<long long>(giver), receiverName.c_str(),
                             static_cast<long long>(receiver), static_cast<long long>(package), rows, summary.inserted, readName.c_str(),
                             conversationBack ? "yes" : "MISSING", stored ? "yes" : "NO", static_cast<long long>(firstText),
                             static_cast<long long>(next - 1), again.enabledMissions, again.startupFails ? "FAILS" : "ok",
-                            again.blocksReadiness ? "BLOCKED" : "ok", dbKeep.string().c_str(), zipKeep.string().c_str());
+                            again.blocksReadiness ? "BLOCKED" : "ok", dbKeep.string().c_str(), patch.c_str(), registered.empty() ? "" : "; ", registered.c_str());
             } catch (const std::exception& e) {
                 std::printf("in-game new mission FAILED: %s\n", e.what());
             }
