@@ -71,6 +71,12 @@ public:
         const std::map<const tr::XmlNode*, std::string>* editTexts = nullptr;
         const tr::XmlNode* focusedEdit = nullptr;
         bool caretVisible = true;           // the focused box's caret in its blink (EditBox FUN_008cffd0: toggled every 500 ms)
+        // The focused box's caret (+ 0x144) and selection (+ 0x13c / + 0x140) in characters; SIZE_MAX = the end. Equal ends = none.
+        size_t caretIndex = SIZE_MAX;
+        size_t selectionStart = 0, selectionEnd = 0;
+        // Each box's first visible character (the game's + 0x184), kept from render to render: the window scrolls only as far as
+        // the caret needs (FUN_008d2710). nullptr: every box shows from its start.
+        std::map<const tr::XmlNode*, size_t>* editWindows = nullptr;
         // Edit mode: the widget being dragged and by how much (logical units), drawn moved before the edit is written.
         const tr::XmlNode* dragNode = nullptr;
         int32_t dragX = 0, dragY = 0;          // added to its anchorOffset
@@ -145,6 +151,9 @@ public:
     bool sliderPressAt(int32_t x, int32_t y, const tr::XmlNode*& slider, float& ratio) const;
     // The scroll bar or slider (any of its parts) under (x, y) in the last render - the mouse wheel's target; nullptr if none.
     const tr::XmlNode* wheelTargetAt(int32_t x, int32_t y) const;
+    // The character boundary of an edit box nearest logical x in the last render (the caret position a press there gives); 0 when the
+    // box was not drawn.
+    size_t editIndexAt(const tr::XmlNode* box, int32_t x) const;
     // A slider's thumb ratio after `step` value units (the wheel), clamped to min .. max.
     static float sliderRatioStepped(const tr::XmlNode& slider, float ratio, int step);
     static bool isButton(const tr::XmlNode& n) { return n.hasAttribute("UpTextureDef"); }
@@ -189,8 +198,23 @@ private:
     int32_t measuredWidth_ = 0, measuredEm_ = 0;
     std::map<const tr::XmlNode*, std::string> textOverrides_;
     bool editText(const tr::XmlNode& box, std::string& text) const;
-    void placeCaret(const tr::XmlNode& box, const Rect& rect, const Rect& clip, Target& target);
+    // layoutEdit (before the children: the Highlight and Caret are children) works out the visible window, the text runs and places
+    // the Highlight and the caret; drawEditText (after them) draws the runs.
+    void layoutEdit(const tr::XmlNode& box, const Rect& rect, const Rect& clip, Target& target);
     void drawEditText(const tr::XmlNode& box, const Rect& rect, const Rect& clip, Target& target);
+    int32_t measureEdit(const tr::XmlNode& box, const Rect& rect, const Rect& clip, Target& target, const std::string& text);
+    struct EditRun {
+        std::string text;
+        int32_t x = 0;                      // logical, from the box's left
+        bool highlighted = false;
+    };
+    struct EditLayout {
+        int32_t left = 0;                   // the box's left (logical)
+        size_t first = 0;                   // the first visible character
+        std::vector<int32_t> edges;         // logical x of each visible boundary, from first
+        std::vector<EditRun> runs;
+    };
+    std::map<const tr::XmlNode*, EditLayout> editLayouts_;
     const tr::XmlNode* sampleNode_ = nullptr;                       // renderDetached's widget, whose text is sampleText_
     const tr::XmlNode* detachedRoot_ = nullptr;                     // renderDetached's widget: node(path) starts there until render()
     std::string sampleText_;

@@ -1096,6 +1096,39 @@ int main() {
                             systems, liveBeams, p.packageSounds_.size());
                 check(onStation && systems >= 2 && liveBeams >= 1 && p.packageSounds_.size() == 1,
                       "a special-FX package previews on its object (particles, beam, sound listed)");
+                // Event timing (tr::SfxPackage): the miasma's dissipate package has nothing on Start; Tick (15) fires its resolve and
+                // windup systems and a 3.3 s timer whose Timer1 (53) fires the hit 3.3 s later, then ends; Stop ends what runs and
+                // fires 24. Played on the effect proxy.
+                assets.showAsset("creature_foreas_miasma_dissipate_effect.pkg");
+                frames(editor, device, 2);
+                p.packageBody_ = int(p.packageBodies_.size()) - 1;
+                p.openPackageBody(ctx);
+                frames(editor, device, 30);
+                const size_t atStart = p.scene_ ? p.scene_->liveParticleSystems() : 99;
+                if (p.scene_) p.scene_->firePackageMarker(15);
+                frames(editor, device, 10);
+                const size_t afterTick = p.scene_ ? p.scene_->liveParticleSystems() : 0;
+                const size_t timersAfterTick = p.scene_ ? p.scene_->packageTimersRunning() : 0;
+                for (int k = 0; k < 900 && p.scene_ && p.scene_->packageTimersRunning() > 0; ++k) frames(editor, device, 1);
+                frames(editor, device, 2);                              // systems start on the frame after their marker
+                bool timer = false;
+                if (p.scene_)
+                    for (const auto& [t, m] : p.scene_->packageFired()) timer = timer || m == 53;
+                const size_t afterTimer = p.scene_ ? p.scene_->liveParticleSystems() : 0;
+                float tickAt = -1.0f;
+                if (p.scene_)
+                    for (const auto& [t, m] : p.scene_->packageFired())
+                        if (m == 15) tickAt = t;
+                const float timerAt = p.scene_ && !p.scene_->packageFired().empty() ? p.scene_->packageFired().back().first : -1.0f;
+                if (p.scene_) p.scene_->stopPackage();
+                const bool stopped = p.scene_ && p.scene_->liveParticleSystems() == 0 && p.scene_->packageTimersRunning() == 0 &&
+                                     !p.scene_->packageFired().empty() && p.scene_->packageFired().back().second == 24;
+                std::printf("      package timing: %zu systems at Start, %zu after Tick (%zu timer), %zu after Timer1 (at %.2f s)\n", atStart, afterTick,
+                            timersAfterTick, afterTimer, timerAt);
+                // The hit (marker 53) is aimed at target 1, another body (the victim), which the preview does not play.
+                check(atStart == 0 && afterTick == 2 && timersAfterTick == 1 && timer && afterTimer == 2 && std::fabs(timerAt - tickAt - 3.3f) < 0.1f &&
+                          stopped,
+                      "a package's events wait for their markers (Tick, Timer1, Stop)");
             }
             {
                 // Out and back: Extract writes the file as the game reads it; a texture goes out as PNG and comes back encoded like the
@@ -1346,6 +1379,51 @@ int main() {
                     blinkOff = a == b;
                 }
                 check(blinkOff, "UI interactive edit box: the caret's blink hides it");
+                // Selection and caret position (UiCanvas::layoutEdit): a selection shows the Highlight behind its run; the caret goes to its
+                // index; a press maps back to the nearest character boundary; a long text's window follows the caret.
+                bool selectionDrawn = false, caretMoves = false, hits = false, scrolls = false;
+                if (box) {
+                    tr::XmlNode copy = *box;
+                    copy.attributes.erase(std::remove_if(copy.attributes.begin(), copy.attributes.end(),
+                                                         [](const auto& a) { return a.first == "anchorOffsetX" || a.first == "anchorOffsetY"; }),
+                                          copy.attributes.end());
+                    const int32_t w = std::atoi(copy.attribute("sizeW").c_str()) + 20, h = std::atoi(copy.attribute("sizeH").c_str()) + 20;
+                    std::map<const tr::XmlNode*, std::string> texts{{&copy, "Hello 42"}};
+                    UiCanvas::Options plain, selected, atStart;
+                    plain.editTexts = selected.editTexts = atStart.editTexts = &texts;
+                    plain.focusedEdit = selected.focusedEdit = atStart.focusedEdit = &copy;
+                    selected.selectionStart = 0;
+                    selected.selectionEnd = 5;
+                    atStart.caretIndex = 0;
+                    std::vector<uint8_t> a, b, c;
+                    ui.canvas_.renderDetached(copy, w, h, 1.0f, plain, "", a);
+                    const size_t far = ui.canvas_.editIndexAt(&copy, 10000), near = ui.canvas_.editIndexAt(&copy, -10000);
+                    ui.canvas_.renderDetached(copy, w, h, 1.0f, selected, "", b);
+                    ui.canvas_.renderDetached(copy, w, h, 1.0f, atStart, "", c);
+                    size_t selectionPixels = 0, caretPixels = 0;
+                    for (size_t k = 0; k + 3 < a.size() && k + 3 < b.size(); k += 4) selectionPixels += a[k] != b[k] || a[k + 1] != b[k + 1] ? 1 : 0;
+                    for (size_t k = 0; k + 3 < a.size() && k + 3 < c.size(); k += 4) caretPixels += a[k] != c[k] || a[k + 1] != c[k + 1] ? 1 : 0;
+                    selectionDrawn = selectionPixels > 20;
+                    std::ofstream(outputPath("smoke_editsel.rgba"), std::ios::binary).write(reinterpret_cast<const char*>(b.data()), std::streamsize(b.size()));
+                    std::printf("      edit box selection render: %d x %d (smoke_editsel.rgba)\n", w, h);
+                    caretMoves = caretPixels > 3;
+                    hits = far == 8 && near == 0;
+                    // A text far wider than the box: with the caret at the end the window starts past the beginning, at 0 it starts at 0.
+                    std::map<const tr::XmlNode*, std::string> longText{{&copy, std::string(200, 'W')}};
+                    std::map<const tr::XmlNode*, size_t> windows;
+                    UiCanvas::Options atEnd = plain;
+                    atEnd.editTexts = &longText;
+                    atEnd.editWindows = &windows;
+                    ui.canvas_.renderDetached(copy, w, h, 1.0f, atEnd, "", a);
+                    const size_t firstAtEnd = windows[&copy];
+                    atEnd.caretIndex = 0;
+                    ui.canvas_.renderDetached(copy, w, h, 1.0f, atEnd, "", a);
+                    scrolls = firstAtEnd > 0 && windows[&copy] == 0;
+                    std::printf("      edit box selection %zu pixels, caret at 0 moves %zu, hits %zu / %zu, window from %zu\n", selectionPixels, caretPixels,
+                                near, far, firstAtEnd);
+                }
+                check(selectionDrawn && caretMoves && hits && scrolls,
+                      "UI interactive edit box: selection drawn, caret placed by index, presses hit characters, the window follows the caret");
             }
             // Sliders: a press on the track jumps the value there (slider.cpp FUN_008db250); the wheel steps one unit.
             {

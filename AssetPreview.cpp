@@ -365,7 +365,40 @@ void AssetPreview::drawPackage(EditorContext& ctx) {
     if (!scene_) return;
     if (ImGui::SmallButton("Restart package")) scene_->setEntityPackage(0, name_);
     ImGui::SameLine();
+    if (ImGui::SmallButton("Stop")) scene_->stopPackage();
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Ends what runs and fires marker 24 (Stop), as a STOP event does.");
+    ImGui::SameLine();
     ImGui::TextDisabled("%.1f s", scene_->packageTime());
+    if (const size_t timers = scene_->packageTimersRunning(); timers > 0) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("%zu timer%s running", timers, timers == 1 ? "" : "s");
+    }
+    // The markers its events wait for (tr::SfxPackage): starting fires 0 and TIME events fire Timer markers; the rest come from the
+    // body's animation or an ability script in the game - fired here by hand.
+    const std::vector<uint32_t> markers = scene_->packageMarkers();
+    bool any = false;
+    for (uint32_t m : markers) {
+        if (m == 0) continue;
+        if (!any) {
+            ImGui::TextUnformatted("Fire marker:");
+            any = true;
+        }
+        ImGui::SameLine();
+        ImGui::PushID(int(m));
+        if (ImGui::SmallButton(tr::animMarkerTypeName(int(m)))) scene_->firePackageMarker(m);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Marker %u: the events waiting for it trigger.", m);
+        ImGui::PopID();
+    }
+    if (!scene_->packageFired().empty()) {
+        std::string fired;
+        const auto& log = scene_->packageFired();
+        for (size_t k = log.size() > 8 ? log.size() - 8 : 0; k < log.size(); ++k) {
+            char item[64];
+            std::snprintf(item, sizeof(item), "%s%s %.1f s", fired.empty() ? "" : ", ", tr::animMarkerTypeName(int(log[k].second)), log[k].first);
+            fired += item;
+        }
+        ImGui::TextDisabled("Fired: %s", fired.c_str());
+    }
     if (packageSounds_.empty() || !ctx.gameData) return;
     if (ImGui::TreeNode("pkgsounds", "Sounds (%zu)", packageSounds_.size())) {
         for (size_t k = 0; k < packageSounds_.size(); ++k) {

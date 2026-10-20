@@ -45,6 +45,9 @@ public:
     const std::string& name() const { return name_; }
     const std::string& summary() const { return summary_; }
 
+    // Opens the chosen package body (packageBody_) and plays the package on it.
+    void openPackageBody(EditorContext& ctx);
+
 private:
     enum class Kind { None, Model, Texture, Sound, Text, Info };
     void releaseModel();
@@ -56,7 +59,6 @@ private:
     void buildTextureView();
     void drawModel(EditorContext& ctx);
     void drawPackage(EditorContext& ctx);
-    void openPackageBody(EditorContext& ctx);
     void drawTexture();
     void drawSound();
 

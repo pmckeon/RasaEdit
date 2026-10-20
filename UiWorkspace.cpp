@@ -12,6 +12,42 @@
 #include <functional>
 #include <sstream>
 
+namespace {
+// Edit boxes' text: UTF-8 in the canvas options, code points while editing.
+std::u32string toU32(const std::string& s) {
+    std::u32string out;
+    for (size_t k = 0; k < s.size();) {
+        const unsigned char c = static_cast<unsigned char>(s[k]);
+        int extra = c < 0x80 ? 0 : (c >> 5) == 6 ? 1 : (c >> 4) == 14 ? 2 : (c >> 3) == 30 ? 3 : -1;
+        if (extra < 0 || k + size_t(extra) >= s.size() + (extra == 0 ? 1 : 0)) {
+            out += char32_t(c);
+            ++k;
+            continue;
+        }
+        char32_t cp = extra == 0 ? c : extra == 1 ? (c & 0x1F) : extra == 2 ? (c & 0x0F) : (c & 0x07);
+        for (int j = 1; j <= extra; ++j) cp = (cp << 6) | (static_cast<unsigned char>(s[k + size_t(j)]) & 0x3F);
+        out += cp;
+        k += size_t(extra) + 1;
+    }
+    return out;
+}
+std::string toUtf8(const std::u32string& s) {
+    std::string out;
+    for (char32_t c : s) {
+        if (c < 0x80) out += char(c);
+        else if (c < 0x800) { out += char(0xC0 | (c >> 6)); out += char(0x80 | (c & 0x3F)); }
+        else if (c < 0x10000) { out += char(0xE0 | (c >> 12)); out += char(0x80 | ((c >> 6) & 0x3F)); out += char(0x80 | (c & 0x3F)); }
+        else { out += char(0xF0 | (c >> 18)); out += char(0x80 | ((c >> 12) & 0x3F)); out += char(0x80 | ((c >> 6) & 0x3F)); out += char(0x80 | (c & 0x3F)); }
+    }
+    return out;
+}
+size_t codepointCount(const std::string& s) {
+    size_t n = 0;
+    for (unsigned char ch : s) n += (ch & 0xC0) != 0x80;
+    return n;
+}
+}  // namespace
+
 UiWorkspace::UiWorkspace(EditorContext& ctx) : Workspace(ctx) {}
 
 UiWorkspace::~UiWorkspace() = default;
@@ -156,6 +192,10 @@ void UiWorkspace::beginFrame() {
     if (!dirty_ || !doc_ || !hasBranch_) return;
     dirty_ = false;
     options_.focusedEdit = interactive_ ? focusedEdit_ : nullptr;
+    options_.caretIndex = editCaret_;
+    options_.selectionStart = editAnchor_;
+    options_.selectionEnd = editEnd_;
+    options_.editWindows = &editWindows_;
     drawn_ = canvas_.render(branch_, options_, rgba_);
     // Replaced between frames: no draw list of this frame references the old texture yet.
     if (texture_) SDL_ReleaseGPUTexture(ctx_.device, texture_);
@@ -362,6 +402,7 @@ void UiWorkspace::drawCanvasPanel() {
         thumbBar_ = nullptr;
         stepBar_ = nullptr;
         editTexts_.clear();
+        editWindows_.clear();
         focusedEdit_ = nullptr;
         pushed_ = nullptr;
         options_.interactiveButtons = interactive_;
@@ -568,8 +609,10 @@ void UiWorkspace::drawCanvasPanel() {
                 }
             }
             if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) stepBar_ = nullptr;
-            // Edit boxes: a click on one gives it the keyboard (elsewhere takes it away); typed characters go in (up to lengthLimit),
-            // Backspace removes the last, Enter / Escape let go.
+            // Edit boxes (editbox.cpp, traced 2026-10-20; see UiCanvas::layoutEdit). A press on an enabled box gives it the keyboard
+            // (elsewhere takes it away) and puts the caret at the character under the mouse (vtable + 0x204, NOT read: the nearest
+            // boundary); with Shift it extends the selection from its anchor, else clears it, and starts a drag that extends it while the
+            // button is held (FUN_008d0ec0 / FUN_008d1040 / FUN_008d0fe0; the select flag + 0x138 is 1 from the constructor).
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                 const tr::XmlNode* box = nullptr;
                 for (std::vector<int32_t> p = under; !p.empty() && !box; p.pop_back()) {
@@ -578,41 +621,126 @@ void UiWorkspace::drawCanvasPanel() {
                 }
                 if (box != focusedEdit_) {
                     focusedEdit_ = box;
+                    editCaret_ = SIZE_MAX;
+                    editAnchor_ = editEnd_ = 0;
                     caretTimer_ = 0.0;
                     options_.caretVisible = true;
                     dirty_ = true;
                 }
+                if (box) {
+                    const size_t at = canvas_.editIndexAt(box, x);
+                    const size_t caret = std::min(editCaret_, codepointCount(editTexts_[box]));
+                    if (ImGui::GetIO().KeyShift && at != caret) {
+                        if (editAnchor_ == editEnd_) editAnchor_ = caret;
+                        editEnd_ = at;
+                    } else {
+                        editAnchor_ = editEnd_ = 0;
+                    }
+                    editCaret_ = at;
+                    editDragging_ = true;
+                    dirty_ = true;
+                }
             }
+            if (editDragging_ && focusedEdit_ && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                const size_t at = canvas_.editIndexAt(focusedEdit_, x);
+                const size_t caret = std::min(editCaret_, codepointCount(editTexts_[focusedEdit_]));
+                if (at != caret) {
+                    if (editAnchor_ == editEnd_) editAnchor_ = caret;
+                    editEnd_ = at;
+                    editCaret_ = at;
+                    dirty_ = true;
+                }
+            }
+            if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) editDragging_ = false;
             if (focusedEdit_) {
             ImGuiIO& io = ImGui::GetIO();
-            std::string& text = editTexts_[focusedEdit_];
-            const std::string before = text;
+            std::string& utf8 = editTexts_[focusedEdit_];
+            std::u32string text = toU32(utf8);
+            const std::u32string before = text;
+            const size_t oldCaret = editCaret_, oldAnchor = editAnchor_, oldEnd = editEnd_;
+            size_t caret = std::min(editCaret_, text.size());
             const long limit = focusedEdit_->hasAttribute("lengthLimit") ? std::strtol(focusedEdit_->attribute("lengthLimit").c_str(), nullptr, 10) : -1;
-            auto count = [](const std::string& s) {
-                size_t n = 0;
-                for (unsigned char ch : s) n += (ch & 0xC0) != 0x80;
-                return n;
+            auto hasSelection = [&] { return editAnchor_ != editEnd_; };
+            auto deleteSelection = [&] {                     // FUN_008d1bb0: the selection goes, the caret to its start
+                const size_t lo = std::min(std::min(editAnchor_, editEnd_), text.size()), hi = std::min(std::max(editAnchor_, editEnd_), text.size());
+                text.erase(lo, hi - lo);
+                caret = lo;
+                editAnchor_ = editEnd_ = 0;
             };
+            auto insert = [&](const std::u32string& s) {
+                if (hasSelection()) deleteSelection();
+                for (char32_t c : s) {
+                    if (limit >= 0 && text.size() >= size_t(limit)) break;
+                    text.insert(text.begin() + std::ptrdiff_t(caret), c);
+                    ++caret;
+                }
+            };
+            // Typed characters (FUN_008d0070): a selection is deleted first, the character goes in at the caret, which moves past it.
             for (int k = 0; k < io.InputQueueCharacters.Size; ++k) {
                 const ImWchar c = io.InputQueueCharacters[k];
-                if (c < 0x20 || c == 0x7F || (limit >= 0 && count(text) >= size_t(limit))) continue;
-                if (c < 0x80) text += char(c);
-                else if (c < 0x800) { text += char(0xC0 | (c >> 6)); text += char(0x80 | (c & 0x3F)); }
-                else { text += char(0xE0 | (c >> 12)); text += char(0x80 | ((c >> 6) & 0x3F)); text += char(0x80 | (c & 0x3F)); }
-                dirty_ = true;
+                if (c < 0x20 || c == 0x7F) continue;
+                insert(std::u32string(1, char32_t(c)));
             }
-            if (ImGui::IsKeyPressed(ImGuiKey_Backspace) && !text.empty()) {
-                size_t end = text.size() - 1;
-                while (end > 0 && (static_cast<unsigned char>(text[end]) & 0xC0) == 0x80) --end;
-                text.erase(end);
+            // Navigation (FUN_008d1f20; keys FUN_008ddc30): Left / Right one character, or to the start / end with Ctrl (modifier bit 4);
+            // Home / End; Up / Down keep the caret. With Shift (bit 1) the selection runs from its anchor (the caret if none) to the new
+            // caret, otherwise any selection is cleared.
+            int nav = 0;
+            if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) nav = 1;
+            else if (ImGui::IsKeyPressed(ImGuiKey_RightArrow)) nav = 2;
+            else if (ImGui::IsKeyPressed(ImGuiKey_UpArrow)) nav = 3;
+            else if (ImGui::IsKeyPressed(ImGuiKey_DownArrow)) nav = 4;
+            else if (ImGui::IsKeyPressed(ImGuiKey_Home)) nav = 5;
+            else if (ImGui::IsKeyPressed(ImGuiKey_End)) nav = 6;
+            if (nav != 0) {
+                size_t to = caret;
+                if (nav == 1 && caret > 0) to = io.KeyCtrl ? 0 : caret - 1;
+                if (nav == 2 && caret < text.size()) to = io.KeyCtrl ? text.size() : caret + 1;
+                if (nav == 5) to = 0;
+                if (nav == 6) to = text.size();
+                if (io.KeyShift) {
+                    if (!hasSelection()) editAnchor_ = caret;
+                    editEnd_ = to;
+                } else {
+                    editAnchor_ = editEnd_ = 0;
+                }
+                caret = to;
+            }
+            // Delete / Backspace (FUN_008d20e0): the selection if there is one, else the character after / before the caret.
+            if (ImGui::IsKeyPressed(ImGuiKey_Delete)) {
+                if (hasSelection()) deleteSelection();
+                else if (caret < text.size()) text.erase(caret, 1);
+            }
+            if (ImGui::IsKeyPressed(ImGuiKey_Backspace)) {
+                if (hasSelection()) deleteSelection();
+                else if (caret > 0) text.erase(--caret, 1);
+            }
+            // Ctrl + X / C / V (the keys FUN_008ddd40 maps to cut / copy / paste - the handlers are NOT read): through the clipboard.
+            if (io.KeyCtrl && !io.KeyShift && !io.KeyAlt) {
+                const size_t lo = std::min(std::min(editAnchor_, editEnd_), text.size()), hi = std::min(std::max(editAnchor_, editEnd_), text.size());
+                if ((ImGui::IsKeyPressed(ImGuiKey_C) || ImGui::IsKeyPressed(ImGuiKey_X)) && lo < hi && focusedEdit_->tag != "PasswordBox") {
+                    ImGui::SetClipboardText(toUtf8(text.substr(lo, hi - lo)).c_str());
+                    if (ImGui::IsKeyPressed(ImGuiKey_X)) deleteSelection();
+                }
+                if (ImGui::IsKeyPressed(ImGuiKey_V))
+                    if (const char* clip = ImGui::GetClipboardText()) {
+                        std::u32string pasted;
+                        for (char32_t c : toU32(clip))
+                            if (c >= 0x20 && c != 0x7F) pasted += c;
+                        insert(pasted);
+                    }
+            }
+            editCaret_ = caret;
+            if (text != before || editCaret_ != oldCaret || editAnchor_ != oldAnchor || editEnd_ != oldEnd) {
+                utf8 = toUtf8(text);
                 dirty_ = true;
             }
             if (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
                 focusedEdit_ = nullptr;
+                editAnchor_ = editEnd_ = 0;
                 dirty_ = true;
             }
-            // The caret blinks: shown again (timer at 0) by typing, else toggled every 500 ms.
-            if (focusedEdit_ && editTexts_[focusedEdit_] != before) {
+            // The caret blinks: shown again (timer at 0) by typing or moving it, else toggled every 500 ms.
+            if (focusedEdit_ && (text != before || editCaret_ != oldCaret)) {
                 caretTimer_ = 0.0;
                 options_.caretVisible = true;
             } else {
@@ -977,6 +1105,7 @@ void UiWorkspace::syncWithDocument() {
     thumbBar_ = nullptr;
     stepBar_ = nullptr;
     editTexts_.clear();
+    editWindows_.clear();
     focusedEdit_ = nullptr;
     pushed_ = nullptr;
     options_.hoveredButton = options_.pushedButton = nullptr;

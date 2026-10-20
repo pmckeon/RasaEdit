@@ -395,10 +395,14 @@ int main(int argc, char** argv) {
             size_t packages = 0, failed = 0, accessories = 0, particles = 0, lights = 0, beams = 0, opacities = 0, sounds = 0;
             std::map<uint32_t, size_t> tags;                     // every event chunk's tag (decoded or not)
             std::map<uint32_t, std::string> tagExample;
+            std::map<uint32_t, std::map<uint32_t, size_t>> markers;
+            std::map<uint32_t, size_t> timerFires;
+            size_t timersAtOnce = 0;   // tag -> first byte (the marker) -> events
             for (const std::string& name : assets.namesWithExtension(".pkg")) {
                 ++packages;
                 try {
                     const tr::SfxPackage p = tr::readSfxPackage(assets.read(name));
+                    for (size_t k = 0; k < p.events.size(); ++k) ++markers[p.events[k]][p.eventMarkers[k]];
                     for (uint32_t t : p.events) {
                         ++tags[t];
                         if (!tagExample.count(t)) tagExample[t] = name;
@@ -409,16 +413,33 @@ int main(int argc, char** argv) {
                     beams += p.beams.size();
                     opacities += p.opacities.size();
                     sounds += p.sounds.size();
+                    // RASA_PKGSCAN=timers: packages with a TIME event, with the markers and files of their particle attaches.
+                    if (std::string(envValue("RASA_PKGSCAN")) == "timers" && !p.timers.empty()) {
+                        std::printf("timer package %s: timers", name.c_str());
+                        for (const tr::SfxTimer& t : p.timers) std::printf(" [%u -> %u, %.2f-%.2f s, %.1f s]", t.marker, t.fires, t.minDelay, t.maxDelay, t.duration);
+                        for (const tr::SfxParticleAttach& a : p.particles)
+                            std::printf("; pfx %u %s%s", a.marker, a.file.c_str(), assets.exists(a.file) ? "" : " (missing)");
+                        std::printf("\n");
+                    }
+                    for (const tr::SfxTimer& t : p.timers) {
+                        ++timerFires[t.fires];
+                        if (t.fireAtOnce) ++timersAtOnce;
+                    }
                 } catch (const std::exception& e) {
                     if (++failed <= 5) std::printf("pkg %s: %s\n", name.c_str(), e.what());
                 }
             }
             for (const auto& [t, n] : tags) {
                 const char tagName[5] = {char(t & 0xff), char((t >> 8) & 0xff), char((t >> 16) & 0xff), char(t >> 24), 0};
-                std::printf("pkg event %s: %zu (e.g. %s)\n", tagName, n, tagExample[t].c_str());
+                std::printf("pkg event %s: %zu (e.g. %s); markers", tagName, n, tagExample[t].c_str());
+                for (const auto& [m, c] : markers[t]) std::printf(" %u x%zu", m, c);
+                std::printf("\n");
             }
             std::printf("pkg scan: %zu packages, %zu failed; %zu accessories, %zu particle attaches, %zu lights, %zu beams, %zu opacities, %zu sounds\n",
                         packages, failed, accessories, particles, lights, beams, opacities, sounds);
+            std::printf("pkg timers: %zu fire at once; fire markers", timersAtOnce);
+            for (const auto& [m, c] : timerFires) std::printf(" %u x%zu", m, c);
+            std::printf("\n");
         }
         // RASA_PFXSCAN=1: how often the particle features the simulator lacks are used - groups by primitive, sorted groups (by sort
         // order), zBias values, groups with emit-from-particle (PEMT) / bounce (BONC) operators - with a few example files each.
@@ -831,8 +852,8 @@ int main(int argc, char** argv) {
                 for (const tr::SfxAccessory& a : p.accessories)
                     std::printf("pkg %s accessory mesh %s anim %s package %s\n", pkg, a.mesh.c_str(), a.animation.c_str(), a.package.c_str());
                 for (const tr::SfxParticleAttach& a : p.particles)
-                    std::printf("pkg %s particles %s target %u contact point %u (v%u, unknown0 %u, unknown2 %u, flag %d)\n", pkg, a.file.c_str(), a.target,
-                                a.contactPoint, a.version, a.unknown0, a.unknown2, int(a.flag));
+                    std::printf("pkg %s particles %s target %u contact point %u (v%u, marker %u, unknown2 %u, flag %d)\n", pkg, a.file.c_str(), a.target,
+                                a.contactPoint, a.version, a.marker, a.unknown2, int(a.flag));
                 std::printf("pkg %s: %zu lights\n", pkg, p.lights.size());
                 for (const tr::SfxLight& l : p.lights) {
                     std::printf("  light duration %u ms target %u contact point %u spot %d shadows %d priority %.2f\n", l.durationMs,

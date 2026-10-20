@@ -166,8 +166,17 @@ public:
     // and beams, as a map usable's state package; "" removes them. Restarts the package clock (and with previewTimedEffects its timed
     // lights and beams, which otherwise only persistent ones are shown).
     void setEntityPackage(size_t entityIndex, const std::string& package);
-    bool previewTimedEffects = false;       // timed special-FX lights / beams play from setEntityPackage for their duration
+    // With previewTimedEffects (the Assets preview) setEntityPackage plays the package as the game does (see tr::SfxPackage): its
+    // events wait for their markers, starting fires 0, its TIME events fire Timer markers, firePackageMarker fires any other (the
+    // body's animation markers are not followed), stopPackage ends what runs and fires 24 (Stop); timed lights / beams last their
+    // duration from when they fired. Without it every event shows at once (persistent ones only).
+    bool previewTimedEffects = false;
     float packageTime() const { return lightTime - packageStart_; }
+    void firePackageMarker(uint32_t marker);
+    void stopPackage();
+    std::vector<uint32_t> packageMarkers() const;                     // the markers the package's events wait for, ascending
+    const std::vector<std::pair<float, uint32_t>>& packageFired() const { return packageFired_; }   // (package time, marker)
+    size_t packageTimersRunning() const { return packageTimers_.size(); }
     // A particle system on its own at the origin (the Assets preview of a .pfx): started afresh by each call ("" = none), run by
     // advanceParticles and drawn with the others while Particles is on.
     void setStandaloneParticles(const std::string& file);
@@ -366,7 +375,10 @@ public:
     bool animateLights = true;
     void advanceLights(float dt) {
         advanceSky(dt);
-        if (animate) lightTime += std::clamp(dt, 0.0f, 0.1f);
+        if (animate) {
+            lightTime += std::clamp(dt, 0.0f, 0.1f);
+            advancePackageTimers(std::clamp(dt, 0.0f, 0.1f));
+        }
     }
     const std::string& mapLightsError() const { return mapLightsError_; }
     // The frame lighting for the current sky, time and toggles (also used by queueDraws).
@@ -533,14 +545,18 @@ private:
     struct StateParticle {
         Model* body = nullptr;
         tr::SfxParticleAttach event;
+        uint32_t marker = 0;            // the marker that fires it (a nested package's 0 = its accessory's)
     };
     struct StateLight {
         Model* body = nullptr;
         tr::SfxLight event;
+        uint32_t marker = 0;
+        float startTime = 0;            // lightTime when it fired (package preview)
     };
     struct StateBeam {                  // ACBM (see Beams.h): both ends on this body's contact points
         Model* body = nullptr;
         tr::SfxBeam event;
+        uint32_t marker = 0;
     };
     struct Placement {
         Mat4 world;                 // entity placement
@@ -765,12 +781,30 @@ private:
     std::function<tr::GameData::UsableAnimation(int32_t, int32_t)> usableAnimationFor_;
     struct StateEffects {
         std::vector<Model*> accessories;
+        std::vector<uint32_t> accessoryMarkers;
         std::vector<StateParticle> particles;
         std::vector<StateLight> lights;
         std::vector<StateBeam> beams;
+        std::vector<tr::SfxTimer> timers;
+        std::vector<uint32_t> stops;
     };
     StateEffects stateEffects(int32_t classId, int32_t stateId);
-    void addPackageEffects(const std::string& package, Model* body, int depth, StateEffects& effects);
+    // nestedMarker: for an accessory's nested package, the accessory's marker - the nested package starts (its marker 0) when the
+    // accessory fires (UNVERIFIED: its other markers are taken to share the outer package's).
+    void addPackageEffects(const std::string& package, Model* body, int depth, StateEffects& effects, int64_t nestedMarker = -1);
+    // The package preview (setEntityPackage with previewTimedEffects): every event, the entity it plays on, the running timers.
+    StateEffects packagePending_;
+    size_t packageEntity_ = 0;
+    struct LiveTimer {
+        tr::SfxTimer timer;
+        float countdown = 0, elapsed = 0;
+    };
+    std::vector<LiveTimer> packageTimers_;
+    std::vector<std::pair<float, uint32_t>> packageFired_;
+    uint32_t packageRandom_ = 1;            // Park-Miller (the game's FUN_007880d0 stream is not reproduced)
+    float packageRandomDelay(float minDelay, float maxDelay);
+    void advancePackageTimers(float dt);
+    bool marker24Fired_ = false;
     // A contact point's frame on a body (cp 0 = the body itself); false when the body is not loaded or lacks the id.
     // Lookup by connection point (type 1, `usage`, id) as FUN_00924880; id 0 = the body itself (special-FX events).
     // posedBones: the body's bones posed this frame (a creature's idle); the point then follows its bone.

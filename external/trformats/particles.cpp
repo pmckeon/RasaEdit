@@ -467,10 +467,11 @@ SfxPackage readSfxPackage(const Bytes& data) {
     while (r.tell() < root.end) {
         const Chunk event = readChunk(r);
         package.events.push_back(event.tag);
+        package.eventMarkers.push_back(r.tell() < event.end ? data[r.tell()] : 0xFFFFFFFFu);
         if (event.tag == fourcc("ACCY")) {
             SfxAccessory a;
             a.version = event.version;
-            r.u8();
+            a.marker = r.u8();
             a.mesh = readAsset(r);
             a.animation = readAsset(r);
             r.u8();
@@ -492,7 +493,7 @@ SfxPackage readSfxPackage(const Bytes& data) {
         } else if (event.tag == fourcc("PFXA")) {
             SfxParticleAttach p;
             p.version = event.version;
-            p.unknown0 = r.u8();
+            p.marker = r.u8();
             p.file = readAsset(r);
             p.target = r.u8();
             p.contactPoint = r.u8();
@@ -503,7 +504,7 @@ SfxPackage readSfxPackage(const Bytes& data) {
         } else if (event.tag == fourcc("SLIT")) {
             SfxLight l;
             l.version = event.version;
-            l.unknown0 = r.u8();
+            l.marker = r.u8();
             l.target = r.u8();
             l.contactPoint = r.u8();
             l.unknown3 = r.u8();
@@ -578,7 +579,7 @@ SfxPackage readSfxPackage(const Bytes& data) {
         } else if (event.tag == fourcc("AOPC")) {
             SfxOpacity o;
             o.version = event.version;
-            o.unknown0 = r.u8();
+            o.marker = r.u8();
             o.target = r.u8();
             o.loop = r.u8() != 0;
             const uint32_t n = r.u32();
@@ -625,6 +626,18 @@ SfxPackage readSfxPackage(const Bytes& data) {
             }
             finish(r, event);
             package.sounds.push_back(a);
+        } else if (event.tag == fourcc("TIME") && event.version == 1) {
+            SfxTimer t;
+            t.marker = r.u8();
+            t.duration = r.f32();
+            t.minDelay = r.f32();
+            t.maxDelay = r.f32();
+            t.fireAtOnce = r.u8() != 0;
+            t.fires = r.u8();
+            finish(r, event);
+            package.timers.push_back(t);
+        } else if (event.tag == fourcc("STOP")) {
+            package.stops.push_back(r.u8());
         }
         r.seek(event.end);
     }

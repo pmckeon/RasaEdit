@@ -202,6 +202,7 @@ ParticleSystem readParticleSystem(const Bytes& data);
 // [v4+: asset x3], [v5+: u8], [v7+: u8 bool], [v8+: f32]; an asset is an ISTR (name), INON (none) or ITNI (id) chunk.
 // What the unnamed fields do (attachment point, looping, timing) is NOT decoded. `PFXA` and `SLIT` are decoded too (below).
 struct SfxAccessory {
+    uint32_t marker = 0;         // the first u8 (+ 8): the marker that fires it (see SfxPackage)
     std::string mesh;            // e.g. arch_hum_outpost_waypoint_fx.geo
     std::string animation;       // played on it (e.g. arch_hum_outpost_waypoint.anm)
     std::string animation2;      // the v2+ asset after it (often the same animation)
@@ -215,7 +216,7 @@ struct SfxAccessory {
 // id `contactPoint`; see tr::ConnectionPointName) matches (FUN_00924880; 0 = the body itself, a missing one skips it).
 struct SfxParticleAttach {
     uint32_t version = 0;
-    uint32_t unknown0 = 0;
+    uint32_t marker = 0;                         // + 8: the marker that fires it (see SfxPackage)
     std::string file;
     uint32_t target = 0;
     uint32_t contactPoint = 0;
@@ -242,7 +243,7 @@ float sfxCurveValue(const SfxCurve& curve, float seconds);   // loop applied, th
 // = 5, Intensity = 6, PenumbraAngle = 7, ConeAngle = 8 every frame from the elapsed milliseconds.
 struct SfxLight {
     uint32_t version = 0;
-    uint32_t unknown0 = 0, target = 0, contactPoint = 0, unknown3 = 0;
+    uint32_t marker = 0, target = 0, contactPoint = 0, unknown3 = 0;   // marker: + 8 (see SfxPackage)
     uint32_t durationMs = 0;
     float priority = 1;
     bool castsShadows = false;
@@ -286,7 +287,7 @@ struct SfxBeam {
 // destroyed, deaths - none is a steady state the editor shows, so the editor parses it and does not apply it.
 struct SfxOpacity {
     uint32_t version = 0;
-    uint32_t unknown0 = 0, target = 0;
+    uint32_t marker = 0, target = 0;
     bool loop = false;
     std::vector<std::pair<float, float>> keys;   // (seconds, opacity)
     uint32_t durationMs = 0;
@@ -316,14 +317,37 @@ struct SfxSound {
     bool flag34 = false;
     Vec3 offset;
 };
+// `TIME` timer v1 (TRasa::SfxTimerEvent, factory 0x00753d10, unserializer FUN_0076cce0, trigger FUN_0076ca30, product
+// TRasa::SfxTimerProduct FUN_0077b780 / update FUN_0077b930; 183 shipped): u8 marker (+ 8), f32 duration (+ 0xc, s; 0 = until the
+// package stops), f32 minDelay, maxDelay (+ 0x10 / + 0x14, s), u8 fireAtOnce (+ 0x18), u8 fires (+ 0x1c, the marker it fires; the
+// constructor's default 53 = Timer1). When fired, the trigger makes one product per selected body: its countdown starts at 0 with
+// fireAtOnce, else uniform random in [minDelay, maxDelay] (FUN_00788250); each update takes the elapsed seconds off and, at or below
+// 0, fires `fires` into the package (SfxPackage vtable slot 3) and draws a new delay; with a duration > 0 it ends once that has passed.
+struct SfxTimer {
+    uint32_t marker = 0;
+    float duration = 0, minDelay = 1, maxDelay = 1;
+    bool fireAtOnce = true;
+    uint32_t fires = 53;
+};
+// Markers (traced 2026-10-20 in tabula_rasa.exe): every event's first byte (+ 8 on the event object, read by each unserializer)
+// is an animation marker type (tr::animMarkerTypeName: 0 Start, 1 Strike, 6-13 Windup / Resolve, 15 Tick, 24 Stop, 30-36 Footstep,
+// 37-44 Audio, 53-60 Timer, ...). TRasa::SfxPackage's vtable slot 3 (FUN_00755740) fires a marker: every event whose marker equals
+// it triggers (vtable + 8), and the live products are told too; while the package still loads, fired markers are queued and replayed
+// once it has (FUN_00755db0 / FUN_00754c40). Starting a package (FUN_00755230; body.AttachFXPackage, not AttachFXPackageNoStart)
+// fires 0; `TIME` events fire Timer markers; `STOP` (SfxStopEvent, trigger FUN_00764a10 -> FUN_00755250) stops every live product
+// and fires 24. The other markers come from outside the package (the body's animation markers, ability scripts - NOT traced).
+// Shipped: 2,201 of 3,583 particle attaches, 819 of 1,112 lights and 1,703 of 2,775 sounds wait for 0.
 struct SfxPackage {
     std::vector<uint32_t> events;                // every event's tag, in order
+    std::vector<uint32_t> eventMarkers;          // each event's first byte (+ 8 on the event object: the marker that fires it)
     std::vector<SfxAccessory> accessories;
     std::vector<SfxParticleAttach> particles;
     std::vector<SfxLight> lights;
     std::vector<SfxBeam> beams;
     std::vector<SfxOpacity> opacities;
     std::vector<SfxSound> sounds;
+    std::vector<SfxTimer> timers;
+    std::vector<uint32_t> stops;                 // `STOP` events' markers
 };
 SfxPackage readSfxPackage(const Bytes& data);
 

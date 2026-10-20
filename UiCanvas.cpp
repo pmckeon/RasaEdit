@@ -319,6 +319,7 @@ void UiCanvas::setSources(const tr::UiExport* ui, const tr::AssetLibrary* assets
     loadAnimations();
     fontFilesListed_ = false;
     drawn_.clear();
+    editLayouts_.clear();
     missingTextures_.clear();
     missingFonts_.clear();
     missingTextIds_.clear();
@@ -1125,7 +1126,7 @@ void UiCanvas::drawWidget(const tr::XmlNode& widget, std::vector<int32_t>& path,
         drawText(widget, rect, clip, target);
         visual = !text(widget).empty();
     }
-    if (widget.tag == "EditBox" || widget.tag == "PasswordBox") placeCaret(widget, rect, clip, target);
+    if (widget.tag == "EditBox" || widget.tag == "PasswordBox") layoutEdit(widget, rect, clip, target);
     drawn_.push_back(DrawnWidget{path, rect, visual});
     // clipChildren defaults to true: the WidgetComposite constructor (FUN_008ae750) sets + 0xB0 = 1 and its loader (FUN_008ae9c0) only
     // overwrites it when the attribute is present (the export writes only "false"); the composite render (FUN_008aee70) clips its
@@ -1172,48 +1173,156 @@ bool UiCanvas::editText(const tr::XmlNode& box, std::string& text) const {
     return !text.empty() || options_.focusedEdit == &box;
 }
 
-void UiCanvas::placeCaret(const tr::XmlNode& box, const Rect& rect, const Rect& clip, Target& target) {
-    const tr::XmlNode* caret = nullptr;
-    for (const tr::XmlNode& c : box.children)
-        if (c.tag == "Caret") caret = &c;
-    if (!caret || options_.focusedEdit != &box || !options_.caretVisible) return;
-    std::string text;
-    editText(box, text);
+// The width of a string in the box's font, pixels (the game measures each run apart, FUN_008f9d70).
+int32_t UiCanvas::measureEdit(const tr::XmlNode& box, const Rect& rect, const Rect& clip, Target& target, const std::string& text) {
+    if (text.empty()) return 0;
     tr::XmlNode line;
     line.tag = "Text";
     line.attributes = {{"fontId", box.attribute("fontId")}, {"vertAlign", "center"}};
-    textOverrides_[&line] = text.empty() ? std::string(" ") : text;
+    textOverrides_[&line] = text;
     measureOnly_ = scrollTail_ = true;
-    drawText(line, rect, clip, target);
+    drawText(line, Rect{rect.x0, rect.y0, rect.x0 + 100000, rect.y1}, clip, target);
     measureOnly_ = scrollTail_ = false;
     textOverrides_.erase(&line);
-    const int32_t width = text.empty() ? 0 : measuredWidth_;
+    return measuredWidth_;
+}
+
+namespace {
+std::string utf8Of(const std::vector<uint32_t>& cps, size_t from, size_t to) {
+    std::string s;
+    for (size_t k = from; k < to && k < cps.size(); ++k) {
+        const uint32_t c = cps[k];
+        if (c < 0x80) s += char(c);
+        else if (c < 0x800) { s += char(0xC0 | (c >> 6)); s += char(0x80 | (c & 0x3F)); }
+        else if (c < 0x10000) { s += char(0xE0 | (c >> 12)); s += char(0x80 | ((c >> 6) & 0x3F)); s += char(0x80 | (c & 0x3F)); }
+        else { s += char(0xF0 | (c >> 18)); s += char(0x80 | ((c >> 12) & 0x3F)); s += char(0x80 | ((c >> 6) & 0x3F)); s += char(0x80 | (c & 0x3F)); }
+    }
+    return s;
+}
+}  // namespace
+
+// EditBox layout (FUN_008d2710, traced 2026-10-20). The visible window [+ 0x184, + 0x188) follows the caret (+ 0x144): a caret before the
+// window's start becomes the start and the end is worked out from it (vtable + 0x20c); one past the end (or an end past the text)
+// becomes the end and the start is worked out back from it (+ 0x208) - both NOT read: the editor fits as many whole characters as the
+// box's width holds. The window's text is laid out as runs (+ 0x134, 0x30 bytes: string, highlighted + 0x1c, x / y): without a
+// selection (+ 0x13c == + 0x140) one run and the Highlight (+ 0xf4) hidden; with one, the text before it, the selection clipped to the
+// window (highlighted), then the rest; the Highlight is shown, placed at the selection's run (Widget + 0x148) and sized to it (+ 0x128:
+// the run's width x the font height, from FUN_008f9d70). The caret goes to (width of the window's text before it + the prefix,
+// (height - font height) / 2).
+void UiCanvas::layoutEdit(const tr::XmlNode& box, const Rect& rect, const Rect& clip, Target& target) {
+    const tr::XmlNode* caret = nullptr;
+    const tr::XmlNode* highlight = nullptr;
+    for (const tr::XmlNode& c : box.children) {
+        if (c.tag == "Caret") caret = &c;
+        if (c.tag == "Highlight") highlight = &c;
+    }
+    std::string shown;
+    editText(box, shown);
+    const std::vector<uint32_t> cps = codepoints(shown);
+    const size_t n = cps.size();
+    const bool focused = options_.focusedEdit == &box;
+    const size_t caretAt = focused ? std::min(options_.caretIndex, n) : n;
+    size_t selLo = focused ? std::min(std::min(options_.selectionStart, options_.selectionEnd), n) : 0;
+    size_t selHi = focused ? std::min(std::max(options_.selectionStart, options_.selectionEnd), n) : 0;
+    const float sx = std::max(target.sx, 0.01f);
+    const int32_t boxWidth = int32_t(float(rect.width()) * sx);
+    // Prefix widths from a start character (pixels).
+    auto widthBetween = [&](size_t from, size_t to) { return measureEdit(box, rect, clip, target, utf8Of(cps, from, to)); };
+    auto endFrom = [&](size_t start) {
+        size_t end = start;
+        while (end < n && widthBetween(start, end + 1) <= boxWidth) ++end;
+        return end;
+    };
+    auto startBack = [&](size_t end) {
+        size_t start = end;
+        while (start > 0 && widthBetween(start - 1, end) <= boxWidth) --start;
+        return start;
+    };
+    size_t first = 0;
+    if (options_.editWindows) {
+        const auto it = options_.editWindows->find(&box);
+        if (it != options_.editWindows->end()) first = std::min(it->second, n);
+    }
+    size_t last = endFrom(first);
+    if (caretAt < first) {
+        first = caretAt;
+        last = endFrom(first);
+    } else if (caretAt > last) {
+        last = caretAt;
+        first = startBack(last);
+    } else if (last < n && first > 0 && widthBetween(first - 1, last) <= boxWidth) {
+        first = startBack(last);               // room again (text removed): show more of what is before
+    }
+    if (options_.editWindows) (*options_.editWindows)[&box] = first;
+    EditLayout& layout = editLayouts_[&box];
+    layout = EditLayout{};
+    layout.left = rect.x0;
+    layout.first = first;
+    for (size_t k = first; k <= last; ++k) layout.edges.push_back(rect.x0 + int32_t(float(widthBetween(first, k)) / sx));
+    auto logicalX = [&](size_t k) { return layout.edges[std::clamp(k, first, last) - first] - rect.x0; };
+    selLo = std::clamp(selLo, first, last);
+    selHi = std::clamp(selHi, first, last);
+    if (selLo >= selHi) {
+        if (first < last) layout.runs.push_back(EditRun{utf8Of(cps, first, last), 0, false});
+    } else {
+        if (first < selLo) layout.runs.push_back(EditRun{utf8Of(cps, first, selLo), 0, false});
+        layout.runs.push_back(EditRun{utf8Of(cps, selLo, selHi), logicalX(selLo), true});
+        if (selHi < last) layout.runs.push_back(EditRun{utf8Of(cps, selHi, last), logicalX(selHi), false});
+    }
+    measureEdit(box, rect, clip, target, " ");
     const int32_t emLogical = std::max(1, int32_t(std::lround(float(measuredEm_) / std::max(target.sy, 0.01f))));
+    if (highlight) {
+        ButtonOverride& o = buttonOverrides_[highlight];
+        o = ButtonOverride{};
+        if (focused && selLo < selHi) {
+            o.show = true;
+            o.offset = true;
+            o.offsetX = logicalX(selLo);
+            o.offsetY = (rect.height() - emLogical) / 2;
+            o.size = true;
+            o.width = std::max(1, logicalX(selHi) - logicalX(selLo));
+            o.height = emLogical;
+        }
+    }
+    if (!caret || !focused || !options_.caretVisible) return;
     ButtonOverride& o = buttonOverrides_[caret];
     o.show = true;
     o.offset = true;
-    o.offsetX = int32_t(float(width) / std::max(target.sx, 0.01f));
+    o.offsetX = logicalX(caretAt);
     o.offsetY = (rect.height() - emLogical) / 2;
     o.size = true;
     o.width = 3;
     o.height = emLogical;
 }
 
+// The runs, in TextColor (+ 0xdc) or, for the selection, TextColorHighlighted (+ 0xe0), each x the render context's colour
+// (FUN_008cfb70 multiplies both by the context with FUN_008b7280 and passes the highlighted one for runs with + 0x1c set).
 void UiCanvas::drawEditText(const tr::XmlNode& box, const Rect& rect, const Rect& clip, Target& target) {
-    std::string text;
-    if (!editText(box, text) || text.empty()) return;
-    tr::XmlNode line;
-    line.tag = "Text";
-    line.attributes = {{"fontId", box.attribute("fontId")}, {"vertAlign", "center"}};
-    for (const char* c : {"R", "G", "B", "A"}) {
-        const std::string name = std::string("TextColor") + c;
-        if (box.hasAttribute(name)) line.attributes.emplace_back(std::string("color") + c, box.attribute(name));
+    const auto it = editLayouts_.find(&box);
+    if (it == editLayouts_.end()) return;
+    for (const EditRun& run : it->second.runs) {
+        tr::XmlNode line;
+        line.tag = "Text";
+        line.attributes = {{"fontId", box.attribute("fontId")}, {"vertAlign", "center"}};
+        const std::string colour = run.highlighted ? "TextColorHighlighted" : "TextColor";
+        for (const char* c : {"R", "G", "B", "A"})
+            if (box.hasAttribute(colour + c)) line.attributes.emplace_back(std::string("color") + c, box.attribute(colour + c));
+        textOverrides_[&line] = run.text;
+        scrollTail_ = true;
+        drawText(line, Rect{rect.x0 + run.x, rect.y0, rect.x1 + 100000, rect.y1}, intersect(clip, rect), target);
+        scrollTail_ = false;
+        textOverrides_.erase(&line);
     }
-    textOverrides_[&line] = text;
-    scrollTail_ = true;
-    drawText(line, rect, clip, target);
-    scrollTail_ = false;
-    textOverrides_.erase(&line);
+}
+
+size_t UiCanvas::editIndexAt(const tr::XmlNode* box, int32_t x) const {
+    const auto it = editLayouts_.find(box);
+    if (it == editLayouts_.end() || it->second.edges.empty()) return 0;
+    const std::vector<int32_t>& edges = it->second.edges;
+    size_t best = 0;
+    for (size_t k = 1; k < edges.size(); ++k)
+        if (std::abs(edges[k] - x) < std::abs(edges[best] - x)) best = k;
+    return it->second.first + best;
 }
 
 void UiCanvas::fillBackground(Target& target) const {
@@ -1250,6 +1359,7 @@ void UiCanvas::renderDetached(const tr::XmlNode& widget, int32_t pixelWidth, int
                               const std::string& sampleText, std::vector<uint8_t>& rgba) {
     detachedRoot_ = &widget;                // paths of this render (and the queries after it) start at the widget
     drawn_.clear();
+    editLayouts_.clear();
     options_ = options;
     options_.screenWidth = options_.screenHeight = 0;
     options_.backgroundRgba = nullptr;
@@ -1286,6 +1396,7 @@ uint32_t UiCanvas::animationLength(const std::string& name) const {
 std::vector<UiCanvas::DrawnWidget> UiCanvas::render(const std::vector<int32_t>& path, const Options& options, std::vector<uint8_t>& rgba) {
     detachedRoot_ = nullptr;
     drawn_.clear();
+    editLayouts_.clear();
     options_ = options;
     animating_ = false;
     buttonOverrides_.clear();

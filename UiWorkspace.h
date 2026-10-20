@@ -202,6 +202,11 @@ private:
     std::map<const tr::XmlNode*, std::string> editTexts_;   // interactive mode: text typed into edit boxes (UTF-8)
     const tr::XmlNode* focusedEdit_ = nullptr;           // the edit box that has the keyboard
     double caretTimer_ = 0.0;                            // ms since the caret last toggled (FUN_008cffd0: every 500 ms)
+    // The focused box's caret and selection in characters (SIZE_MAX = the end; equal ends = no selection), a drag in progress, and
+    // each box's first visible character (kept by UiCanvas::layoutEdit).
+    size_t editCaret_ = SIZE_MAX, editAnchor_ = 0, editEnd_ = 0;
+    bool editDragging_ = false;
+    std::map<const tr::XmlNode*, size_t> editWindows_;
     char filter_[128] = {};
     // Definitions panel.
     tr::UiSection defSection_ = tr::UiSection::Textures;
