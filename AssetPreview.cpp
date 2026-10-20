@@ -262,6 +262,9 @@ void AssetPreview::openScene(EditorContext& ctx, const std::string& mesh) {
     }
     scene_ = std::make_unique<SceneView>(*renderer_, *ctx.assets, *map_, [mesh](int32_t) { return mesh; }, [](int32_t) { return true; });
     scene_->showPlaceholders = false;
+    // The game's distance culling (culling layers: 100 m for most objects, never past 250 m) is about the world; a preview frames the
+    // model from as far as its size needs (the 260 m Bane mining drill from ~300 m), so it is off here.
+    scene_->gameDistances = false;
     scene_->setRegionEnvironmentMaps({});        // Env1.dds, the client's default cube
     target_ = tr::Vec3{0, 1, 0};
     distance_ = 5.0f;

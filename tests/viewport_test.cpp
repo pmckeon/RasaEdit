@@ -477,6 +477,52 @@ int main(int argc, char** argv) {
             for (const auto& [m, c] : timerFires) std::printf(" %u x%zu", m, c);
             std::printf("\n");
         }
+        // RASA_STATEPKGSCAN=1: the usable state packages (usabledata.specialFX with previous state 97, the steady states the world view
+        // shows) - per event type how many wait for marker 0 (fired when the state starts), for a marker a TIME event of the same package
+        // fires, or for another (animation markers, scripts); and the persistent ones among them (lights / beams of duration 0).
+        if (envValue("RASA_STATEPKGSCAN")) {
+            const tr::py::Object* table = data.global("generated.client.usabledata", "specialFX");
+            std::map<std::string, std::map<std::string, size_t>> counts;
+            std::set<std::string> seen;
+            std::map<std::string, std::vector<std::string>> examples;
+            size_t packages = 0;
+            for (const auto& e : table ? table->entries : decltype(table->entries){}) {
+                const tr::py::Object* key = e.first.get();
+                if (!tr::py::isInt(e.second.get()) || tr::py::length(key) != 3 || tr::py::asInt(tr::py::item(key, 2)) != 97) continue;
+                std::string name;
+                try { name = data.stringById(int32_t(tr::py::asInt(e.second.get()))); } catch (const std::exception&) { continue; }
+                if (!seen.insert(tr::toLowerAscii(name)).second || !assets.exists(name)) continue;
+                ++packages;
+                try {
+                    const tr::SfxPackage p = tr::readSfxPackage(assets.read(name));
+                    std::set<uint32_t> timerFires;
+                    for (const tr::SfxTimer& t : p.timers) timerFires.insert(t.fires);
+                    auto kind = [&](uint32_t m) { return m == 0 ? "start" : timerFires.count(m) ? "timer" : "other"; };
+                    auto note = [&](const std::string& type, uint32_t m) {
+                        ++counts[type][kind(m)];
+                        if (std::string(kind(m)) != "start" && examples[type + " " + kind(m)].size() < 3)
+                            examples[type + " " + kind(m)].push_back(name + " (" + tr::animMarkerTypeName(int(m)) + ")");
+                    };
+                    for (const auto& a : p.accessories) note("accessory", a.marker);
+                    for (const auto& a : p.particles) note("particles", a.marker);
+                    for (const auto& l : p.lights) note(l.durationMs ? "light (timed)" : "light (persistent)", l.marker);
+                    for (const auto& b : p.beams) note(b.durationMs ? "beam (timed)" : "beam (persistent)", b.marker);
+                    for (const auto& t : p.timers) note("timer", t.marker);
+                } catch (const std::exception&) {
+                }
+            }
+            std::printf("state package scan: %zu packages\n", packages);
+            for (const auto& [type, byKind] : counts) {
+                std::printf("  %s:", type.c_str());
+                for (const auto& [k, n] : byKind) std::printf(" %s %zu", k.c_str(), n);
+                std::printf("\n");
+            }
+            for (const auto& [what, list] : examples) {
+                std::printf("  e.g. %s:", what.c_str());
+                for (const std::string& x : list) std::printf(" %s", x.c_str());
+                std::printf("\n");
+            }
+        }
         // RASA_PFXSCAN=1: how often the particle features the simulator lacks are used - groups by primitive, sorted groups (by sort
         // order), zBias values, groups with emit-from-particle (PEMT) / bounce (BONC) operators - with a few example files each.
         if (envValue("RASA_PFXSCAN")) {
@@ -2436,6 +2482,18 @@ int main(int argc, char** argv) {
             for (const std::string& line : scene.stateBeamList()) std::printf("  beam %s\n", line.c_str());
         if (envValue("RASA_LISTLIVEPFX"))
             for (const std::string& line : scene.liveParticleList()) std::printf("  live %s\n", line.c_str());
+        // RASA_PLAYERSTEP=<seconds>: runs the world clock that long (1/30 s steps: lights, package timers and animation markers,
+        // particles) and lists every object's state package with the markers fired after its start.
+        if (const char* step = envValue("RASA_PLAYERSTEP")) {
+            const int steps = int(std::atof(step) * 30.0f);
+            for (int k = 0; k < steps; ++k) {
+                scene.advanceLights(1.0f / 30.0f);
+                scene.advanceParticles(1.0f / 30.0f);
+            }
+            const std::vector<std::string> lines = scene.debugPackagePlayers();
+            std::printf("state packages after %s s: %zu objects, %zu particle systems running\n", step, lines.size(), scene.liveParticleSystems());
+            for (const std::string& line : lines) std::printf("  %s\n", line.c_str());
+        }
         if (const char* pool = envValue("RASA_POOLFIGURES")) {   // <spawn pool index in the map's content>: its figures
             const std::vector<std::string> lines = scene.debugServerFigures(Selection{SelectionKind::SpawnPool, size_t(std::atoi(pool))});
             std::printf("spawn pool %s: %zu figures\n", pool, lines.size());

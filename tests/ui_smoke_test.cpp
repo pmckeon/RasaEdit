@@ -1120,14 +1120,21 @@ int main() {
                     for (const auto& [t, m] : p.scene_->packageFired())
                         if (m == 15) tickAt = t;
                 const float timerAt = p.scene_ && !p.scene_->packageFired().empty() ? p.scene_->packageFired().back().first : -1.0f;
+                // The Tick bursts are over by then (spent copies are dropped); firing Tick again reuses their slots.
+                size_t afterSecondTick = 0;
+                if (p.scene_) {
+                    p.scene_->firePackageMarker(15);
+                    frames(editor, device, 10);
+                    afterSecondTick = p.scene_->liveParticleSystems();
+                }
                 if (p.scene_) p.scene_->stopPackage();
                 const bool stopped = p.scene_ && p.scene_->liveParticleSystems() == 0 && p.scene_->packageTimersRunning() == 0 &&
                                      !p.scene_->packageFired().empty() && p.scene_->packageFired().back().second == 24;
-                std::printf("      package timing: %zu systems at Start, %zu after Tick (%zu timer), %zu after Timer1 (at %.2f s)\n", atStart, afterTick,
-                            timersAfterTick, afterTimer, timerAt);
+                std::printf("      package timing: %zu systems at Start, %zu after Tick (%zu timer), %zu after Timer1 (at %.2f s), %zu after Tick again\n",
+                            atStart, afterTick, timersAfterTick, afterTimer, timerAt, afterSecondTick);
                 // The hit (marker 53) is aimed at target 1, another body (the victim), which the preview does not play.
-                check(atStart == 0 && afterTick == 2 && timersAfterTick == 1 && timer && afterTimer == 2 && std::fabs(timerAt - tickAt - 3.3f) < 0.1f &&
-                          stopped,
+                check(atStart == 0 && afterTick == 2 && timersAfterTick == 1 && timer && afterTimer == 0 && afterSecondTick == 2 &&
+                          std::fabs(timerAt - tickAt - 3.3f) < 0.1f && stopped,
                       "a package's events wait for their markers (Tick, Timer1, Stop)");
             }
             {

@@ -787,15 +787,9 @@ SceneLighting SceneView::lighting() const {
     auto considerStateLight = [&](const StateLight& sl, const Model* model, const Mat4& world) {
             const tr::SfxLight& e = sl.event;
             if (e.target != 0) return;
-            // Persistent lights run on the light clock; in a package preview every light runs from the package's start, timed ones
-            // only for their duration.
-            float lightTime = this->lightTime;
-            if (previewTimedEffects) {
-                lightTime = this->lightTime - sl.startTime;
-                if (e.durationMs != 0 && (lightTime < 0 || lightTime * 1000.0f > float(e.durationMs))) return;
-            } else if (e.durationMs != 0) {
-                return;
-            }
+            // Each light runs from its own firing (the product's clock, FUN_00771410); timed ones only for their duration.
+            const float lightTime = this->lightTime - sl.startTime;
+            if (e.durationMs != 0 && (lightTime < 0 || lightTime * 1000.0f > float(e.durationMs))) return;
             Mat4 frame;
             tr::Quat cpRotation;
             if (!contactFrame(sl.body ? sl.body : model, e.contactPoint, 1, frame, cpRotation)) return;
@@ -1606,6 +1600,7 @@ void SceneView::loadModel(const std::string& name, Model& model) {
                     // Map objects' own animations: blended skinned pieces are played too; creatures' idles stay posed.
                     objectAnimation = marked;
                     model.animation = animation;
+                    model.animationName = animationName;
                     model.skeleton.bones = geo.bones;
                     model.boneTracks = boneTrackIndices(model.skeleton, model.animation);
                     model.restInverse.clear();
@@ -2395,6 +2390,26 @@ void SceneView::advanceParticles(float dt) {
                          return dot(d, d) > keep * keep;
                      }),
                      liveBeams_.end());
+    // State-package particle systems: a copy fired after the start whose particles are all gone (2 s on) is spent - its slot waits for
+    // the next firing (the game's product ends with its particles; the end of emission is not tracked, hence the grace); systems whose
+    // event or accessory a Stop removed go.
+    liveParticles_.erase(std::remove_if(liveParticles_.begin(), liveParticles_.end(), [&](const LiveParticles& l) {
+                             if (!l.server && !l.mapState) return false;
+                             std::vector<StateParticle>& list = l.server ? serverPlacements_[l.placement].stateParticles : placements_[l.placement].stateParticles;
+                             if (l.body >= 0) {
+                                 const size_t accessories = l.server ? serverPlacements_[l.placement].accessories.size()
+                                                                     : placements_[l.placement].stateAccessories.size();
+                                 return !l.server && size_t(l.body) >= accessories;   // server bodies (>= 0) are the object's own models
+                             }
+                             if (l.mount >= list.size()) return true;
+                             StateParticle& sp = list[l.mount];
+                             if (!sp.warm && lightTime - sp.startTime > 2.0f && l.instance && l.instance->particleCount() == 0) {
+                                 sp.spent = true;
+                                 return true;
+                             }
+                             return sp.spent;
+                         }),
+                         liveParticles_.end());
     // Special-FX particle attaches of server objects' use states (target 0 only; see tr::SfxParticleAttach).
     std::set<std::pair<size_t, size_t>> liveServer;
     for (const LiveParticles& l : liveParticles_)
@@ -2407,7 +2422,7 @@ void SceneView::advanceParticles(float dt) {
         for (size_t m = 0; m < s.stateParticles.size(); ++m) {
             if (liveServer.count({k, m})) continue;
             const StateParticle& sp = s.stateParticles[m];
-            if (sp.event.target != 0) continue;
+            if (sp.event.target != 0 || sp.spent) continue;
             Mat4 frame;
             tr::Quat rotation;
             if (!contactFrame(sp.body ? sp.body : s.model, sp.event.contactPoint, 1, frame, rotation)) continue;
@@ -2419,7 +2434,8 @@ void SceneView::advanceParticles(float dt) {
             l.server = true;
             l.instance = std::make_unique<ParticleInstance>(*system, multiply(s.world, frame), uint32_t(k * 6271u + m * 15485863u + 7u));
             l.instance->setGeoPoints(geoPointSource());
-            for (int step = 0; step < 90; ++step) l.instance->update(1.0f / 30.0f);
+            if (sp.warm)
+                for (int step = 0; step < 90; ++step) l.instance->update(1.0f / 30.0f);
             liveParticles_.push_back(std::move(l));
         }
     }
@@ -2461,7 +2477,7 @@ void SceneView::advanceParticles(float dt) {
         if (p.useState < 0) continue;
         const tr::Vec3 d = subtract(p.centre, camera_.position);
         if (dot(d, d) > particleDistance * particleDistance) continue;
-        auto start = [&](const tr::ParticleSystem* system, const Mat4& world, int body, size_t mount) {
+        auto start = [&](const tr::ParticleSystem* system, const Mat4& world, int body, size_t mount, bool warm) {
             if (!system || liveState.count({k, body, mount})) return;
             LiveParticles l;
             l.placement = k;
@@ -2470,39 +2486,48 @@ void SceneView::advanceParticles(float dt) {
             l.body = body;
             l.instance = std::make_unique<ParticleInstance>(*system, world, uint32_t(k * 6151u + size_t(body + 1) * 7417u + mount * 104729u + 5u));
             l.instance->setGeoPoints(geoPointSource());
-            for (int step = 0; step < 90; ++step) l.instance->update(1.0f / 30.0f);
+            if (warm)
+                for (int step = 0; step < 90; ++step) l.instance->update(1.0f / 30.0f);
             liveParticles_.push_back(std::move(l));
         };
         for (size_t m = 0; m < p.stateParticles.size(); ++m) {
             const StateParticle& sp = p.stateParticles[m];
-            if (sp.event.target != 0) continue;
+            if (sp.event.target != 0 || sp.spent) continue;
             Mat4 frame;
             tr::Quat rotation;
             if (!contactFrame(sp.body ? sp.body : p.model, sp.event.contactPoint, 1, frame, rotation)) continue;
-            start(particleSystem(sp.event.file), multiply(p.world, frame), -1, m);
+            start(particleSystem(sp.event.file), multiply(p.world, frame), -1, m, sp.warm);
         }
         for (size_t b = 0; b < p.stateAccessories.size(); ++b) {
             const Model* a = p.stateAccessories[b];
             if (!a || !a->loaded) continue;
-            for (size_t m = 0; m < a->particles.size(); ++m) start(particleSystem(a->particles[m].file), multiply(p.world, a->particles[m].local), int(b), m);
+            for (size_t m = 0; m < a->particles.size(); ++m)
+                start(particleSystem(a->particles[m].file), multiply(p.world, a->particles[m].local), int(b), m, !previewTimedEffects);
         }
     }
     // Accessory beams (ACBM) of server objects' and map usables' use states: the persistent ones (durationMs 0) whose two ends are on
     // the body itself (targets 0), as for the state lights; made once within particleDistance (the trigger builds the branches).
+    // A live beam whose state beam fired again after it was made (or is gone) is dropped and made anew.
+    liveBeams_.erase(std::remove_if(liveBeams_.begin(), liveBeams_.end(), [&](const LiveBeam& l) {
+                         const std::vector<StateBeam>& beams = l.server ? serverPlacements_[l.placement].stateBeams : placements_[l.placement].stateBeams;
+                         return l.index >= beams.size() || beams[l.index].startTime > l.beam->startTime() + 1e-4f;
+                     }),
+                     liveBeams_.end());
     std::set<std::tuple<bool, size_t, size_t>> liveBeam;
     for (const LiveBeam& l : liveBeams_) liveBeam.insert({l.server, l.placement, l.index});
     auto startBeams = [&](bool server, size_t k, const std::vector<StateBeam>& beams, const Model* model, const Mat4& world) {
         for (size_t m = 0; m < beams.size(); ++m) {
             const tr::SfxBeam& e = beams[m].event;
-            if (!showBeams || (e.durationMs != 0 && !previewTimedEffects) || e.target1 != 0 || e.target2 != 0 || liveBeam.count({server, k, m}))
-                continue;
+            if (!showBeams || e.target1 != 0 || e.target2 != 0 || liveBeam.count({server, k, m})) continue;
+            // A timed beam that has run its course is not made again (until it fires again).
+            if (e.durationMs != 0 && (lightTime - beams[m].startTime) * 1000.0f > float(e.durationMs)) continue;
             tr::Vec3 a, b;
             if (!beamEnds(beams[m], model, world, a, b)) continue;
             LiveBeam l;
             l.server = server;
             l.placement = k;
             l.index = m;
-            l.beam = std::make_unique<BeamInstance>(e, a, b, lightTime, uint32_t(k * 7907u + m * 104723u + (server ? 13u : 3u)));
+            l.beam = std::make_unique<BeamInstance>(e, a, b, std::max(lightTime, beams[m].startTime), uint32_t(k * 7907u + m * 104723u + (server ? 13u : 3u)));
             liveBeams_.push_back(std::move(l));
         }
     };
@@ -3082,9 +3107,30 @@ void SceneView::addPackageEffects(const std::string& package, Model* body, int d
     auto markerOf = [&](uint32_t m) { return nestedMarker >= 0 && m == 0 ? uint32_t(nestedMarker) : m; };
     try {
         const tr::SfxPackage p = tr::readSfxPackage(assets_.read(package));
-        for (const tr::SfxParticleAttach& a : p.particles) effects.particles.push_back(StateParticle{body, a, markerOf(a.marker)});
-        for (const tr::SfxLight& l : p.lights) effects.lights.push_back(StateLight{body, l, markerOf(l.marker)});
-        for (const tr::SfxBeam& b : p.beams) effects.beams.push_back(StateBeam{body, b, markerOf(b.marker)});
+        for (const tr::SfxParticleAttach& a : p.particles) {
+            StateParticle e;
+            e.body = body;
+            e.event = a;
+            e.marker = markerOf(a.marker);
+            e.eventIndex = effects.particles.size();
+            effects.particles.push_back(e);
+        }
+        for (const tr::SfxLight& l : p.lights) {
+            StateLight e;
+            e.body = body;
+            e.event = l;
+            e.marker = markerOf(l.marker);
+            e.eventIndex = effects.lights.size();
+            effects.lights.push_back(e);
+        }
+        for (const tr::SfxBeam& b : p.beams) {
+            StateBeam e;
+            e.body = body;
+            e.event = b;
+            e.marker = markerOf(b.marker);
+            e.eventIndex = effects.beams.size();
+            effects.beams.push_back(e);
+        }
         for (tr::SfxTimer t : p.timers) {
             t.marker = markerOf(t.marker);
             effects.timers.push_back(t);
@@ -4419,11 +4465,7 @@ SceneView::Placement SceneView::makePlacement(const tr::MapEntity& e) {
     const auto useState = mapUsableStates_.find(e.entityId);
     if (useState != mapUsableStates_.end() && !p.neverDrawn) {
         p.useState = useState->second;
-        StateEffects fx = stateEffects(e.classId, p.useState);
-        p.stateAccessories = fx.accessories;
-        p.stateParticles = fx.particles;
-        p.stateLights = fx.lights;
-        p.stateBeams = fx.beams;
+        startPackage(effectLists(p), stateEffects(e.classId, p.useState), true);
         // The state's animation (usabledata.animation (class, state, USE_STATE_NULL) -> a family on the mesh), looped from its
         // first pick (the spec's type - looping / recurring one-shots - is not followed here: UNVERIFIED for the one-shot kinds).
         if (usableAnimationFor_ && !mesh.empty()) {
@@ -4469,121 +4511,276 @@ void SceneView::setEntityPackage(size_t entityIndex, const std::string& package)
     liveBeams_.erase(std::remove_if(liveBeams_.begin(), liveBeams_.end(), [&](const LiveBeam& l) { return !l.server && l.placement == entityIndex; }),
                      liveBeams_.end());
     packageStart_ = lightTime;
-    packageTimers_.clear();
-    packageFired_.clear();
-    packageRandom_ = 1;
-    if (previewTimedEffects) {
-        // Played as the game does: nothing until its marker fires; starting the package fires 0 (FUN_00755230).
-        packagePending_ = std::move(fx);
-        packageEntity_ = entityIndex;
-        p.stateAccessories.clear();
-        p.stateParticles.clear();
-        p.stateLights.clear();
-        p.stateBeams.clear();
-        if (!package.empty()) firePackageMarker(0);
-    } else {
-        p.stateAccessories = fx.accessories;
-        p.stateParticles = fx.particles;
-        p.stateLights = fx.lights;
-        p.stateBeams = fx.beams;
-    }
+    packageEntity_ = entityIndex;
+    p.player = PackagePlayer{};
+    startPackage(effectLists(p), std::move(fx), !previewTimedEffects);
     loadGlobeMaps();
     invalidateShadowMaps();
 }
 
-// SfxPackage vtable slot 3 (FUN_00755740): every event waiting for this marker triggers. A particle attach, light, beam or
-// accessory fired again starts another one; a timer starts a timer product.
-void SceneView::firePackageMarker(uint32_t marker) {
-    if (!previewTimedEffects || packageEntity_ >= placements_.size()) return;
-    Placement& p = placements_[packageEntity_];
-    packageFired_.emplace_back(packageTime(), marker);
-    if (packageFired_.size() > 64) packageFired_.erase(packageFired_.begin());
+SceneView::EffectLists SceneView::effectLists(Placement& p) {
+    return EffectLists{&p.player, &p.stateAccessories, &p.stateParticles, &p.stateLights, &p.stateBeams};
+}
+
+SceneView::EffectLists SceneView::effectLists(ServerPlacement& s) {
+    return EffectLists{&s.player, &s.accessories, &s.stateParticles, &s.stateLights, &s.stateBeams};
+}
+
+// Starting a package (FUN_00755230, body.AttachFXPackage; usable.py AttachStateSFX starts it): its events wait for their markers and
+// marker 0 fires. warm: a long-running world state seen at an arbitrary moment - its particle systems get a 3 s warm-up.
+void SceneView::startPackage(EffectLists lists, StateEffects fx, bool warm) {
+    lists.player->pending = std::move(fx);
+    lists.player->timers.clear();
+    lists.player->fired.clear();
+    lists.player->markerAnimation.clear();
+    lists.player->markerLast = -1;
+    lists.accessories->clear();
+    lists.particles->clear();
+    lists.lights->clear();
+    lists.beams->clear();
+    startingPackage_ = true;
+    if (lists.player->active()) fireMarker(lists, 0, warm);
+    startingPackage_ = false;
+}
+
+// SfxPackage vtable slot 3 (FUN_00755740): every event waiting for this marker triggers. The game makes a new product each time: a
+// particle attach fired again starts another copy (a spent one's slot is reused; at most 4 copies of one event), a light or beam
+// restarts from now (an accessory is put on once); a timer starts a timer product; a STOP event ends everything and fires 24.
+void SceneView::fireMarker(EffectLists lists, uint32_t marker, bool warm) {
+    PackagePlayer& player = *lists.player;
+    player.fired.emplace_back(lightTime, marker);
+    if (player.fired.size() > 64) player.fired.erase(player.fired.begin());
     bool changed = false;
-    for (size_t k = 0; k < packagePending_.accessories.size(); ++k)
-        if (packagePending_.accessoryMarkers[k] == marker) {
-            p.stateAccessories.push_back(packagePending_.accessories[k]);
+    for (size_t k = 0; k < player.pending.accessories.size(); ++k)
+        if (player.pending.accessoryMarkers[k] == marker &&
+            std::find(lists.accessories->begin(), lists.accessories->end(), player.pending.accessories[k]) == lists.accessories->end()) {
+            lists.accessories->push_back(player.pending.accessories[k]);
             changed = true;
         }
-    for (const StateParticle& e : packagePending_.particles)
-        if (e.marker == marker) p.stateParticles.push_back(e);
-    for (StateLight e : packagePending_.lights)
-        if (e.marker == marker) {
-            e.startTime = lightTime;
-            p.stateLights.push_back(e);
-            changed = true;
-        }
-    for (const StateBeam& e : packagePending_.beams)
-        if (e.marker == marker) p.stateBeams.push_back(e);
-    for (const tr::SfxTimer& t : packagePending_.timers)
+    for (const StateParticle& e : player.pending.particles) {
+        if (e.marker != marker) continue;
+        StateParticle copy = e;
+        copy.startTime = lightTime;
+        copy.warm = warm;
+        size_t copies = 0;
+        StateParticle* reuse = nullptr;
+        for (StateParticle& live : *lists.particles)
+            if (live.eventIndex == e.eventIndex) {
+                ++copies;
+                if (live.spent && !reuse) reuse = &live;
+            }
+        if (reuse) *reuse = copy;
+        else if (copies < 4) lists.particles->push_back(copy);
+    }
+    for (const StateLight& e : player.pending.lights) {
+        if (e.marker != marker) continue;
+        auto it = std::find_if(lists.lights->begin(), lists.lights->end(), [&](const StateLight& l) { return l.eventIndex == e.eventIndex; });
+        if (it == lists.lights->end()) it = lists.lights->insert(lists.lights->end(), e);
+        it->startTime = lightTime;
+        changed = true;
+    }
+    for (const StateBeam& e : player.pending.beams) {
+        if (e.marker != marker) continue;
+        auto it = std::find_if(lists.beams->begin(), lists.beams->end(), [&](const StateBeam& b) { return b.eventIndex == e.eventIndex; });
+        if (it == lists.beams->end()) it = lists.beams->insert(lists.beams->end(), e);
+        it->startTime = lightTime;
+    }
+    for (const tr::SfxTimer& t : player.pending.timers)
         if (t.marker == marker) {
             LiveTimer live;
             live.timer = t;
-            live.countdown = t.fireAtOnce ? 0.0f : packageRandomDelay(t.minDelay, t.maxDelay);   // FUN_0077b780
-            packageTimers_.push_back(live);
+            live.countdown = t.fireAtOnce ? 0.0f : packageRandomDelay(player, t.minDelay, t.maxDelay);   // FUN_0077b780
+            player.timers.push_back(live);
         }
     bool stop = false;
-    for (uint32_t m : packagePending_.stops) stop = stop || m == marker;
-    if (changed) {
+    for (uint32_t m : player.pending.stops) stop = stop || m == marker;
+    if (changed && !startingPackage_) {
         loadGlobeMaps();
         invalidateShadowMaps();
     }
-    if (stop) stopPackage();
+    if (stop) stopPlayer(lists);
 }
 
 // SfxStopEvent (FUN_00764a10 -> FUN_00755250): every live product stops, then marker 24 (Stop) fires. Particle systems are removed
-// with their particles (how a stopped particle product ends is NOT traced).
+// with their particles (how a stopped particle product ends is NOT traced); their live instances go on the next advanceParticles.
+void SceneView::stopPlayer(EffectLists lists) {
+    lists.accessories->clear();
+    lists.particles->clear();
+    lists.lights->clear();
+    lists.beams->clear();
+    lists.player->timers.clear();
+    if (!startingPackage_) invalidateShadowMaps();
+    if (marker24Fired_) return;               // a STOP waiting for 24 must not loop
+    marker24Fired_ = true;
+    fireMarker(lists, 24);
+    marker24Fired_ = false;
+}
+
+void SceneView::firePackageMarker(uint32_t marker) {
+    if (packageEntity_ < placements_.size()) fireMarker(effectLists(placements_[packageEntity_]), marker);
+}
+
 void SceneView::stopPackage() {
-    if (!previewTimedEffects || packageEntity_ >= placements_.size()) return;
-    Placement& p = placements_[packageEntity_];
-    p.stateAccessories.clear();
-    p.stateParticles.clear();
-    p.stateLights.clear();
-    p.stateBeams.clear();
-    packageTimers_.clear();
+    if (packageEntity_ >= placements_.size()) return;
+    stopPlayer(effectLists(placements_[packageEntity_]));
     liveParticles_.erase(std::remove_if(liveParticles_.begin(), liveParticles_.end(),
                                         [&](const LiveParticles& l) { return l.mapState && l.placement == packageEntity_; }),
                          liveParticles_.end());
     liveBeams_.erase(std::remove_if(liveBeams_.begin(), liveBeams_.end(), [&](const LiveBeam& l) { return !l.server && l.placement == packageEntity_; }),
                      liveBeams_.end());
-    invalidateShadowMaps();
-    if (marker24Fired_) return;               // a STOP waiting for 24 must not loop
-    marker24Fired_ = true;
-    firePackageMarker(24);
-    marker24Fired_ = false;
 }
 
 std::vector<uint32_t> SceneView::packageMarkers() const {
-    std::set<uint32_t> markers(packagePending_.accessoryMarkers.begin(), packagePending_.accessoryMarkers.end());
-    for (const StateParticle& e : packagePending_.particles) markers.insert(e.marker);
-    for (const StateLight& e : packagePending_.lights) markers.insert(e.marker);
-    for (const StateBeam& e : packagePending_.beams) markers.insert(e.marker);
-    for (const tr::SfxTimer& t : packagePending_.timers) markers.insert(t.marker);
-    for (uint32_t m : packagePending_.stops) markers.insert(m);
+    if (packageEntity_ >= placements_.size()) return {};
+    const StateEffects& pending = placements_[packageEntity_].player.pending;
+    std::set<uint32_t> markers(pending.accessoryMarkers.begin(), pending.accessoryMarkers.end());
+    for (const StateParticle& e : pending.particles) markers.insert(e.marker);
+    for (const StateLight& e : pending.lights) markers.insert(e.marker);
+    for (const StateBeam& e : pending.beams) markers.insert(e.marker);
+    for (const tr::SfxTimer& t : pending.timers) markers.insert(t.marker);
+    for (uint32_t m : pending.stops) markers.insert(m);
     return std::vector<uint32_t>(markers.begin(), markers.end());
 }
 
-float SceneView::packageRandomDelay(float minDelay, float maxDelay) {
-    packageRandom_ = uint32_t((uint64_t(packageRandom_) * 48271u) % 2147483647u);
-    return minDelay + (maxDelay - minDelay) * float(packageRandom_) / 2147483647.0f;
+std::vector<std::pair<float, uint32_t>> SceneView::packageFired() const {
+    std::vector<std::pair<float, uint32_t>> out;
+    if (packageEntity_ >= placements_.size()) return out;
+    for (const auto& [t, m] : placements_[packageEntity_].player.fired) out.emplace_back(t - packageStart_, m);
+    return out;
 }
 
-// TRasa::SfxTimerProduct update (FUN_0077b930): countdown -= seconds; at or below 0 it fires its marker and draws a new delay; a
-// duration > 0 ends it once that much time has passed.
-void SceneView::advancePackageTimers(float dt) {
-    if (packageTimers_.empty()) return;
-    std::vector<uint32_t> fires;
-    for (LiveTimer& t : packageTimers_) {
-        t.countdown -= dt;
-        if (t.countdown <= 0.0f) {
-            fires.push_back(t.timer.fires);
-            t.countdown = packageRandomDelay(t.timer.minDelay, t.timer.maxDelay);
-        }
-        if (t.timer.duration > 0.0f) t.elapsed += dt;
+std::vector<std::string> SceneView::debugPackagePlayers() const {
+    std::vector<std::string> out;
+    auto describe = [&](const char* kind, size_t index, const tr::Vec3& at, const PackagePlayer& player, size_t particles, size_t lights,
+                        size_t beams) {
+        if (!player.active()) return;
+        std::map<uint32_t, size_t> fired;
+        for (const auto& [t, m] : player.fired)
+            if (m != 0) ++fired[m];
+        char head[256];
+        std::snprintf(head, sizeof head, "%s %zu at %.1f %.1f %.1f: %zu particle / %zu light / %zu beam events, %zu timers; now %zu / %zu / %zu; "
+                      "animation %s; fired", kind, index, at.x, at.y, at.z, player.pending.particles.size(), player.pending.lights.size(),
+                      player.pending.beams.size(), player.pending.timers.size(), particles, lights, beams,
+                      player.markerAnimation.empty() ? "-" : player.markerAnimation.c_str());
+        std::string line = head;
+        for (const auto& [m, n] : fired) line += std::string(" ") + tr::animMarkerTypeName(int(m)) + " x" + std::to_string(n);
+        if (fired.empty()) line += " nothing after the start";
+        out.push_back(line);
+    };
+    for (size_t k = 0; k < placements_.size(); ++k)
+        describe("entity", k, placements_[k].centre, placements_[k].player, placements_[k].stateParticles.size(), placements_[k].stateLights.size(),
+                 placements_[k].stateBeams.size());
+    for (size_t k = 0; k < serverPlacements_.size(); ++k)
+        describe("server", k, serverPlacements_[k].position, serverPlacements_[k].player, serverPlacements_[k].stateParticles.size(),
+                 serverPlacements_[k].stateLights.size(), serverPlacements_[k].stateBeams.size());
+    return out;
+}
+
+size_t SceneView::packageTimersRunning() const {
+    return packageEntity_ < placements_.size() ? placements_[packageEntity_].player.timers.size() : 0;
+}
+
+float SceneView::packageRandomDelay(PackagePlayer& player, float minDelay, float maxDelay) {
+    player.random = uint32_t((uint64_t(player.random) * 48271u) % 2147483647u);
+    return minDelay + (maxDelay - minDelay) * float(player.random) / 2147483647.0f;
+}
+
+const std::vector<tr::AnimMarker>& SceneView::animationMarkers(const std::string& animation) {
+    const std::string key = tr::toLowerAscii(animation);
+    auto it = markerFiles_.find(key);
+    if (it != markerFiles_.end()) return it->second;
+    std::vector<tr::AnimMarker> markers;
+    const size_t dot = animation.rfind('.');
+    const std::string file = (dot == std::string::npos ? animation : animation.substr(0, dot)) + ".mkr";
+    try {
+        if (assets_.exists(file)) markers = tr::readAnimationMarkers(assets_.read(file)).markers;
+    } catch (const std::exception&) {
     }
-    packageTimers_.erase(std::remove_if(packageTimers_.begin(), packageTimers_.end(),
-                                        [](const LiveTimer& t) { return t.timer.duration > 0.0f && t.elapsed >= t.timer.duration; }),
-                         packageTimers_.end());
-    for (uint32_t m : fires) firePackageMarker(m);
+    return markerFiles_.emplace(key, std::move(markers)).first->second;
+}
+
+// A body's animation fires its .mkr markers into the packages attached to it (traced 2026-10-20: FUN_0084b160 schedules each marker of
+// the playing animation as a TRasa::SFXMarker at its time, plus PreStrike (29) 800 ms before each Strike (1); when one comes up,
+// FUN_00887250 -> FUN_007e8c50 calls slot 3 (OnMarker) of every listener at the body's + 0x28c - the EntityBody's MarkerListener and
+// the attached SfxPackages, whose slot 3 is FUN_00755740). Markers passed since the last update fire, across the loop's end too.
+// UNVERIFIED: FUN_0084b160 schedules only when a flag of the animation (+ 0xf3) is set - taken to hold for every object animation.
+void SceneView::followAnimationMarkers(EffectLists lists, const std::string& animation, float time, float duration) {
+    PackagePlayer& player = *lists.player;
+    if (animation.empty() || duration <= 0.0f) {
+        player.markerAnimation.clear();
+        return;
+    }
+    if (player.markerAnimation != animation || player.markerLast < 0.0f) {
+        player.markerAnimation = animation;
+        player.markerLast = time;
+        return;
+    }
+    const float last = player.markerLast;
+    player.markerLast = time;
+    if (time == last) return;
+    std::vector<std::pair<float, uint32_t>> hits;   // (seconds into the animation, marker)
+    for (const tr::AnimMarker& m : animationMarkers(animation)) {
+        hits.emplace_back(float(m.timeMs) / 1000.0f, m.type);
+        if (m.type == 1) hits.emplace_back(std::max(0.0f, float(m.timeMs) / 1000.0f - 0.8f), 29u);
+    }
+    if (hits.empty()) return;
+    std::sort(hits.begin(), hits.end());
+    std::set<uint32_t> waited;
+    for (const StateParticle& e : player.pending.particles) waited.insert(e.marker);
+    for (const StateLight& e : player.pending.lights) waited.insert(e.marker);
+    for (const StateBeam& e : player.pending.beams) waited.insert(e.marker);
+    for (const tr::SfxTimer& t : player.pending.timers) waited.insert(t.marker);
+    for (uint32_t m : player.pending.stops) waited.insert(m);
+    for (uint32_t m : player.pending.accessoryMarkers) waited.insert(m);
+    auto fireBetween = [&](float from, float to) {         // (from, to]
+        for (const auto& [at, m] : hits)
+            if (at > from && at <= to && waited.count(m)) fireMarker(lists, m);
+    };
+    if (time > last) {
+        fireBetween(last, time);
+    } else {                                             // wrapped round the loop's end
+        fireBetween(last, duration);
+        fireBetween(-1.0f, time);
+    }
+}
+
+// TRasa::SfxTimerProduct update (FUN_0077b930): countdown -= seconds; at or below 0 it fires its marker and draws a new delay; a duration
+// > 0 ends it once that much time has passed. Then the objects' animation markers.
+void SceneView::advancePackagePlayers(float dt) {
+    auto advance = [&](EffectLists lists) {
+        PackagePlayer& player = *lists.player;
+        if (player.timers.empty()) return;
+        std::vector<uint32_t> fires;
+        for (LiveTimer& t : player.timers) {
+            t.countdown -= dt;
+            if (t.countdown <= 0.0f) {
+                fires.push_back(t.timer.fires);
+                t.countdown = packageRandomDelay(player, t.timer.minDelay, t.timer.maxDelay);
+            }
+            if (t.timer.duration > 0.0f) t.elapsed += dt;
+        }
+        player.timers.erase(std::remove_if(player.timers.begin(), player.timers.end(),
+                                           [](const LiveTimer& t) { return t.timer.duration > 0.0f && t.elapsed >= t.timer.duration; }),
+                            player.timers.end());
+        for (uint32_t m : fires) fireMarker(lists, m);
+    };
+    for (Placement& p : placements_) {
+        if (!p.player.active()) continue;
+        advance(effectLists(p));
+        if (p.model && p.model->loaded && p.model->animation.duration > 0.0f)
+            followAnimationMarkers(effectLists(p), p.model->animationName, std::fmod(lightTime, p.model->animation.duration), p.model->animation.duration);
+    }
+    for (ServerPlacement& s : serverPlacements_) {
+        if (!s.player.active()) continue;
+        advance(effectLists(s));
+        // An idle sequence (ambient figures: their state's animation family) as poseIdle plays it; else the model's object animation.
+        if (s.idle.current >= 0 && size_t(s.idle.current) < s.idles.size()) {
+            const tr::GameData::FamilyAnimation& a = s.idles[size_t(s.idle.current)];
+            followAnimationMarkers(effectLists(s), a.name, std::max(0.0f, lightTime - s.idle.start), std::numeric_limits<float>::max());
+        } else if (s.model && s.model->loaded && s.model->animation.duration > 0.0f) {
+            followAnimationMarkers(effectLists(s), s.model->animationName, std::fmod(lightTime, s.model->animation.duration), s.model->animation.duration);
+        }
+    }
 }
 
 void SceneView::setEntityAnimation(size_t entityIndex, const std::string& animation) {
@@ -5011,11 +5208,7 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
         s.position = t.position;
         s.world = yawPlacement(t.position, t.rotation);
         s.model = objectModelFor(meshForClass(t.classId));
-        StateEffects fx = stateEffects(t.classId, 56);
-        s.accessories = fx.accessories;
-        s.stateParticles = fx.particles;
-        s.stateLights = fx.lights;
-        s.stateBeams = fx.beams;
+        startPackage(effectLists(s), stateEffects(t.classId, 56), true);
         s.colour = markerColour::teleporter;
         s.ringRadius = 2.0f;
         s.facing = true;
@@ -5032,11 +5225,7 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
         if (o.kind == ObjectKind::AmbientNpc) {
             // Rasa.NET creates ambient figures in USE_SS_STATE_0 (44) (Managers/AmbientNpcs.cs); the client's UsableState puts on
             // the state's package and plays the state's animation (usable.py UsableState.__call__: AttachStateSFX, PlayAnimation).
-            StateEffects fx = stateEffects(o.classId, 44);
-            s.accessories = fx.accessories;
-            s.stateParticles = fx.particles;
-            s.stateLights = fx.lights;
-        s.stateBeams = fx.beams;
+            startPackage(effectLists(s), stateEffects(o.classId, 44), true);
             tr::GameData::UsableAnimation animation;
             if (usableAnimationFor_) {
                 try { animation = usableAnimationFor_(o.classId, 44); } catch (const std::exception&) {}
@@ -5052,11 +5241,7 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
         if (o.kind == ObjectKind::Kraftwerk) {
             // Rasa.NET places every station in USE_CRAFTER_STATE_0 (46) (Managers/KraftwerksManager.cs Place: StateId =
             // UseObjectState.CrafterState0); the client then attaches that state's package (class 9595: arch_hum_craftstation_on_v01.pkg).
-            StateEffects fx = stateEffects(o.classId, 46);
-            s.accessories = fx.accessories;
-            s.stateParticles = fx.particles;
-            s.stateLights = fx.lights;
-            s.stateBeams = fx.beams;
+            startPackage(effectLists(s), stateEffects(o.classId, 46), true);
         }
         if (o.kind == ObjectKind::Emitter) {
             // FXPackageEmitter: the body is particle_proxy.geo (no pieces, client/augmentations/emitter.py); while on, the package is
@@ -5072,10 +5257,7 @@ void SceneView::setServerContent(const WorldContent* content, const WorldDatabas
                 // vfx_smokeplume.pfx to connection point 28 (HPS_VFX1).
                 StateEffects fx;
                 addPackageEffects(package, objectModelFor("particle_proxy.geo"), 0, fx);
-                s.accessories = fx.accessories;
-                s.stateParticles = fx.particles;
-                s.stateLights = fx.lights;
-        s.stateBeams = fx.beams;
+                startPackage(effectLists(s), std::move(fx), true);
             }
         }
         s.colour = markerColour::ofObject(o.kind);
