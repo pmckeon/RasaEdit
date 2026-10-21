@@ -1825,6 +1825,8 @@ int main(int argc, char** argv) {
         if (const char* dbPath = envValue("RASA_DB")) {
             const char* base = SDL_GetBasePath();
             database = std::make_unique<WorldDatabase>(dbPath, defaultMySqlPluginDir(base ? base : ""));
+            // RASA_MIGRATIONFOLDER=<folder>: the saves write their migration files there too (else only rasaedit_migration).
+            if (const char* folder = std::getenv("RASA_MIGRATIONFOLDER"); folder && *folder) database->setMigrationFolder(folder);
             content = database->loadMap(database->contextIdForMap(map.name));
             scene.setServerContent(&content, database.get(), [&](int32_t id) { return data.classMeshName(id); },
                                    [&](const Creature& c) { return resolveAvatar(data, *database, c); });
@@ -2246,8 +2248,9 @@ int main(int argc, char** argv) {
                 };
                 const int64_t before = largestId();
                 WorldContent edited = content;
-                PlacedObject& first = *std::find_if(edited.objects.begin(), edited.objects.end(), [](const PlacedObject& o) { return o.kind == ObjectKind::ControlPoint; });
-                first.controlPoint.defaultOwner = first.controlPoint.defaultOwner == 1 ? 0 : 1;
+                PlacedObject& flippedPoint = *std::find_if(edited.objects.begin(), edited.objects.end(), [](const PlacedObject& o) { return o.kind == ObjectKind::ControlPoint; });
+                flippedPoint.controlPoint.defaultOwner = flippedPoint.controlPoint.defaultOwner == 1 ? 0 : 1;
+                const PlacedObject first = flippedPoint;               // a copy: the push_back below may move the vector
                 PlacedObject added = first;
                 added.id = 0;
                 added.name = "save test point";
@@ -2429,6 +2432,82 @@ int main(int argc, char** argv) {
                                 saved, summary.inserted, summary.updated, summary.deleted, error.empty() ? "" : ": ", error.c_str(),
                                 ok ? "passed" : "FAILED", data.npcGreeting(120).c_str());
                     break;
+                }
+            }
+            // RASA_MIGRATIONTEST=<an untouched copy of the database> (after RASA_SAVETEST, whose saves each wrote a migration): rolls every
+            // applied migration back, newest first, and compares every table (rasaedit_migration aside) with the copy; then applies them
+            // again, oldest first, and compares with the state the saves left.
+            if (const char* base = std::getenv("RASA_MIGRATIONTEST"); base && *base) {
+                const auto fingerprint = [](const WorldDatabase& db) {
+                    std::map<std::string, std::vector<std::string>> tables;
+                    for (const auto& [name, count] : db.tableCounts()) {
+                        if (name == "rasaedit_migration" || name == "__EFMigrationsHistory" || name == "sqlite_sequence") continue;
+                        std::vector<std::string>& rows = tables[name];
+                        for (const auto& row : db.loadTable(name).rows) {
+                            std::string text;
+                            for (const DbValue& v : row) {
+                                char real[40];
+                                std::snprintf(real, sizeof real, "%.17g", v.r);
+                                text += v.type == DbValue::Type::Null ? "N" : v.type == DbValue::Type::Int ? "i" + std::to_string(v.i)
+                                        : v.type == DbValue::Type::Real ? std::string("r") + real : "t" + v.t;
+                                text += '\x1f';
+                            }
+                            rows.push_back(std::move(text));
+                        }
+                        std::sort(rows.begin(), rows.end());
+                    }
+                    return tables;
+                };
+                const auto differing = [](const std::map<std::string, std::vector<std::string>>& a, const std::map<std::string, std::vector<std::string>>& b) {
+                    std::string out;
+                    for (const auto& [name, rows] : a) {
+                        const auto it = b.find(name);
+                        if (it == b.end() || it->second != rows) out += (out.empty() ? "" : ", ") + name;
+                    }
+                    return out.empty() ? std::string("none") : out;
+                };
+                try {
+                    WorldDatabase original(base);
+                    const auto before = fingerprint(original);
+                    const auto after = fingerprint(*database);
+                    std::vector<WorldDatabase::MigrationRecord> list = database->migrations();     // newest first
+                    int rolled = 0, applied = 0;
+                    std::string error;
+                    for (const auto& m : list)
+                        if (m.applied) {
+                            if (!database->setMigrationApplied(m.id, false, error)) {
+                                std::printf("migration test: roll back of %s FAILED: %s\n", m.name.c_str(), error.c_str());
+                                break;
+                            }
+                            ++rolled;
+                        }
+                    const std::string backDiff = differing(before, fingerprint(*database));
+                    std::printf("migration test: %zu migrations, %d rolled back; tables differing from the untouched copy: %s\n", list.size(), rolled,
+                                backDiff.c_str());
+                    for (auto it = list.rbegin(); it != list.rend(); ++it)
+                        if (it->applied) {
+                            if (!database->setMigrationApplied(it->id, true, error)) {
+                                std::printf("migration test: re-apply of %s FAILED: %s\n", it->name.c_str(), error.c_str());
+                                break;
+                            }
+                            ++applied;
+                        }
+                    std::printf("migration test: %d applied again; tables differing from the saved state: %s\n", applied,
+                                differing(after, fingerprint(*database)).c_str());
+                    // A rollback refused when the data moved on: the oldest migration with an UPDATE, rolled back while the later ones
+                    // (RASA_SAVETEST's restores put the same rows back) are applied - its Down finds the rows changed since.
+                    const std::vector<WorldDatabase::MigrationRecord> now = database->migrations();
+                    for (auto it = now.rbegin(); it != now.rend(); ++it)
+                        if (it->applied && it->upSql.find("UPDATE ") != std::string::npos) {
+                            const auto& m = *it;
+                            const bool ok = database->setMigrationApplied(m.id, false, error);
+                            std::printf("migration test: rolling back the older %s under newer ones: %s\n", m.name.c_str(),
+                                        ok ? "done (no newer change of its rows)" : ("refused - " + error.substr(0, 160)).c_str());
+                            if (ok) database->setMigrationApplied(m.id, true, error);
+                            break;
+                        }
+                } catch (const std::exception& e) {
+                    std::printf("migration test FAILED: %s\n", e.what());
                 }
             }
             // Avatar assembly of the first few spawned creatures that wear swap-set items.

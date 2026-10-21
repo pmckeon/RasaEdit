@@ -1,9 +1,13 @@
 #include "ServerWorkspace.h"
+
+#include "Migrations.h"
 #include "MarkerColours.h"
 
 #include "imgui_internal.h"   // DockBuilder
 
 #include <algorithm>
+#include <cctype>
+#include <filesystem>
 #include <cstdlib>
 #include <cstring>
 #include <set>
@@ -31,6 +35,7 @@ void ServerWorkspace::buildDefaultLayout(ImGuiID dockspace) {
     ImGui::DockBuilderDockWindow("Missions###Server.Missions", right);
     ImGui::DockBuilderDockWindow("Loot###Server.Loot", right);
     ImGui::DockBuilderDockWindow("Crafting###Server.Crafting", right);
+    ImGui::DockBuilderDockWindow("Migrations###Server.Migrations", right);
     ImGui::DockBuilderDockWindow("Map###Server.Map", rightBottom);
     ImGui::DockBuilderFinish(dockspace);
 }
@@ -167,6 +172,7 @@ void ServerWorkspace::drawPanels() {
     drawMissionPanel();
     drawLootPanel();
     drawCraftingPanel();
+    drawMigrationsPanel();
     drawMapInfoPanel(ctx_, "Map###Server.Map");
     OverviewLayers layers;
     layers.selection = &selection_;
@@ -220,6 +226,7 @@ void ServerWorkspace::openDatabase(const std::string& path) {
         serverContent_ = WorldContent{};
         if (selection_.kind != SelectionKind::MapEntity) selection_ = Selection{};
         database_ = std::move(database);
+        database_->setMigrationFolder(migrationFolderFor(*database_));
         reloadCreatureDefinitions();
         try {
             missions_.load(*database_);
@@ -260,6 +267,182 @@ void ServerWorkspace::openDatabase(const std::string& path) {
         rememberPasswordOnOpen_ = false;
         if (isMySqlSpec(path)) showMySqlDialog(path);  // let the user correct the connection (the password field starts empty)
     }
+}
+
+// ------------------------------------------------------------------------------------------
+// Migrations (Migrations.h): every save's changes as Up / Down SQL, in the database (rasaedit_migration) and the folder.
+// ------------------------------------------------------------------------------------------
+std::string ServerWorkspace::migrationFolderFor(const WorldDatabase& database) const {
+    const std::string chosen = ctx_.setting("migrationFolder");
+    if (!chosen.empty()) return chosen;
+    // <Documents>/RasaEdit/Migrations/<the database: its file name, or the MySQL database's name>
+    std::string name = database.path();
+    if (database.isMySql()) {
+        MySqlSpec m;
+        if (parseMySqlSpec(name, m)) name = m.host + "_" + m.database;
+    } else {
+        const auto stem = std::filesystem::u8path(name).stem().u8string();
+        name = stem.empty() ? std::string("world") : std::string(stem.begin(), stem.end());
+    }
+    for (char& c : name)
+        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-' || c == '.')) c = '_';
+    const char* documents = SDL_GetUserFolder(SDL_FOLDER_DOCUMENTS);
+    const std::filesystem::path base = documents ? std::filesystem::u8path(documents) : std::filesystem::current_path();
+    const auto text = (base / "RasaEdit" / "Migrations" / std::filesystem::u8path(name)).u8string();
+    return std::string(text.begin(), text.end());
+}
+
+void ServerWorkspace::reloadFromDatabase() {
+    if (!database_) return;
+    database_->reload();
+    reloadCreatureDefinitions();
+    try { missions_.load(*database_); } catch (const std::exception& e) { missions_.clear(); ctx_.setStatus(std::string("Mission tables not loaded: ") + e.what(), true); }
+    try { loot_.load(*database_); } catch (const std::exception& e) { loot_.clear(); ctx_.setStatus(std::string("Loot tables not loaded: ") + e.what(), true); }
+    try { modules_.load(*database_); } catch (const std::exception& e) { modules_.clear(); ctx_.setStatus(std::string("Item module tables not loaded: ") + e.what(), true); }
+    try { recipes_.load(*database_); } catch (const std::exception& e) { recipes_.clear(); ctx_.setStatus(std::string("Recipe tables not loaded: ") + e.what(), true); }
+    loadServerContent();
+}
+
+void SDLCALL ServerWorkspace::migrationFileCallback(void* userdata, const char* const* files, int) {
+    if (!files || !files[0]) return;
+    auto* self = static_cast<ServerWorkspace*>(userdata);
+    std::lock_guard<std::mutex> lock(self->migrationFileMutex_);
+    self->migrationFilePicked_ = files[0];
+}
+
+void ServerWorkspace::drawMigrationsPanel() {
+    if (!ImGui::Begin("Migrations###Server.Migrations")) { ImGui::End(); return; }
+    if (!database_) {
+        ImGui::TextDisabled("Open a server database first.");
+        ImGui::End();
+        return;
+    }
+    ImGui::TextWrapped("Every save writes its changes as a migration: Up (the changes) and Down (their rollback) SQL, kept in this database "
+                       "(table rasaedit_migration) and written to the folder below - portable .up.sql / .down.sql (SQLite; MySQL with "
+                       "ANSI_QUOTES and NO_BACKSLASH_ESCAPES) and .mysql.up.sql / .mysql.down.sql (MySQL / MariaDB as they are). Applying "
+                       "one checks every row it touches: if the data has changed since, nothing is applied.");
+    // Folder.
+    {
+        static char folder[1024];
+        static std::string shownFor;
+        if (shownFor != database_->migrationFolder()) {
+            std::snprintf(folder, sizeof folder, "%s", database_->migrationFolder().c_str());
+            shownFor = database_->migrationFolder();
+        }
+        ImGui::SetNextItemWidth(-ImGui::GetFontSize() * 9);
+        if (ImGui::InputText("##migrationfolder", folder, sizeof folder, ImGuiInputTextFlags_EnterReturnsTrue) ||
+            (ImGui::IsItemDeactivatedAfterEdit())) {
+            ctx_.setSetting("migrationFolder", folder);
+            database_->setMigrationFolder(migrationFolderFor(*database_));
+        }
+        ImGui::SetItemTooltip("Where the migration files go (empty: <Documents>/RasaEdit/Migrations/<database>).");
+        ImGui::SameLine();
+        if (ImGui::Button("Open folder")) {
+            std::error_code ec;
+            std::filesystem::create_directories(std::filesystem::u8path(database_->migrationFolder()), ec);
+            const auto generic = std::filesystem::u8path(database_->migrationFolder()).generic_u8string();
+            SDL_OpenURL(("file:///" + std::string(generic.begin(), generic.end())).c_str());
+        }
+    }
+    const bool unsaved = hasUnsavedChanges();
+    if (unsaved) ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "Save or revert the unsaved changes before applying or rolling back a migration.");
+    const std::vector<WorldDatabase::MigrationRecord> list = database_->migrations();
+    if (list.empty()) ImGui::TextDisabled("No migrations yet: the first save makes one.");
+    auto run = [&](const WorldDatabase::MigrationRecord& m, bool apply) {
+        std::string error;
+        if (database_->setMigrationApplied(m.id, apply, error)) {
+            reloadFromDatabase();
+            ctx_.setStatus(std::string(apply ? "Applied migration " : "Rolled back migration ") + m.name + ". Restart the server to use it.", false);
+        } else {
+            ctx_.setStatus(std::string(apply ? "Could not apply " : "Could not roll back ") + m.name + ": " + error, true);
+        }
+    };
+    if (!list.empty() &&
+        ImGui::BeginTable("migrations", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable,
+                          ImVec2(0, ImGui::GetTextLineHeightWithSpacing() * std::min<size_t>(14, list.size() + 1.5f)))) {
+        ImGui::TableSetupColumn("Migration", ImGuiTableColumnFlags_WidthStretch, 3.0f);
+        ImGui::TableSetupColumn("Created (UTC)", ImGuiTableColumnFlags_WidthStretch, 1.4f);
+        ImGui::TableSetupColumn("Changes", ImGuiTableColumnFlags_WidthStretch, 2.5f);
+        ImGui::TableSetupColumn("State", ImGuiTableColumnFlags_WidthStretch, 0.9f);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthStretch, 1.6f);
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableHeadersRow();
+        for (const auto& m : list) {
+            ImGui::PushID(int(m.id));
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            if (ImGui::Selectable(m.name.c_str(), migrationViewed_ == m.id)) migrationViewed_ = migrationViewed_ == m.id ? -1 : m.id;
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(m.createdUtc.c_str());
+            ImGui::TableNextColumn();
+            ImGui::TextWrapped("%s", m.summary.c_str());
+            ImGui::TableNextColumn();
+            if (m.applied) ImGui::TextUnformatted("applied");
+            else ImGui::TextDisabled("rolled back");
+            ImGui::TableNextColumn();
+            if (unsaved) ImGui::BeginDisabled();
+            if (migrationConfirm_ == m.id) {
+                if (ImGui::SmallButton(m.applied ? "Confirm roll back" : "Confirm apply")) {
+                    migrationConfirm_ = 0;
+                    run(m, !m.applied);
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Cancel")) migrationConfirm_ = 0;
+            } else if (ImGui::SmallButton(m.applied ? "Roll back" : "Apply again")) {
+                migrationConfirm_ = m.id;
+            }
+            if (unsaved) ImGui::EndDisabled();
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+    // The SQL of the migration picked in the list.
+    for (const auto& m : list) {
+        if (m.id != migrationViewed_) continue;
+        ImGui::SeparatorText(m.name.c_str());
+        const char* tabs[] = {"Up", "Down", "Up (MySQL dialect)", "Down (MySQL dialect)"};
+        for (int k = 0; k < 4; ++k) {
+            if (k) ImGui::SameLine();
+            if (ImGui::RadioButton(tabs[k], migrationViewTab_ == k)) migrationViewTab_ = k;
+        }
+        std::string text = migrationViewTab_ % 2 == 0 ? m.upSql : m.downSql;
+        if (migrationViewTab_ >= 2) text = mySqlDialect(text);
+        ImGui::InputTextMultiline("##migrationsql", text.data(), text.size() + 1, ImVec2(-FLT_MIN, ImGui::GetTextLineHeight() * 16),
+                                  ImGuiInputTextFlags_ReadOnly);
+    }
+    // Import: a migration from another database's folder (applied here, with its rollback).
+    ImGui::SeparatorText("Apply a migration from files");
+    {
+        std::lock_guard<std::mutex> lock(migrationFileMutex_);
+        if (!migrationFilePicked_.empty()) {
+            migrationImportPath_ = migrationFilePicked_;
+            migrationFilePicked_.clear();
+        }
+    }
+    static char importPath[1024];
+    if (migrationImportPath_ != importPath) std::snprintf(importPath, sizeof importPath, "%s", migrationImportPath_.c_str());
+    ImGui::SetNextItemWidth(-ImGui::GetFontSize() * 14);
+    if (ImGui::InputText("##migrationimport", importPath, sizeof importPath)) migrationImportPath_ = importPath;
+    ImGui::SameLine();
+    if (ImGui::Button("Browse...")) {
+        static const SDL_DialogFileFilter filters[] = {{"Migration (.up.sql)", "sql"}};
+        SDL_ShowOpenFileDialog(&ServerWorkspace::migrationFileCallback, this, nullptr, filters, 1, database_->migrationFolder().c_str(), false);
+    }
+    ImGui::SameLine();
+    if (unsaved || migrationImportPath_.empty()) ImGui::BeginDisabled();
+    if (ImGui::Button("Apply")) {
+        std::string error;
+        if (database_->importMigration(migrationImportPath_, error)) {
+            reloadFromDatabase();
+            ctx_.setStatus("Applied the migration " + migrationImportPath_ + " (it can be rolled back from the list).", false);
+            migrationImportPath_.clear();
+        } else {
+            ctx_.setStatus("Could not apply " + migrationImportPath_ + ": " + error, true);
+        }
+    }
+    if (unsaved || migrationImportPath_.empty()) ImGui::EndDisabled();
+    ImGui::TextDisabled("Pick a migration's .up.sql (or its .mysql copy); its .down.sql must sit beside it.");
+    ImGui::End();
 }
 
 void ServerWorkspace::loadServerContent() {
@@ -691,7 +874,8 @@ bool ServerWorkspace::saveServer() {
     selection_ = keep;                                                       // rows stay in id order; new rows come last
     contentChanged();
     ctx_.setStatus("Saved: " + std::to_string(summary.inserted) + " added, " + std::to_string(summary.updated) + " changed, " +
-                  std::to_string(summary.deleted) + " deleted. Restart the server to apply.", false);
+                  std::to_string(summary.deleted) + " deleted" + (summary.migration.empty() ? "" : ", migration " + summary.migration) +
+                  ". Restart the server to apply.", false);
     return true;
 }
 

@@ -88,6 +88,7 @@ public:
     void begin() override { execute("BEGIN IMMEDIATE"); }
     void commit() override { execute("COMMIT"); }
     void rollback() override { execute("ROLLBACK"); }
+    int64_t changes() override { return sqlite3_changes(db_); }
     std::vector<std::string> tables() override {
         std::vector<std::string> out;
         SqliteStatement s(db_, "SELECT name FROM sqlite_master WHERE type = 'table'");
@@ -221,6 +222,7 @@ public:
     void begin() override { execute("START TRANSACTION"); }
     void commit() override { execute("COMMIT"); }
     void rollback() override { execute("ROLLBACK"); }
+    int64_t changes() override { return int64_t(mysql_affected_rows(mysql_)); }
     std::vector<std::string> tables() override {
         std::vector<std::string> out;
         MySqlStatement s(*this, "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'");

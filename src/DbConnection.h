@@ -43,6 +43,7 @@ public:
     virtual void begin() = 0;                         // a write transaction (SQLite: BEGIN IMMEDIATE; MySQL: START TRANSACTION)
     virtual void commit() = 0;
     virtual void rollback() = 0;
+    virtual int64_t changes() = 0;                    // rows the last INSERT / UPDATE / DELETE changed (migrations check it)
     virtual std::vector<std::string> tables() = 0;
     virtual std::vector<DbColumnInfo> columns(const std::string& table) = 0;   // in table order; empty if no such table
     virtual bool readOnly() const = 0;

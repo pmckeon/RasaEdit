@@ -8,7 +8,7 @@ DXC ships with the Windows SDK and the Vulkan SDK, or from github.com/microsoft/
 import os, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUTPUT = os.path.join(HERE, '..', 'ShaderBytecode.h')
+OUTPUT = os.path.join(HERE, '..', 'src', 'ShaderBytecode.h')
 SHADERS = [   # (array name prefix, source, entry point, profile)
     ('sceneVertex', 'scene.hlsl', 'vsMain', 'vs_6_0'),
     ('sceneFragment', 'scene.hlsl', 'psMain', 'ps_6_0'),

@@ -1216,6 +1216,11 @@ void MissionEditor::drawChildren(EditorContext& ctx, const WorldDatabase& databa
     }
 }
 
+int64_t MissionEditor::placeholderTextId(EditorContext& ctx) {
+    if (placeholderTextId_ < 0 && ctx.gameData) placeholderTextId_ = findPlaceholderTextId(*ctx.gameData);
+    return placeholderTextId_;
+}
+
 void MissionEditor::draw(EditorContext& ctx, WorldDatabase& database, int32_t mapContextId, const std::vector<int32_t>& mapCreatures, bool writable) {
     if (tables_.empty()) {
         ImGui::TextDisabled("No mission tables.");
@@ -1225,7 +1230,7 @@ void MissionEditor::draw(EditorContext& ctx, WorldDatabase& database, int32_t ma
     DbTable& missions = root.edited;
     const int idColumn = missions.column("mission_id"), revisionColumn = missions.column("content_revision");
     const int giverColumn = missions.column("giver_id"), receiverColumn = missions.column("receiver_id");
-    if (placeholderTextId_ < 0 && ctx.gameData) placeholderTextId_ = findPlaceholderTextId(*ctx.gameData);
+    placeholderTextId(ctx);
     if (writable) {
         if (ImGui::Button("New mission")) {
             std::vector<DbValue> row = newRow(root, missions, nullptr);

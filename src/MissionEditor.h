@@ -59,6 +59,12 @@ public:
     Table* table(const char* name);
     std::vector<DbValue> newRow(const Table& t, const DbTable& parentTable, const std::vector<DbValue>* parentRow) const;
 
+    // The mission text placeholder, shown as ID_DEFAULT_TEXT (as the UI's ID_DEFAULT_TEXT: an id the client has, with no text): the
+    // lowest missiontextlanguage id that is empty in every language that has it (both genders) and that no client mission table
+    // (missionconversation / missionobjective / objectiveconversation) names - 17240 in the shipped data. New missions get it as their
+    // name text, new objectives as name and body text, until another is chosen. -1 = not worked out yet, 0 = none found.
+    int64_t placeholderTextId(EditorContext& ctx);   // worked out on first use after a load (findPlaceholderTextId)
+
 private:
     std::string missionLabel(EditorContext& ctx, const std::vector<DbValue>& row) const;
     // Mission text as the client shows it. The server never sends text ids: the client looks a mission's texts up by mission id
@@ -74,11 +80,6 @@ private:
     // one undo history, saved into game.zip with its other changes, the modules written as stored source).
     void drawClientTexts(EditorContext& ctx, const WorldDatabase& database, const DbTable& table, const std::vector<DbValue>& row);
     int64_t newConversationPackage_ = 0, newConversationFlag_ = 1, newConversationKind_ = 1;
-    // The mission text placeholder, shown as ID_DEFAULT_TEXT (as the UI's ID_DEFAULT_TEXT: an id the client has, with no text): the
-    // lowest missiontextlanguage id that is empty in every language that has it (both genders) and that no client mission table
-    // (missionconversation / missionobjective / objectiveconversation) names - 17240 in the shipped data. New missions get it as their
-    // name text, new objectives as name and body text, until another is chosen. -1 = not worked out yet, 0 = none found.
-    int64_t placeholderTextId() const { return placeholderTextId_; }
     void drawChildren(EditorContext& ctx, const WorldDatabase& database, const TableSpec& parent, const std::vector<DbValue>& parentRow, int depth,
                       bool writable);
     bool drawRowFields(EditorContext& ctx, const WorldDatabase& database, Table& t, std::vector<DbValue>& row, bool writable);

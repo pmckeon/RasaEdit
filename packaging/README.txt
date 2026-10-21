@@ -30,8 +30,9 @@ a model before exporting it back to RasaEdit. The add-on is licensed GPL-3.0-or-
 
 Licence
 -------
-RasaEdit is released under the MIT licence (LICENSE.txt). The Blender add-on is GPL-3.0-or-later. The libraries RasaEdit is
-built with keep their own licences (licenses/). On Linux, the LGPL libraries (MariaDB Connector/C: libmariadb.so.3, mpg123:
+RasaEdit, its format library and the Blender add-on are released under the GNU General Public License, version 3 or
+later (LICENSE.txt). The libraries RasaEdit is built with keep their own licences (licenses/). Tabula Rasa's game files,
+which RasaEdit reads and edits, are not part of it and are not included. On Linux, the LGPL libraries (MariaDB Connector/C: libmariadb.so.3, mpg123:
 libmpg123.so) are separate files beside the editor and can be replaced with compatible builds.
 
 Folder contents
@@ -40,5 +41,5 @@ RasaEdit(.exe)          the editor
 *.dll / *.so.*          the libraries it loads (Windows: also the Visual C++ runtime)
 plugins/libmariadb/     sign-in plugins for MySQL / MariaDB servers
 blender/                the Blender add-on
-LICENSE.txt             RasaEdit's licence (MIT)
+LICENSE.txt             RasaEdit's licence (GPL-3.0-or-later)
 licenses/               the licences of the libraries RasaEdit is built with

@@ -9,7 +9,10 @@
 #include "Workspace.h"
 #include "WorldDatabase.h"
 
+#include <SDL3/SDL.h>
+
 #include <memory>
+#include <mutex>
 #include <string>
 #include <map>
 #include <vector>
@@ -66,6 +69,7 @@ public:
     void onMapLoaded() override;
 
     void openDatabase(const std::string& path);      // call between frames
+    void reloadFromDatabase();                       // every panel's data read again (after a migration was applied or rolled back)
     void showDatabaseDialog();
     // MySQL / MariaDB World database (Rasa.NET's MySQL provider): a connect dialog, pre-filled from `spec`
     // (mysql://user@host:port/database) when given. The settings keep the spec without the password; with "remember" the
@@ -171,6 +175,15 @@ private:
     RecipeEditor recipes_;
     int craftingTab_ = 0;                             // 0 modules, 1 modifiable classes, 2 recipes (preview hook)
     void drawCraftingPanel();
+    void drawMigrationsPanel();
+    std::string migrationFolderFor(const WorldDatabase& database) const;
+    static void SDLCALL migrationFileCallback(void* userdata, const char* const* files, int filter);
+    int64_t migrationViewed_ = -1;                   // the migration whose SQL is shown
+    int migrationViewTab_ = 0;
+    int64_t migrationConfirm_ = 0;                   // the migration a roll back / re-apply waits for confirmation of
+    std::mutex migrationFileMutex_;
+    std::string migrationFilePicked_;                // from the file dialog (another thread)
+    std::string migrationImportPath_;
     void drawLootPanel();
     std::vector<CreatureDefinition> creatureDefs_;
     std::vector<CreatureDefinition> creatureDefsSaved_;

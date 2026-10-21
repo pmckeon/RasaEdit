@@ -39,38 +39,38 @@ list(APPEND RASAEDIT_SQLITE unofficial::libmariadb)
 add_subdirectory(external/trformats)
 
 add_executable (RasaEdit
-    "RasaEdit.cpp" "RasaEdit.h"
-    "Editor.cpp" "Editor.h"
-    "EditorContext.cpp" "EditorContext.h"
-    "Workspace.h"
-    "ClientWorkspace.cpp" "ClientWorkspace.h"
-    "MissionEditor.cpp" "MissionEditor.h" "Lookups.cpp" "Lookups.h" "ModelExchange.cpp" "ModelExchange.h" "ModelImport.cpp" "ModelMath.h" "BlenderPanel.cpp" "BlenderPanel.h" "AssetsWorkspace.cpp" "AssetsWorkspace.h" "ModelAnimations.cpp" "ModelAnimations.h"
-    "MissionValidation.cpp" "MissionValidation.h"
-    "Json.cpp" "Json.h"
-    "LootEditor.cpp" "LootEditor.h"
-    "ModuleEditor.cpp" "ModuleEditor.h"
-    "RecipeEditor.cpp" "RecipeEditor.h"
-    "ServerWorkspace.cpp" "ServerWorkspace.h"
-    "Panels.cpp" "Panels.h"
-    "AssetPreview.cpp" "AssetPreview.h"
-    "SoundPlayer.cpp" "SoundPlayer.h"
-    "TerrainOverview.cpp" "TerrainOverview.h"
-    "RadarMap.cpp" "RadarMap.h"
-    "GpuTexture.cpp" "GpuTexture.h"
-    "Renderer.cpp" "Renderer.h"
-    "SceneView.cpp" "SceneView.h"
-    "PvsBuilder.cpp" "PvsBuilder.h"
-    "ClientPvs.cpp"
-    "ClientCollision.cpp" "Collision.cpp" "Collision.h" "GameConfig.cpp" "GameConfig.h" "RasaNetMapUsables.cpp" "RasaNetMapUsables.h"
-    "ParticleSim.cpp" "ParticleSim.h" "Beams.cpp" "Beams.h"
-    "GpuMath.h" "MarkerColours.h" "ShaderBytecode.h"
-    "WorldDatabase.cpp" "WorldDatabase.h"
-    "DbConnection.cpp" "DbConnection.h"
-    "Avatar.cpp" "Avatar.h"
-    "UiCanvas.cpp" "UiCanvas.h"
-    "UiSchema.cpp" "UiSchema.h"
-    "UiWorkspace.cpp" "UiWorkspace.h" "TextWorkspace.cpp" "TextWorkspace.h"
-    "UiDefinitions.cpp"
+    "src/RasaEdit.cpp" "src/RasaEdit.h"
+    "src/Editor.cpp" "src/Editor.h"
+    "src/EditorContext.cpp" "src/EditorContext.h"
+    "src/Workspace.h"
+    "src/ClientWorkspace.cpp" "src/ClientWorkspace.h"
+    "src/MissionEditor.cpp" "src/MissionEditor.h" "src/Lookups.cpp" "src/Lookups.h" "src/ModelExchange.cpp" "src/ModelExchange.h" "src/ModelImport.cpp" "src/ModelMath.h" "src/BlenderPanel.cpp" "src/BlenderPanel.h" "src/AssetsWorkspace.cpp" "src/AssetsWorkspace.h" "src/ModelAnimations.cpp" "src/ModelAnimations.h"
+    "src/MissionValidation.cpp" "src/MissionValidation.h" "src/Migrations.cpp" "src/Migrations.h"
+    "src/Json.cpp" "src/Json.h"
+    "src/LootEditor.cpp" "src/LootEditor.h"
+    "src/ModuleEditor.cpp" "src/ModuleEditor.h"
+    "src/RecipeEditor.cpp" "src/RecipeEditor.h"
+    "src/ServerWorkspace.cpp" "src/ServerWorkspace.h"
+    "src/Panels.cpp" "src/Panels.h"
+    "src/AssetPreview.cpp" "src/AssetPreview.h"
+    "src/SoundPlayer.cpp" "src/SoundPlayer.h"
+    "src/TerrainOverview.cpp" "src/TerrainOverview.h"
+    "src/RadarMap.cpp" "src/RadarMap.h"
+    "src/GpuTexture.cpp" "src/GpuTexture.h"
+    "src/Renderer.cpp" "src/Renderer.h"
+    "src/SceneView.cpp" "src/SceneView.h"
+    "src/PvsBuilder.cpp" "src/PvsBuilder.h"
+    "src/ClientPvs.cpp"
+    "src/ClientCollision.cpp" "src/Collision.cpp" "src/Collision.h" "src/GameConfig.cpp" "src/GameConfig.h" "src/RasaNetMapUsables.cpp" "src/RasaNetMapUsables.h"
+    "src/ParticleSim.cpp" "src/ParticleSim.h" "src/Beams.cpp" "src/Beams.h"
+    "src/GpuMath.h" "src/MarkerColours.h" "src/ShaderBytecode.h"
+    "src/WorldDatabase.cpp" "src/WorldDatabase.h"
+    "src/DbConnection.cpp" "src/DbConnection.h"
+    "src/Avatar.cpp" "src/Avatar.h"
+    "src/UiCanvas.cpp" "src/UiCanvas.h"
+    "src/UiSchema.cpp" "src/UiSchema.h"
+    "src/UiWorkspace.cpp" "src/UiWorkspace.h" "src/TextWorkspace.cpp" "src/TextWorkspace.h"
+    "src/UiDefinitions.cpp"
 )
 
 # Link everything together
@@ -103,14 +103,14 @@ rasaedit_copy_mariadb_plugins(RasaEdit)
 # Headless rendering test (renders a map offscreen and writes raw RGBA; works on any Vulkan driver).
 option(RASAEDIT_BUILD_TESTS "Build the headless viewport test" OFF)
 if (RASAEDIT_BUILD_TESTS)
-    add_executable(viewport_test tests/viewport_test.cpp Renderer.cpp SceneView.cpp PvsBuilder.cpp ParticleSim.cpp Beams.cpp GpuTexture.cpp WorldDatabase.cpp DbConnection.cpp Avatar.cpp UiCanvas.cpp UiSchema.cpp MissionValidation.cpp Json.cpp ModelExchange.cpp ModelImport.cpp GameConfig.cpp RasaNetMapUsables.cpp)
-    target_include_directories(viewport_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_executable(viewport_test tests/viewport_test.cpp src/Renderer.cpp src/SceneView.cpp src/PvsBuilder.cpp src/ParticleSim.cpp src/Beams.cpp src/GpuTexture.cpp src/WorldDatabase.cpp src/Migrations.cpp src/DbConnection.cpp src/Avatar.cpp src/UiCanvas.cpp src/UiSchema.cpp src/MissionValidation.cpp src/Json.cpp src/ModelExchange.cpp src/ModelImport.cpp src/GameConfig.cpp src/RasaNetMapUsables.cpp)
+    target_include_directories(viewport_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(viewport_test PRIVATE SDL3::SDL3 Freetype::Freetype trformats ${RASAEDIT_SQLITE})
 
     # Whole-editor smoke test: real ImGui frames and both workspaces, headless.
-    add_executable(ui_smoke_test tests/ui_smoke_test.cpp Editor.cpp EditorContext.cpp ClientWorkspace.cpp ClientPvs.cpp ClientCollision.cpp Collision.cpp GameConfig.cpp RasaNetMapUsables.cpp ServerWorkspace.cpp MissionEditor.cpp Lookups.cpp ModelExchange.cpp ModelImport.cpp BlenderPanel.cpp AssetsWorkspace.cpp ModelAnimations.cpp MissionValidation.cpp Json.cpp LootEditor.cpp ModuleEditor.cpp RecipeEditor.cpp Panels.cpp AssetPreview.cpp SoundPlayer.cpp
-                   Renderer.cpp SceneView.cpp PvsBuilder.cpp ParticleSim.cpp Beams.cpp GpuTexture.cpp WorldDatabase.cpp DbConnection.cpp Avatar.cpp TerrainOverview.cpp RadarMap.cpp UiCanvas.cpp UiSchema.cpp UiWorkspace.cpp UiDefinitions.cpp TextWorkspace.cpp)
-    target_include_directories(ui_smoke_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_executable(ui_smoke_test tests/ui_smoke_test.cpp src/Editor.cpp src/EditorContext.cpp src/ClientWorkspace.cpp src/ClientPvs.cpp src/ClientCollision.cpp src/Collision.cpp src/GameConfig.cpp src/RasaNetMapUsables.cpp src/ServerWorkspace.cpp src/MissionEditor.cpp src/Lookups.cpp src/ModelExchange.cpp src/ModelImport.cpp src/BlenderPanel.cpp src/AssetsWorkspace.cpp src/ModelAnimations.cpp src/MissionValidation.cpp src/Json.cpp src/LootEditor.cpp src/ModuleEditor.cpp src/RecipeEditor.cpp src/Panels.cpp src/AssetPreview.cpp src/SoundPlayer.cpp
+                   src/Renderer.cpp src/SceneView.cpp src/PvsBuilder.cpp src/ParticleSim.cpp src/Beams.cpp src/GpuTexture.cpp src/WorldDatabase.cpp src/Migrations.cpp src/DbConnection.cpp src/Avatar.cpp src/TerrainOverview.cpp src/RadarMap.cpp src/UiCanvas.cpp src/UiSchema.cpp src/UiWorkspace.cpp src/UiDefinitions.cpp src/TextWorkspace.cpp)
+    target_include_directories(ui_smoke_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(ui_smoke_test PRIVATE SDL3::SDL3 SDL3_mixer::SDL3_mixer imgui::imgui Freetype::Freetype trformats ${RASAEDIT_SQLITE})
     set_property(TARGET ui_smoke_test PROPERTY CXX_STANDARD 20)
     set_property(TARGET viewport_test PROPERTY CXX_STANDARD 20)

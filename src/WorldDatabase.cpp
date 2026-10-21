@@ -1,18 +1,27 @@
 #include "WorldDatabase.h"
 
+#include "Migrations.h"
+
 #include <functional>
 #include <map>
 
 
 #include <algorithm>
+#include <ctime>
+#include <fstream>
+#include <filesystem>
 #include <stdexcept>
 
 namespace {
 
 // A statement of the connection's backend (DbConnection.h), with the typed accessors the loaders use.
+// The capture of the save in progress (WorldDatabase::beginWrite .. commitWrite): every INSERT / UPDATE / DELETE a Statement runs
+// lets it snapshot the table first.
+ChangeCapture* activeCapture = nullptr;
+
 class Statement {
 public:
-    Statement(DbConnection* db, const std::string& sql) : statement_(db->prepare(sql)) {}
+    Statement(DbConnection* db, const std::string& sql) : statement_(db->prepare(sql)), sql_(sql) {}
     void bindInt(int index, int64_t value) { statement_->bindInt(index, value); }
     void bindReal(int index, double value) { statement_->bindReal(index, value); }
     void bindText(int index, const std::string& value) { statement_->bindText(index, value); }
@@ -21,7 +30,10 @@ public:
     bool isNull(int column) const { return statement_->columnType(column) == DbType::Null; }
     double realDouble(int column) const { return statement_->realDouble(column); }
     bool step() { return statement_->step(); }
-    void run(DbConnection*) { statement_->run(); }     // INSERT / UPDATE / DELETE: throws on failure
+    void run(DbConnection*) {                          // INSERT / UPDATE / DELETE: throws on failure
+        if (activeCapture) activeCapture->beforeWrite(sql_);
+        statement_->run();
+    }
     int64_t integer(int column) const { return statement_->integer(column); }
     int32_t int32(int column) const { return int32_t(statement_->integer(column)); }
     float real(int column) const { return float(statement_->realDouble(column)); }
@@ -29,6 +41,7 @@ public:
     tr::Vec3 vec3(int column) const { return tr::Vec3{real(column), real(column + 1), real(column + 2)}; }
 private:
     std::unique_ptr<DbStatement> statement_;
+    std::string sql_;
 };
 
 std::string lower(std::string s) { return tr::toLowerAscii(std::move(s)); }
@@ -164,8 +177,8 @@ bool WorldDatabase::requireColumns(const std::string& table, std::initializer_li
 
 std::vector<std::pair<std::string, int64_t>> WorldDatabase::tableCounts() const {
     std::vector<std::pair<std::string, int64_t>> counts;
-    std::set<std::string> names;
-    for (const auto& t : columns_) names.insert(t.first);
+    std::set<std::string> names;                       // the tables' real names: columns_ is keyed lower-case, and MySQL names are case-sensitive
+    for (const std::string& t : db_->tables()) names.insert(t);
     for (const std::string& t : names) {
         Statement s(db_, "SELECT COUNT(*) FROM \"" + t + "\"");
         counts.emplace_back(t, s.step() ? s.integer(0) : 0);
@@ -481,6 +494,18 @@ std::string keyString(const DbTable& t, const std::vector<DbValue>& row) {
 
 }  // namespace
 
+namespace {
+// A migration's label: what the save was of.
+std::string tableLabel(const std::vector<std::pair<const DbTable*, const DbTable*>>& tables) {
+    const std::string first = tables.empty() || !tables.front().first ? std::string() : tables.front().first->name;
+    if (first.rfind("mission", 0) == 0) return "missions";
+    if (first.rfind("loot", 0) == 0 || first.find("loot") != std::string::npos) return "loot";
+    if (first.rfind("module", 0) == 0 || first.rfind("modifiable", 0) == 0) return "item_modules";
+    if (first.rfind("recipe", 0) == 0) return "recipes";
+    return first.empty() ? "tables" : first;
+}
+}  // namespace
+
 bool WorldDatabase::saveTables(const std::vector<std::pair<const DbTable*, const DbTable*>>& tables, SaveSummary& summary, std::string& error) {
     summary = SaveSummary{};
     if (readOnly_) {
@@ -488,7 +513,7 @@ bool WorldDatabase::saveTables(const std::vector<std::pair<const DbTable*, const
         return false;
     }
     try {
-        db_->begin();
+        beginWrite();
     } catch (const std::exception& e) {
         error = std::string("cannot start a transaction (is the server writing to the database?): ") + e.what();
         return false;
@@ -558,11 +583,14 @@ bool WorldDatabase::saveTables(const std::vector<std::pair<const DbTable*, const
                 }
             }
         }
-        db_->commit();
+        if (!commitWrite(tableLabel(tables), summary, error)) {
+            summary = SaveSummary{};
+            return false;
+        }
         return true;
     } catch (const std::exception& e) {
         error = e.what();
-        try { db_->rollback(); } catch (const std::exception&) {}
+        try { abortWrite(); } catch (const std::exception&) {}
         summary = SaveSummary{};
         return false;
     }
@@ -639,7 +667,7 @@ bool WorldDatabase::saveCreatures(const std::vector<CreatureDefinition>& saved, 
         return false;
     }
     try {
-        db_->begin();
+        beginWrite();
     } catch (const std::exception& e) {
         error = std::string("cannot start a transaction (is the server writing to the database?): ") + e.what();
         return false;
@@ -868,10 +896,13 @@ bool WorldDatabase::saveCreatures(const std::vector<CreatureDefinition>& saved, 
                     ++summary.inserted;
                 }
         }
-        db_->commit();
+        if (!commitWrite(std::string("creatures"), summary, error)) {
+            summary = SaveSummary{};
+            return false;
+        }
     } catch (const std::exception& e) {
         error = e.what();
-        try { db_->rollback(); } catch (const std::exception&) {}
+        try { abortWrite(); } catch (const std::exception&) {}
         summary = SaveSummary{};
         return false;
     }
@@ -1264,6 +1295,237 @@ const char* objectTable(ObjectKind kind) {
 
 void WorldDatabase::execute(const std::string& sql) { db_->execute(sql); }
 
+// ------------------------------------------------------------------------------------------
+// Migrations (Migrations.h)
+// ------------------------------------------------------------------------------------------
+namespace {
+std::string utcNow(const char* format) {
+    const std::time_t now = std::time(nullptr);
+    char buffer[64];
+    std::strftime(buffer, sizeof buffer, format, std::gmtime(&now));
+    return buffer;
+}
+std::string pathText(const std::filesystem::path& p) {
+    const auto text = p.u8string();
+    return std::string(text.begin(), text.end());
+}
+std::string labelText(std::string label) {
+    for (char& c : label) c = std::isalnum(static_cast<unsigned char>(c)) ? char(std::tolower(static_cast<unsigned char>(c))) : '_';
+    return label;
+}
+}  // namespace
+
+std::string WorldDatabase::mapLabel(int64_t context) const {
+    for (const MapInfo& m : maps_)
+        if (m.mapContextId == context) return "map_" + m.name;
+    return "map_" + std::to_string(context);
+}
+
+void WorldDatabase::ensureMigrationTable() {
+    if (hasTable("rasaedit_migration")) return;
+    // Before the save's transaction: MySQL commits implicitly on CREATE TABLE.
+    db_->execute(mySql_ ? "CREATE TABLE IF NOT EXISTS \"rasaedit_migration\" (\"id\" BIGINT NOT NULL PRIMARY KEY, \"name\" VARCHAR(255) NOT NULL, "
+                          "\"created_utc\" VARCHAR(32) NOT NULL, \"summary\" TEXT NOT NULL, \"applied\" INT NOT NULL, \"up_sql\" LONGTEXT NOT NULL, "
+                          "\"down_sql\" LONGTEXT NOT NULL)"
+                        : "CREATE TABLE IF NOT EXISTS \"rasaedit_migration\" (\"id\" INTEGER NOT NULL PRIMARY KEY, \"name\" TEXT NOT NULL, "
+                          "\"created_utc\" TEXT NOT NULL, \"summary\" TEXT NOT NULL, \"applied\" INTEGER NOT NULL, \"up_sql\" TEXT NOT NULL, "
+                          "\"down_sql\" TEXT NOT NULL)");
+    std::set<std::string>& columns = columns_["rasaedit_migration"];
+    for (const char* c : {"id", "name", "created_utc", "summary", "applied", "up_sql", "down_sql"}) columns.insert(c);
+}
+
+void WorldDatabase::beginWrite() {
+    ensureMigrationTable();
+    db_->begin();
+    capture_ = std::make_unique<ChangeCapture>(*db_, mySql_);
+    capture_->ignore("rasaedit_migration");
+    activeCapture = capture_.get();
+}
+
+void WorldDatabase::abortWrite() {
+    activeCapture = nullptr;
+    capture_.reset();
+    db_->rollback();
+}
+
+int64_t WorldDatabase::recordMigration(const std::string& name, const std::string& summary, bool applied, const std::string& up, const std::string& down) {
+    int64_t id = 1;
+    {
+        Statement next(db_, "SELECT COALESCE(MAX(\"id\"), 0) + 1 FROM \"rasaedit_migration\"");
+        if (next.step()) id = next.integer(0);
+    }
+    Statement s(db_, "INSERT INTO \"rasaedit_migration\" (\"id\", \"name\", \"created_utc\", \"summary\", \"applied\", \"up_sql\", \"down_sql\") "
+                     "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)");
+    s.bindInt(1, id);
+    s.bindText(2, name.empty() ? std::to_string(id) : name);
+    s.bindText(3, utcNow("%Y-%m-%d %H:%M:%S"));
+    s.bindText(4, summary);
+    s.bindInt(5, applied ? 1 : 0);
+    s.bindText(6, up);
+    s.bindText(7, down);
+    s.run(db_);
+    return id;
+}
+
+bool WorldDatabase::commitWrite(const std::string& label, SaveSummary& summary, std::string& error) {
+    activeCapture = nullptr;
+    std::vector<std::filesystem::path> written;
+    try {
+        ChangeCapture::Result result = capture_ ? capture_->finish() : ChangeCapture::Result{};
+        capture_.reset();
+        if (!result.empty()) {
+            int64_t id = 1;
+            {
+                Statement next(db_, "SELECT COALESCE(MAX(\"id\"), 0) + 1 FROM \"rasaedit_migration\"");
+                if (next.step()) id = next.integer(0);
+            }
+            char prefix[32];
+            std::snprintf(prefix, sizeof prefix, "_%04lld_", static_cast<long long>(id));
+            const std::string name = utcNow("%Y%m%d_%H%M%S") + prefix + labelText(label);
+            const std::string created = utcNow("%Y-%m-%d %H:%M:%S");
+            char counts[160];
+            std::snprintf(counts, sizeof counts, "%d inserted, %d updated, %d deleted", result.inserted, result.updated, result.deleted);
+            std::string tables;
+            for (const std::string& t : result.tables) tables += (tables.empty() ? "" : ", ") + t;
+            const std::string up = migrationHeader(name, "up", path_, created, result) + result.up;
+            const std::string down = migrationHeader(name, "down", path_, created, result) + result.down;
+            const std::string upMySql = migrationHeader(name, "up", path_, created, result, true) + mySqlDialect(result.up);
+            const std::string downMySql = migrationHeader(name, "down", path_, created, result, true) + mySqlDialect(result.down);
+            if (!migrationFolder_.empty()) {
+                const std::filesystem::path folder = std::filesystem::u8path(migrationFolder_);
+                std::error_code ec;
+                std::filesystem::create_directories(folder, ec);
+                for (const auto& [suffix, text] : {std::make_pair(".up.sql", &up), std::make_pair(".down.sql", &down),
+                                                   std::make_pair(".mysql.up.sql", &upMySql), std::make_pair(".mysql.down.sql", &downMySql)}) {
+                    const std::filesystem::path file = folder / std::filesystem::u8path(name + suffix);
+                    std::ofstream out(file, std::ios::binary);
+                    out << *text;
+                    out.close();
+                    if (!out) throw std::runtime_error("cannot write the migration file " + pathText(file) + " (nothing was saved)");
+                    written.push_back(file);
+                }
+            }
+            recordMigration(name, std::string(counts) + "; " + tables, true, up, down);
+            summary.migration = name;
+        }
+        db_->commit();
+        return true;
+    } catch (const std::exception& e) {
+        error = e.what();
+        for (const auto& file : written) {
+            std::error_code ec;
+            std::filesystem::remove(file, ec);
+        }
+        capture_.reset();
+        try { db_->rollback(); } catch (const std::exception&) {}
+        return false;
+    }
+}
+
+std::vector<WorldDatabase::MigrationRecord> WorldDatabase::migrations() const {
+    std::vector<MigrationRecord> out;
+    if (!hasTable("rasaedit_migration")) return out;
+    Statement s(db_, "SELECT \"id\", \"name\", \"created_utc\", \"summary\", \"applied\", \"up_sql\", \"down_sql\" FROM \"rasaedit_migration\" "
+                     "ORDER BY \"id\" DESC");
+    while (s.step()) out.push_back(MigrationRecord{s.integer(0), s.text(1), s.text(2), s.text(3), s.integer(4) != 0, s.text(5), s.text(6)});
+    return out;
+}
+
+bool WorldDatabase::setMigrationApplied(int64_t id, bool applied, std::string& error) {
+    if (readOnly_) {
+        error = "the database was opened read-only";
+        return false;
+    }
+    MigrationRecord record;
+    bool found = false;
+    for (const MigrationRecord& m : migrations())
+        if (m.id == id) record = m, found = true;
+    if (!found) {
+        error = "no migration " + std::to_string(id);
+        return false;
+    }
+    if (record.applied == applied) {
+        error = std::string("migration ") + record.name + (applied ? " is applied already" : " is rolled back already");
+        return false;
+    }
+    try {
+        db_->begin();
+        if (!applyMigrationSql(*db_, mySql_, applied ? record.upSql : record.downSql, error, true)) {
+            db_->rollback();
+            return false;
+        }
+        Statement s(db_, "UPDATE \"rasaedit_migration\" SET \"applied\" = ?2 WHERE \"id\" = ?1");
+        s.bindInt(1, id);
+        s.bindInt(2, applied ? 1 : 0);
+        s.run(db_);
+        db_->commit();
+    } catch (const std::exception& e) {
+        error = e.what();
+        try { db_->rollback(); } catch (const std::exception&) {}
+        return false;
+    }
+    loadGlobals();
+    return true;
+}
+
+bool WorldDatabase::importMigration(const std::string& upFile, std::string& error) {
+    if (readOnly_) {
+        error = "the database was opened read-only";
+        return false;
+    }
+    const std::filesystem::path upPath = std::filesystem::u8path(upFile);
+    std::string name = pathText(upPath.filename());
+    const std::string suffix = ".up.sql";
+    if (name.size() <= suffix.size() || name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0) {
+        error = "not a migration's .up.sql file: " + upFile;
+        return false;
+    }
+    name.resize(name.size() - suffix.size());
+    std::filesystem::path portableUp = upPath;
+    if (name.size() > 6 && name.compare(name.size() - 6, 6, ".mysql") == 0) {        // the MySQL copy: use the portable pair beside it
+        name.resize(name.size() - 6);
+        portableUp = upPath.parent_path() / std::filesystem::u8path(name + ".up.sql");
+    }
+    const std::filesystem::path downPath = upPath.parent_path() / std::filesystem::u8path(name + ".down.sql");
+    const auto readText = [](const std::filesystem::path& p, std::string& out) {
+        std::ifstream in(p, std::ios::binary);
+        if (!in) return false;
+        out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        return true;
+    };
+    std::string up, down;
+    if (!readText(portableUp, up)) {
+        error = "cannot read " + pathText(portableUp);
+        return false;
+    }
+    if (!readText(downPath, down)) {
+        error = "cannot read its Down file " + pathText(downPath) + " (a migration is imported with its rollback)";
+        return false;
+    }
+    for (const MigrationRecord& m : migrations())
+        if (m.name == name || m.upSql == up) {
+            error = "this database has migration " + m.name + " already";
+            return false;
+        }
+    try {
+        ensureMigrationTable();
+        db_->begin();
+        if (!applyMigrationSql(*db_, mySql_, up, error, true)) {
+            db_->rollback();
+            return false;
+        }
+        const std::vector<MigrationStatement> statements = parseMigrationSql(up);
+        recordMigration(name, "imported (" + std::to_string(statements.size()) + " statements)", true, up, down);
+        db_->commit();
+    } catch (const std::exception& e) {
+        error = e.what();
+        try { db_->rollback(); } catch (const std::exception&) {}
+        return false;
+    }
+    loadGlobals();
+    return true;
+}
+
 bool WorldDatabase::save(const WorldContent& saved, const WorldContent& edited, SaveSummary& summary, std::string& error) {
     summary = SaveSummary{};
     if (readOnly_) {
@@ -1272,7 +1534,7 @@ bool WorldDatabase::save(const WorldContent& saved, const WorldContent& edited, 
     }
     const int64_t context = edited.mapContextId;
     try {
-        db_->begin();
+        beginWrite();
     } catch (const std::exception& e) {
         error = std::string("cannot start a transaction (is the server writing to the database?): ") + e.what();
         return false;
@@ -1884,11 +2146,14 @@ bool WorldDatabase::save(const WorldContent& saved, const WorldContent& edited, 
             s.run(db_);
             ++summary.updated;
         }
-        db_->commit();
+        if (!commitWrite(mapLabel(context), summary, error)) {
+            summary = SaveSummary{};
+            return false;
+        }
         return true;
     } catch (const std::exception& e) {
         error = e.what();
-        try { db_->rollback(); } catch (const std::exception&) {}
+        try { abortWrite(); } catch (const std::exception&) {}
         summary = SaveSummary{};
         return false;
     }

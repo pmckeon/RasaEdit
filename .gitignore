@@ -1,6 +1,24 @@
+# Build output
 out/
-.vs/
+build/
 
+# IDE and per-user settings
+.vs/
+.vscode/
+.idea/
+*.user
+CMakeUserPresets.json
+
+# Python
+__pycache__/
+*.pyc
+
+# tools/missioncheck harness (dotnet build output)
+tools/missioncheck/bin/
 tools/missioncheck/obj/
+
+# Blender add-on package (made by tools/blender/make_addon_zip.py)
 tools/blender/rasaedit_addon.zip
-tools/blender/rasaedit_addon/__pycache__/
+
+# Local working notes (kept private)
+CLAUDE.md

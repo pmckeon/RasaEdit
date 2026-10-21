@@ -239,6 +239,30 @@ int main() {
         editor.promptAction_ = Editor::PromptAction::None;          // (cancel)
 
         check(server.saveChanges() && !server.hasUnsavedChanges(), "save succeeds and clears the unsaved state");
+        // Migrations (Migrations.h): the save recorded its changes as a migration, in the database and as four files in the folder.
+        {
+            const std::vector<WorldDatabase::MigrationRecord> migrations = server.database_->migrations();
+            bool files = !migrations.empty();
+            for (const char* suffix : {".up.sql", ".down.sql", ".mysql.up.sql", ".mysql.down.sql"})
+                files = files && std::filesystem::exists(std::filesystem::u8path(server.database_->migrationFolder()) /
+                                                         std::filesystem::u8path(migrations.front().name + suffix));
+            check(!migrations.empty() && migrations.front().applied && migrations.front().upSql.find("-- @rows 1") != std::string::npos && files,
+                  "the save wrote a migration (database and files)");
+            ImGuiWindow* w = ImGui::FindWindowByName("Migrations###Server.Migrations");
+            if (w && w->DockNode) w->DockNode->SelectedTabId = w->TabId;
+            server.migrationViewed_ = migrations.empty() ? -1 : migrations.front().id;
+            frames(editor, device, 2);
+            check(w != nullptr, "the Migrations panel draws");
+            // Roll the save back from the panel's code path, then apply it again.
+            std::string error;
+            const bool rolled = !migrations.empty() && server.database_->setMigrationApplied(migrations.front().id, false, error);
+            if (rolled) server.reloadFromDatabase();
+            const bool back = rolled && server.serverContent_.spawnPools[0].position.x == before.x;
+            const bool again = rolled && server.database_->setMigrationApplied(migrations.front().id, true, error);
+            if (again) server.reloadFromDatabase();
+            check(back && again && server.serverContent_.spawnPools[0].position.x == before.x + 3.0f,
+                  "the migration rolls back (pool back where it was) and applies again");
+        }
 
         // FX emitter (map_emitter): add one, give it a package, draw its inspector and viewport, save, read back, delete, save.
         if (server.database_->hasTable("map_emitter")) {
@@ -766,7 +790,7 @@ int main() {
                 check(milpas && bootcamp, "player flag choices: the content's flags with their uses and the server flag");
                 // New missions and objectives start with the mission text placeholder (ID_DEFAULT_TEXT): an id empty in every language
                 // and named by no client mission table - 17240 in the shipped game.zip.
-                const int64_t placeholder = server.missions_.placeholderTextId();
+                const int64_t placeholder = server.missions_.placeholderTextId(ctx);
                 bool placed = false;
                 if (auto* missionTable = server.missions_.table("mission_content_definition"))
                     if (auto* objectiveTable = server.missions_.table("mission_objective_definition")) {

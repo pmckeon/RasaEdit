@@ -440,6 +440,8 @@ struct DbTable {
     int column(const std::string& name) const;       // -1 if absent
 };
 
+class ChangeCapture;
+
 class WorldDatabase {
 public:
     // spec: a SQLite file (rasaworld.db) or mysql://user[:password]@host[:port]/database (Rasa.NET's MySQL provider; MySQL 8 or
@@ -473,7 +475,27 @@ public:
         int inserted = 0;
         int updated = 0;
         int deleted = 0;
+        std::string migration;                       // the migration the save wrote ("" when it changed nothing; see Migrations.h)
     };
+
+    // Migrations (the user's rule, 2026-10-21; Migrations.h): every save also records its changes as Up / Down SQL in the World
+    // database's own table rasaedit_migration (id, name, created_utc, summary, applied, up_sql, down_sql - created on the first
+    // save; Rasa.NET ignores it) and, when a folder is set, as <folder>/<name>.up.sql / .down.sql. A save whose files cannot be
+    // written is refused. Applying one runs it in one transaction and refuses it unless every statement changes the rows it names.
+    struct MigrationRecord {
+        int64_t id = 0;
+        std::string name, createdUtc, summary;
+        bool applied = true;
+        std::string upSql, downSql;
+    };
+    void setMigrationFolder(const std::string& folder) { migrationFolder_ = folder; }
+    const std::string& migrationFolder() const { return migrationFolder_; }
+    std::vector<MigrationRecord> migrations() const;               // newest first; empty before the first save
+    // Rolls a migration back (its Down) or applies it again (its Up); false, with nothing changed, when the data is not as it expects.
+    bool setMigrationApplied(int64_t id, bool applied, std::string& error);
+    // Applies <name>.up.sql (with its <name>.down.sql beside it) from another database's migrations and records it here.
+    bool importMigration(const std::string& upFile, std::string& error);
+    void reload() { loadGlobals(); }                                // after migrations: the cached tables read again
     // Writes the differences between `saved` (as loaded) and `edited` in one transaction.
     // Returns false (with nothing written) and sets error on failure.
     bool save(const WorldContent& saved, const WorldContent& edited, SaveSummary& summary, std::string& error);
@@ -518,11 +540,19 @@ private:
     void loadCreatures();                            // creature, creature_appearance, creature_stat, creature_action
 
     void execute(const std::string& sql);
+    void ensureMigrationTable();
+    std::string mapLabel(int64_t mapContextId) const;
+    void beginWrite();                                              // a save's transaction, its changes captured
+    bool commitWrite(const std::string& label, SaveSummary& summary, std::string& error);   // records the migration, then commits
+    void abortWrite();
+    int64_t recordMigration(const std::string& name, const std::string& summary, bool applied, const std::string& up, const std::string& down);
 
     std::unique_ptr<DbConnection> connection_;
     DbConnection* db_ = nullptr;                     // connection_.get()
     bool mySql_ = false;
     bool readOnly_ = false;
+    std::unique_ptr<ChangeCapture> capture_;
+    std::string migrationFolder_;
     std::vector<Creature> creatureList_;
     std::string path_;
     std::vector<std::string> warnings_;
