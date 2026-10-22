@@ -3384,9 +3384,16 @@ const SceneView::CollisionMesh* SceneView::collisionFor(const Model* model, size
                         acc = tr::Vec3{acc.x + n.x, acc.y + n.y, acc.z + n.z};
                     }
                 }
+                // Summed over every copy of a position: most shipped surfaces store a corner once per face (253 of 256 around Pinhole
+                // Falls), and copies pushed along their own face's normal parted at every crease - seams the game's data does not have.
+                std::map<std::tuple<float, float, float>, tr::Vec3> byPosition;
+                for (size_t q = 0; q < points.size(); ++q) {
+                    tr::Vec3& acc = byPosition[{v.vertices[q].x, v.vertices[q].y, v.vertices[q].z}];
+                    acc = tr::Vec3{acc.x + normals[q].x, acc.y + normals[q].y, acc.z + normals[q].z};
+                }
                 const uint32_t first = uint32_t(out.vertices.size());
                 for (size_t q = 0; q < points.size(); ++q) {
-                    tr::Vec3 n = normals[q];
+                    tr::Vec3 n = byPosition[{v.vertices[q].x, v.vertices[q].y, v.vertices[q].z}];
                     const float len = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
                     n = len > 0 ? tr::Vec3{n.x / len, n.y / len, n.z / len} : tr::Vec3{0, 1, 0};
                     out.vertices.push_back(vertex(tr::Vec3{points[q].x + n.x * 0.03f, points[q].y + n.y * 0.03f, points[q].z + n.z * 0.03f}, n));

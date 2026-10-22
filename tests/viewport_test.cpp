@@ -2942,7 +2942,7 @@ int main(int argc, char** argv) {
             return 0;
         }
         // RASA_COLLDUMP=<out.txt>,<radius>: the collision of the map entities within <radius> m of the eye, in world space, for a
-        // preview of a collision layer. Lines: "T <status> x y z x y z x y z" per walkable-surface triangle (status ok = BVWS on a bone
+        // preview of a collision layer. Lines: "T <status> x y z x y z x y z e<entity index>" per walkable-surface triangle (status ok = BVWS on a bone
         // with WSName, dropped = no WSName on that bone or the entity's map flag bit 1), "B x y z ... (8 corners)" per box volume, "S x
         // y z r" per sphere volume, "A x y z ... (8 corners)" per generated ABV (shape and extents as stored, drawn as a box of those
         // half extents - meaning NOT traced). Volume coordinates are in the bone's bind frame: the skeleton's bind chain (as the client).
@@ -3014,13 +3014,20 @@ int main(int argc, char** argv) {
                         any = true;
                         if (v.kind == tr::fourcc("BVWS")) {
                             const bool good = named && !(e.flags & 0x2);
+                            {
+                                // "V e<entity> <mesh> <stored vertices> <distinct positions> <triangles>": duplicated vertices split crease normals
+                                std::set<std::tuple<float, float, float>> distinct;
+                                for (const tr::Vec3& p : v.vertices) distinct.insert({p.x, p.y, p.z});
+                                std::fprintf(out, "V e%zu %s %zu %zu %zu\n", size_t(&e - map.map.entities.data()), mesh.c_str(), v.vertices.size(),
+                                             distinct.size(), v.indices.size() / 3);
+                            }
                             for (size_t t = 0; t + 2 < v.indices.size(); t += 3) {
                                 std::fprintf(out, "T %s", good ? "ok" : "dropped");
                                 for (int k = 0; k < 3; ++k) {
                                     const tr::Vec3 w = toWorld(placed, chain(v.vertices[v.indices[t + k]]));
                                     std::fprintf(out, " %.3f %.3f %.3f", w.x, w.y, w.z);
                                 }
-                                std::fprintf(out, "\n");
+                                std::fprintf(out, " e%zu\n", size_t(&e - map.map.entities.data()));   // the map entity's index
                                 (good ? ok : dropped) += 1;
                             }
                         } else if (v.kind == tr::fourcc("BVBX")) {
