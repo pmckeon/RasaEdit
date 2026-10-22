@@ -1825,8 +1825,13 @@ int main(int argc, char** argv) {
         if (const char* dbPath = envValue("RASA_DB")) {
             const char* base = SDL_GetBasePath();
             database = std::make_unique<WorldDatabase>(dbPath, defaultMySqlPluginDir(base ? base : ""));
-            // RASA_MIGRATIONFOLDER=<folder>: the saves write their migration files there too (else only rasaedit_migration).
-            if (const char* folder = std::getenv("RASA_MIGRATIONFOLDER"); folder && *folder) database->setMigrationFolder(folder);
+            // RASA_MIGRATIONFOLDER=<folder>: where the saves write their migrations (default: rasaedit_viewport_migrations in the temp folder).
+            if (const char* folder = std::getenv("RASA_MIGRATIONFOLDER"); folder && *folder) {
+                database->setMigrationFolder(folder);
+            } else {
+                const auto temp = (std::filesystem::temp_directory_path() / "rasaedit_viewport_migrations").u8string();
+                database->setMigrationFolder(std::string(temp.begin(), temp.end()));
+            }
             content = database->loadMap(database->contextIdForMap(map.name));
             scene.setServerContent(&content, database.get(), [&](int32_t id) { return data.classMeshName(id); },
                                    [&](const Creature& c) { return resolveAvatar(data, *database, c); });
@@ -2435,7 +2440,7 @@ int main(int argc, char** argv) {
                 }
             }
             // RASA_MIGRATIONTEST=<an untouched copy of the database> (after RASA_SAVETEST, whose saves each wrote a migration): rolls every
-            // applied migration back, newest first, and compares every table (rasaedit_migration aside) with the copy; then applies them
+            // applied migration back, newest first, and compares every table (__EFMigrationsHistory aside) with the copy; then applies them
             // again, oldest first, and compares with the state the saves left.
             if (const char* base = std::getenv("RASA_MIGRATIONTEST"); base && *base) {
                 const auto fingerprint = [](const WorldDatabase& db) {
@@ -2475,18 +2480,20 @@ int main(int argc, char** argv) {
                     std::string error;
                     for (const auto& m : list)
                         if (m.applied) {
-                            if (!database->setMigrationApplied(m.id, false, error)) {
+                            if (!database->setMigrationApplied(m.name, false, error)) {
                                 std::printf("migration test: roll back of %s FAILED: %s\n", m.name.c_str(), error.c_str());
                                 break;
                             }
                             ++rolled;
                         }
                     const std::string backDiff = differing(before, fingerprint(*database));
-                    std::printf("migration test: %zu migrations, %d rolled back; tables differing from the untouched copy: %s\n", list.size(), rolled,
-                                backDiff.c_str());
+                    int stillRecorded = 0;
+                    for (const auto& m : database->migrations()) stillRecorded += m.applied ? 1 : 0;
+                    std::printf("migration test: %zu migrations, %d rolled back; tables differing from the untouched copy: %s; RasaEdit ids left "
+                                "in __EFMigrationsHistory: %d\n", list.size(), rolled, backDiff.c_str(), stillRecorded);
                     for (auto it = list.rbegin(); it != list.rend(); ++it)
                         if (it->applied) {
-                            if (!database->setMigrationApplied(it->id, true, error)) {
+                            if (!database->setMigrationApplied(it->name, true, error)) {
                                 std::printf("migration test: re-apply of %s FAILED: %s\n", it->name.c_str(), error.c_str());
                                 break;
                             }
@@ -2500,10 +2507,10 @@ int main(int argc, char** argv) {
                     for (auto it = now.rbegin(); it != now.rend(); ++it)
                         if (it->applied && it->upSql.find("UPDATE ") != std::string::npos) {
                             const auto& m = *it;
-                            const bool ok = database->setMigrationApplied(m.id, false, error);
+                            const bool ok = database->setMigrationApplied(m.name, false, error);
                             std::printf("migration test: rolling back the older %s under newer ones: %s\n", m.name.c_str(),
                                         ok ? "done (no newer change of its rows)" : ("refused - " + error.substr(0, 160)).c_str());
-                            if (ok) database->setMigrationApplied(m.id, true, error);
+                            if (ok) database->setMigrationApplied(m.name, true, error);
                             break;
                         }
                 } catch (const std::exception& e) {

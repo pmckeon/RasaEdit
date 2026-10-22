@@ -239,26 +239,32 @@ int main() {
         editor.promptAction_ = Editor::PromptAction::None;          // (cancel)
 
         check(server.saveChanges() && !server.hasUnsavedChanges(), "save succeeds and clears the unsaved state");
-        // Migrations (Migrations.h): the save recorded its changes as a migration, in the database and as four files in the folder.
+        // Migrations (Migrations.h): the save recorded its changes as a migration - its folder with the four SQL files and the EF
+        // migration, and its id in __EFMigrationsHistory.
         {
             const std::vector<WorldDatabase::MigrationRecord> migrations = server.database_->migrations();
             bool files = !migrations.empty();
-            for (const char* suffix : {".up.sql", ".down.sql", ".mysql.up.sql", ".mysql.down.sql"})
-                files = files && std::filesystem::exists(std::filesystem::u8path(server.database_->migrationFolder()) /
-                                                         std::filesystem::u8path(migrations.front().name + suffix));
-            check(!migrations.empty() && migrations.front().applied && migrations.front().upSql.find("-- @rows 1") != std::string::npos && files,
-                  "the save wrote a migration (database and files)");
+            if (files) {
+                const std::string& name = migrations.front().name;
+                const std::filesystem::path folder = std::filesystem::u8path(migrations.front().folder);
+                for (const std::string& file : {name + ".up.sql", name + ".down.sql", name + ".mysql.up.sql", name + ".mysql.down.sql",
+                                                "Rasa.DBL/Migrations/SqliteWorld/" + name + ".cs", "Rasa.DBL/Migrations/MySqlWorld/" + name + ".cs"})
+                    files = files && std::filesystem::exists(folder / std::filesystem::u8path(file));
+            }
+            check(!migrations.empty() && migrations.front().applied && migrations.front().name.find("_RasaEdit_") == 14 &&
+                      migrations.front().upSql.find("-- @rows 1") != std::string::npos && files,
+                  "the save wrote a migration (EF history, SQL files and EF migration)");
             ImGuiWindow* w = ImGui::FindWindowByName("Migrations###Server.Migrations");
             if (w && w->DockNode) w->DockNode->SelectedTabId = w->TabId;
-            server.migrationViewed_ = migrations.empty() ? -1 : migrations.front().id;
+            server.migrationViewed_ = migrations.empty() ? std::string() : migrations.front().name;
             frames(editor, device, 2);
             check(w != nullptr, "the Migrations panel draws");
             // Roll the save back from the panel's code path, then apply it again.
             std::string error;
-            const bool rolled = !migrations.empty() && server.database_->setMigrationApplied(migrations.front().id, false, error);
+            const bool rolled = !migrations.empty() && server.database_->setMigrationApplied(migrations.front().name, false, error);
             if (rolled) server.reloadFromDatabase();
             const bool back = rolled && server.serverContent_.spawnPools[0].position.x == before.x;
-            const bool again = rolled && server.database_->setMigrationApplied(migrations.front().id, true, error);
+            const bool again = rolled && server.database_->setMigrationApplied(migrations.front().name, true, error);
             if (again) server.reloadFromDatabase();
             check(back && again && server.serverContent_.spawnPools[0].position.x == before.x + 3.0f,
                   "the migration rolls back (pool back where it was) and applies again");

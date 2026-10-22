@@ -77,3 +77,17 @@ std::string mySqlDialect(const std::string& portable);
 // The header a migration file starts with (mySql: for the .mysql file).
 std::string migrationHeader(const std::string& name, const std::string& direction, const std::string& database, const std::string& createdUtc,
                             const ChangeCapture::Result& result, bool mySql = false);
+
+// EF Core migrations for Rasa.NET (the Rasa.NET team's choice, 2026-10-22: every migration is exported both as the SQL files and as EF
+// migrations, so anyone can load it the way that suits them). The same shape as upstream's data-only migrations (e.g.
+// 20270123000000_Thunderhead_base_teleporters): a thin Migration per World context - Rasa.Migrations.SqliteWorld / MySqlWorld,
+// [DbContext(typeof(SqliteWorldContext / MySqlWorldContext))], [Migration(id)], no Designer file - calling a static class in
+// Rasa.Services.Preloader that yields the statements (the portable dialect for SQLite, MySQL's own for MySQL). After each statement an
+// INSERT of (expected rows, changes() / ROW_COUNT()) into a temporary table whose CHECK wants them equal, so EF refuses (rolls back) a
+// migration whose rows are not as it expects, as applyMigrationSql does. Paths are relative to Rasa.NET's src/ folder.
+struct EfMigrationFile {
+    std::string path;                                // e.g. Rasa.DBL/Migrations/SqliteWorld/<id>.cs
+    std::string text;
+};
+std::vector<EfMigrationFile> efMigrationFiles(const std::string& migrationId, const std::string& className, const std::string& description,
+                                              const std::string& up, const std::string& down);

@@ -4,6 +4,8 @@ A world and content editor for Tabula Rasa.
 
 Create, build and explore visually! Save time on constantly reloading the game world to preview an update.
 
+![RasaEdit](screenshot.png)
+
 ### AI Coded / Human Verified
 > [!NOTE]
 > Why AI? I started this project the traditional way and quickly realised that while I could make something functional it was never going to meet the high bar I set for myself. Even with assistance it's taken weeks of debugging, testing and reverse engineering the data structures and rendering to make this a feature complete as possible. I hope that this can also serve as future documentation for other projects that may want to make their own tools.

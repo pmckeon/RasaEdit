@@ -377,3 +377,145 @@ std::string migrationHeader(const std::string& name, const std::string& directio
                   : "-- Portable dialect (double-quoted identifiers, only ' escaped): SQLite as it is; MySQL / MariaDB needs\n"
                     "-- SET SESSION sql_mode = CONCAT(@@SESSION.sql_mode, ',ANSI_QUOTES,NO_BACKSLASH_ESCAPES'); or the .mysql file.\n\n");
 }
+
+namespace {
+
+// A C# regular string literal: \ " and control characters escaped (a verbatim string would take the file's line endings into the
+// value, which git may rewrite); other characters as they are (the file is UTF-8).
+std::string csharpString(const std::string& text) {
+    std::string out = "\"";
+    for (const char c : text) {
+        switch (c) {
+            case '\\': out += "\\\\"; break;
+            case '"': out += "\\\""; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            case '\0': out += "\\0"; break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    char escape[8];
+                    std::snprintf(escape, sizeof escape, "\\u%04x", static_cast<unsigned>(static_cast<unsigned char>(c)));
+                    out += escape;
+                } else {
+                    out += c;
+                }
+        }
+    }
+    return out + "\"";
+}
+
+// The statements EF runs for one direction: the migration's own, each followed by the row check (see Migrations.h).
+std::vector<std::string> efStatements(const std::string& text, bool mySql) {
+    const std::vector<MigrationStatement> statements = parseMigrationSql(mySql ? mySqlDialect(text) : text);
+    std::vector<std::string> out;
+    if (mySql) {
+        out.push_back("DROP TEMPORARY TABLE IF EXISTS rasaedit_rows");
+        out.push_back("CREATE TEMPORARY TABLE rasaedit_rows (nr INT NOT NULL, expected BIGINT NOT NULL, changed BIGINT NOT NULL, "
+                      "CHECK (changed = expected))");
+    } else {
+        out.push_back("DROP TABLE IF EXISTS temp.rasaedit_rows");
+        out.push_back("CREATE TEMP TABLE rasaedit_rows (nr INTEGER NOT NULL, expected INTEGER NOT NULL, changed INTEGER NOT NULL, "
+                      "CHECK (changed = expected))");
+    }
+    for (size_t k = 0; k < statements.size(); ++k) {
+        out.push_back(statements[k].sql);
+        out.push_back(std::string(mySql ? "INSERT INTO rasaedit_rows" : "INSERT INTO temp.rasaedit_rows") +
+                      " (nr, expected, changed) VALUES (" + std::to_string(k + 1) + ", " + std::to_string(statements[k].rows) +
+                      (mySql ? ", ROW_COUNT())" : ", changes())"));
+    }
+    out.push_back(mySql ? "DROP TEMPORARY TABLE IF EXISTS rasaedit_rows" : "DROP TABLE IF EXISTS temp.rasaedit_rows");
+    return out;
+}
+
+std::string efStatementList(const std::vector<std::string>& statements, const char* indent) {
+    std::string out;
+    for (const std::string& s : statements) out += std::string(indent) + "yield return " + csharpString(s) + ";\n";
+    return out;
+}
+
+std::string efMigrationClass(const std::string& migrationId, const std::string& className, const std::string& description, bool mySql) {
+    const std::string world = mySql ? "MySqlWorld" : "SqliteWorld";
+    const std::string flag = mySql ? "true" : "false";
+    return "\xEF\xBB\xBF" "using Microsoft.EntityFrameworkCore.Infrastructure;\n"
+           "using Microsoft.EntityFrameworkCore.Migrations;\n"
+           "\n"
+           "using JetBrains.Annotations;\n"
+           "\n"
+           "using Rasa.Context.World;\n"
+           "using Rasa.Services.Preloader;\n"
+           "\n"
+           "namespace Rasa.Migrations." + world + "\n"
+           "{\n"
+           "    /// <summary>\n"
+           "    /// " + description + "\n"
+           "    /// Made by RasaEdit; data only, in plain SQL: no model of its own (" + className + "_Data). Every statement is checked\n"
+           "    /// to change the rows it expects, else the migration fails and nothing is applied.\n"
+           "    ///\n"
+           "    /// Down takes it out again.\n"
+           "    /// </summary>\n"
+           "    // ReSharper disable once InconsistentNaming\n"
+           "    [UsedImplicitly]\n"
+           "    [DbContext(typeof(" + world + "Context))]\n"
+           "    [Migration(\"" + migrationId + "\")]\n"
+           "    public class " + className + " : Migration\n"
+           "    {\n"
+           "        protected override void Up(MigrationBuilder migrationBuilder)\n"
+           "        {\n"
+           "            foreach (var sql in " + className + "_Data.Up(" + flag + "))\n"
+           "                migrationBuilder.Sql(sql);\n"
+           "        }\n"
+           "\n"
+           "        protected override void Down(MigrationBuilder migrationBuilder)\n"
+           "        {\n"
+           "            foreach (var sql in " + className + "_Data.Down(" + flag + "))\n"
+           "                migrationBuilder.Sql(sql);\n"
+           "        }\n"
+           "    }\n"
+           "}\n";
+}
+
+}  // namespace
+
+std::vector<EfMigrationFile> efMigrationFiles(const std::string& migrationId, const std::string& className, const std::string& description,
+                                              const std::string& up, const std::string& down) {
+    std::vector<EfMigrationFile> files;
+    files.push_back({"Rasa.DBL/Migrations/SqliteWorld/" + migrationId + ".cs", efMigrationClass(migrationId, className, description, false)});
+    files.push_back({"Rasa.DBL/Migrations/MySqlWorld/" + migrationId + ".cs", efMigrationClass(migrationId, className, description, true)});
+    const char* indent = "                ";
+    files.push_back({"Rasa.DBL/Services/Preloader/" + className + "_Data.cs",
+                     "\xEF\xBB\xBF" "using System.Collections.Generic;\n"
+                     "\n"
+                     "namespace Rasa.Services.Preloader\n"
+                     "{\n"
+                     "    /// <summary>\n"
+                     "    /// The statements of migration " + migrationId + " (made by RasaEdit): " + description + "\n"
+                     "    /// SQLite takes the portable dialect, MySQL / MariaDB its own. After each statement a row of (expected, changed) goes into\n"
+                     "    /// a temporary table whose CHECK wants them equal, so a database whose rows are not as the statement expects fails the\n"
+                     "    /// migration (rolled back) rather than taking part of it.\n"
+                     "    /// </summary>\n"
+                     "    public static class " + className + "_Data\n"
+                     "    {\n"
+                     "        public static IEnumerable<string> Up(bool mySql)\n"
+                     "        {\n"
+                     "            if (mySql)\n"
+                     "            {\n" + efStatementList(efStatements(up, true), indent) +
+                     "            }\n"
+                     "            else\n"
+                     "            {\n" + efStatementList(efStatements(up, false), indent) +
+                     "            }\n"
+                     "        }\n"
+                     "\n"
+                     "        public static IEnumerable<string> Down(bool mySql)\n"
+                     "        {\n"
+                     "            if (mySql)\n"
+                     "            {\n" + efStatementList(efStatements(down, true), indent) +
+                     "            }\n"
+                     "            else\n"
+                     "            {\n" + efStatementList(efStatements(down, false), indent) +
+                     "            }\n"
+                     "        }\n"
+                     "    }\n"
+                     "}\n"});
+    return files;
+}

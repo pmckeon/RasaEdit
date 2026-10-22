@@ -478,22 +478,28 @@ public:
         std::string migration;                       // the migration the save wrote ("" when it changed nothing; see Migrations.h)
     };
 
-    // Migrations (the user's rule, 2026-10-21; Migrations.h): every save also records its changes as Up / Down SQL in the World
-    // database's own table rasaedit_migration (id, name, created_utc, summary, applied, up_sql, down_sql - created on the first
-    // save; Rasa.NET ignores it) and, when a folder is set, as <folder>/<name>.up.sql / .down.sql. A save whose files cannot be
-    // written is refused. Applying one runs it in one transaction and refuses it unless every statement changes the rows it names.
+    // Migrations (the user's rule, 2026-10-21; Migrations.h): every save also records its changes as a migration - a folder
+    // <migration folder>/<id>/ holding <id>.up.sql / .down.sql, <id>.mysql.up.sql / .mysql.down.sql and the EF Core migration for
+    // Rasa.NET (Rasa.DBL/..., the Rasa.NET team's choice of 2026-10-22). <id> is an EF migration id, <yyyyMMddHHmmss>_RasaEdit_<label>,
+    // later than every migration the database has had. Which migrations a database has is EF's own record: the save adds <id> to
+    // __EFMigrationsHistory in its transaction (a rollback removes it), so the same migration added to Rasa.NET's source is not applied
+    // again. No table of RasaEdit's own. A save needs the folder and refuses when its files cannot be written. Applying one runs it in
+    // one transaction and refuses it unless every statement changes the rows it names.
     struct MigrationRecord {
-        int64_t id = 0;
-        std::string name, createdUtc, summary;
-        bool applied = true;
-        std::string upSql, downSql;
+        std::string name;                            // the EF migration id (the folder's name)
+        std::string createdUtc, summary;             // from the .up.sql header
+        bool applied = false;                        // __EFMigrationsHistory has it
+        bool filesMissing = false;                   // applied, but no folder: cannot be rolled back
+        std::string folder, upSql, downSql;
     };
     void setMigrationFolder(const std::string& folder) { migrationFolder_ = folder; }
     const std::string& migrationFolder() const { return migrationFolder_; }
-    std::vector<MigrationRecord> migrations() const;               // newest first; empty before the first save
+    // RasaEdit's migrations: the folders in the migration folder and the history's RasaEdit ids, newest first.
+    std::vector<MigrationRecord> migrations() const;
     // Rolls a migration back (its Down) or applies it again (its Up); false, with nothing changed, when the data is not as it expects.
-    bool setMigrationApplied(int64_t id, bool applied, std::string& error);
-    // Applies <name>.up.sql (with its <name>.down.sql beside it) from another database's migrations and records it here.
+    bool setMigrationApplied(const std::string& name, bool applied, std::string& error);
+    // Applies another database's migration (its <id>.up.sql or .mysql.up.sql, with the .down.sql beside it), copies its folder into
+    // this database's migration folder and records it in __EFMigrationsHistory.
     bool importMigration(const std::string& upFile, std::string& error);
     void reload() { loadGlobals(); }                                // after migrations: the cached tables read again
     // Writes the differences between `saved` (as loaded) and `edited` in one transaction.
@@ -540,12 +546,14 @@ private:
     void loadCreatures();                            // creature, creature_appearance, creature_stat, creature_action
 
     void execute(const std::string& sql);
-    void ensureMigrationTable();
     std::string mapLabel(int64_t mapContextId) const;
     void beginWrite();                                              // a save's transaction, its changes captured
     bool commitWrite(const std::string& label, SaveSummary& summary, std::string& error);   // records the migration, then commits
     void abortWrite();
-    int64_t recordMigration(const std::string& name, const std::string& summary, bool applied, const std::string& up, const std::string& down);
+    std::set<std::string> efHistory() const;                        // __EFMigrationsHistory's ids
+    std::string efProductVersion() const;                           // the ProductVersion of its newest row
+    void setEfHistory(const std::string& migrationId, bool present); // adds / removes a row (inside a transaction)
+    std::string databaseLabel() const;                              // the database file's stem, or host_database
 
     std::unique_ptr<DbConnection> connection_;
     DbConnection* db_ = nullptr;                     // connection_.get()

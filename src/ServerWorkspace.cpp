@@ -270,7 +270,8 @@ void ServerWorkspace::openDatabase(const std::string& path) {
 }
 
 // ------------------------------------------------------------------------------------------
-// Migrations (Migrations.h): every save's changes as Up / Down SQL, in the database (rasaedit_migration) and the folder.
+// Migrations (Migrations.h): every save's changes as Up / Down SQL and an EF Core migration, a folder each in the migration folder;
+// which a database has is its __EFMigrationsHistory.
 // ------------------------------------------------------------------------------------------
 std::string ServerWorkspace::migrationFolderFor(const WorldDatabase& database) const {
     const std::string chosen = ctx_.setting("migrationFolder");
@@ -317,10 +318,12 @@ void ServerWorkspace::drawMigrationsPanel() {
         ImGui::End();
         return;
     }
-    ImGui::TextWrapped("Every save writes its changes as a migration: Up (the changes) and Down (their rollback) SQL, kept in this database "
-                       "(table rasaedit_migration) and written to the folder below - portable .up.sql / .down.sql (SQLite; MySQL with "
-                       "ANSI_QUOTES and NO_BACKSLASH_ESCAPES) and .mysql.up.sql / .mysql.down.sql (MySQL / MariaDB as they are). Applying "
-                       "one checks every row it touches: if the data has changed since, nothing is applied.");
+    ImGui::TextWrapped("Every save writes its changes as a migration, a folder of its own in the folder below: Up (the changes) and Down "
+                       "(their rollback) as SQL - portable .up.sql / .down.sql (SQLite; MySQL with ANSI_QUOTES and NO_BACKSLASH_ESCAPES) and "
+                       ".mysql.up.sql / .mysql.down.sql (MySQL / MariaDB as they are) - and as an EF Core migration for Rasa.NET (its "
+                       "Rasa.DBL folder: copy it into Rasa.NET's src/). The database records it in __EFMigrationsHistory, as Rasa.NET's "
+                       "own migrations, so the same EF migration is never applied twice. Applying one checks every row it touches: if the "
+                       "data has changed since, nothing is applied. Send a migration's folder to share it.");
     // Folder.
     {
         static char folder[1024];
@@ -350,7 +353,7 @@ void ServerWorkspace::drawMigrationsPanel() {
     if (list.empty()) ImGui::TextDisabled("No migrations yet: the first save makes one.");
     auto run = [&](const WorldDatabase::MigrationRecord& m, bool apply) {
         std::string error;
-        if (database_->setMigrationApplied(m.id, apply, error)) {
+        if (database_->setMigrationApplied(m.name, apply, error)) {
             reloadFromDatabase();
             ctx_.setStatus(std::string(apply ? "Applied migration " : "Rolled back migration ") + m.name + ". Restart the server to use it.", false);
         } else {
@@ -368,38 +371,50 @@ void ServerWorkspace::drawMigrationsPanel() {
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableHeadersRow();
         for (const auto& m : list) {
-            ImGui::PushID(int(m.id));
+            ImGui::PushID(m.name.c_str());
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
-            if (ImGui::Selectable(m.name.c_str(), migrationViewed_ == m.id)) migrationViewed_ = migrationViewed_ == m.id ? -1 : m.id;
+            if (ImGui::Selectable(m.name.c_str(), migrationViewed_ == m.name)) migrationViewed_ = migrationViewed_ == m.name ? std::string() : m.name;
             ImGui::TableNextColumn();
             ImGui::TextUnformatted(m.createdUtc.c_str());
             ImGui::TableNextColumn();
             ImGui::TextWrapped("%s", m.summary.c_str());
             ImGui::TableNextColumn();
-            if (m.applied) ImGui::TextUnformatted("applied");
-            else ImGui::TextDisabled("rolled back");
+            if (m.filesMissing) {
+                ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "applied, no files");
+                ImGui::SetItemTooltip("__EFMigrationsHistory has it, but its folder is not in the migration folder: it cannot be rolled back here.");
+            } else if (m.applied) {
+                ImGui::TextUnformatted("applied");
+            } else {
+                ImGui::TextDisabled("rolled back");
+            }
             ImGui::TableNextColumn();
-            if (unsaved) ImGui::BeginDisabled();
-            if (migrationConfirm_ == m.id) {
+            if (unsaved || m.filesMissing) ImGui::BeginDisabled();
+            if (migrationConfirm_ == m.name) {
                 if (ImGui::SmallButton(m.applied ? "Confirm roll back" : "Confirm apply")) {
-                    migrationConfirm_ = 0;
+                    migrationConfirm_.clear();
                     run(m, !m.applied);
                 }
                 ImGui::SameLine();
-                if (ImGui::SmallButton("Cancel")) migrationConfirm_ = 0;
+                if (ImGui::SmallButton("Cancel")) migrationConfirm_.clear();
             } else if (ImGui::SmallButton(m.applied ? "Roll back" : "Apply again")) {
-                migrationConfirm_ = m.id;
+                migrationConfirm_ = m.name;
             }
-            if (unsaved) ImGui::EndDisabled();
+            if (unsaved || m.filesMissing) ImGui::EndDisabled();
             ImGui::PopID();
         }
         ImGui::EndTable();
     }
     // The SQL of the migration picked in the list.
     for (const auto& m : list) {
-        if (m.id != migrationViewed_) continue;
+        if (m.name != migrationViewed_ || m.filesMissing) continue;
         ImGui::SeparatorText(m.name.c_str());
+        if (ImGui::SmallButton("Open its folder")) {
+            const auto generic = std::filesystem::u8path(m.folder).generic_u8string();
+            SDL_OpenURL(("file:///" + std::string(generic.begin(), generic.end())).c_str());
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("SQL files and Rasa.DBL/ (the EF migration) - send the folder to share the migration");
         const char* tabs[] = {"Up", "Down", "Up (MySQL dialect)", "Down (MySQL dialect)"};
         for (int k = 0; k < 4; ++k) {
             if (k) ImGui::SameLine();
@@ -434,14 +449,15 @@ void ServerWorkspace::drawMigrationsPanel() {
         std::string error;
         if (database_->importMigration(migrationImportPath_, error)) {
             reloadFromDatabase();
-            ctx_.setStatus("Applied the migration " + migrationImportPath_ + " (it can be rolled back from the list).", false);
+            ctx_.setStatus("Applied the migration " + migrationImportPath_ + " (copied into the migration folder; it can be rolled back from the "
+                           "list).", false);
             migrationImportPath_.clear();
         } else {
             ctx_.setStatus("Could not apply " + migrationImportPath_ + ": " + error, true);
         }
     }
     if (unsaved || migrationImportPath_.empty()) ImGui::EndDisabled();
-    ImGui::TextDisabled("Pick a migration's .up.sql (or its .mysql copy); its .down.sql must sit beside it.");
+    ImGui::TextDisabled("Pick a migration's .up.sql (or its .mysql copy) in its folder; its .down.sql must sit beside it.");
     ImGui::End();
 }
 

@@ -1321,24 +1321,103 @@ std::string WorldDatabase::mapLabel(int64_t context) const {
     return "map_" + std::to_string(context);
 }
 
-void WorldDatabase::ensureMigrationTable() {
-    if (hasTable("rasaedit_migration")) return;
-    // Before the save's transaction: MySQL commits implicitly on CREATE TABLE.
-    db_->execute(mySql_ ? "CREATE TABLE IF NOT EXISTS \"rasaedit_migration\" (\"id\" BIGINT NOT NULL PRIMARY KEY, \"name\" VARCHAR(255) NOT NULL, "
-                          "\"created_utc\" VARCHAR(32) NOT NULL, \"summary\" TEXT NOT NULL, \"applied\" INT NOT NULL, \"up_sql\" LONGTEXT NOT NULL, "
-                          "\"down_sql\" LONGTEXT NOT NULL)"
-                        : "CREATE TABLE IF NOT EXISTS \"rasaedit_migration\" (\"id\" INTEGER NOT NULL PRIMARY KEY, \"name\" TEXT NOT NULL, "
-                          "\"created_utc\" TEXT NOT NULL, \"summary\" TEXT NOT NULL, \"applied\" INTEGER NOT NULL, \"up_sql\" TEXT NOT NULL, "
-                          "\"down_sql\" TEXT NOT NULL)");
-    std::set<std::string>& columns = columns_["rasaedit_migration"];
-    for (const char* c : {"id", "name", "created_utc", "summary", "applied", "up_sql", "down_sql"}) columns.insert(c);
+namespace {
+// The seconds of a UTC calendar time and back (proleptic Gregorian; days_from_civil / civil_from_days), for EF migration ids.
+int64_t daysFromCivil(int64_t y, int64_t m, int64_t d) {
+    y -= m <= 2;
+    const int64_t era = (y >= 0 ? y : y - 399) / 400;
+    const int64_t yoe = y - era * 400;
+    const int64_t doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    const int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+// "yyyyMMddHHmmss" -> seconds since 1970 (-1 when the text does not start with 14 digits).
+int64_t idSeconds(const std::string& id) {
+    if (id.size() < 14) return -1;
+    for (int k = 0; k < 14; ++k)
+        if (!std::isdigit(static_cast<unsigned char>(id[k]))) return -1;
+    const auto part = [&](int from, int count) { return std::stoll(id.substr(from, count)); };
+    return daysFromCivil(part(0, 4), part(4, 2), part(6, 2)) * 86400 + part(8, 2) * 3600 + part(10, 2) * 60 + part(12, 2);
+}
+std::string idStamp(int64_t seconds) {
+    int64_t z = seconds / 86400 + 719468;
+    const int64_t secondOfDay = seconds % 86400;
+    const int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+    const int64_t doe = z - era * 146097;
+    const int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    const int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    const int64_t mp = (5 * doy + 2) / 153;
+    const int64_t d = doy - (153 * mp + 2) / 5 + 1;
+    const int64_t m = mp + (mp < 10 ? 3 : -9);
+    const int64_t y = yoe + era * 400 + (m <= 2);
+    char buffer[32];
+    std::snprintf(buffer, sizeof buffer, "%04lld%02lld%02lld%02lld%02lld%02lld", static_cast<long long>(y), static_cast<long long>(m),
+                  static_cast<long long>(d), static_cast<long long>(secondOfDay / 3600), static_cast<long long>(secondOfDay / 60 % 60),
+                  static_cast<long long>(secondOfDay % 60));
+    return buffer;
+}
+bool readFileText(const std::filesystem::path& p, std::string& out) {
+    std::ifstream in(p, std::ios::binary);
+    if (!in) return false;
+    out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    return true;
+}
+// A header line's value ("-- Created (UTC): ..." -> "...").
+std::string headerValue(const std::string& text, const std::string& key) {
+    const std::string prefix = "-- " + key + ": ";
+    const size_t at = text.find(prefix);
+    if (at == std::string::npos) return "";
+    const size_t end = text.find('\n', at);
+    std::string value = text.substr(at + prefix.size(), end == std::string::npos ? std::string::npos : end - at - prefix.size());
+    while (!value.empty() && value.back() == '\r') value.pop_back();
+    return value;
+}
+const char* kRasaEditMark = "_RasaEdit_";
+}  // namespace
+
+std::string WorldDatabase::databaseLabel() const {
+    if (mySql_) {
+        MySqlSpec m;
+        if (parseMySqlSpec(path_, m)) return m.host + "_" + m.database;
+        return "mysql";
+    }
+    return pathText(std::filesystem::u8path(path_).stem());
+}
+
+std::set<std::string> WorldDatabase::efHistory() const {
+    std::set<std::string> ids;
+    if (!hasTable("__EFMigrationsHistory")) return ids;
+    Statement s(db_, "SELECT \"MigrationId\" FROM \"__EFMigrationsHistory\"");
+    while (s.step()) ids.insert(s.text(0));
+    return ids;
+}
+
+std::string WorldDatabase::efProductVersion() const {
+    Statement s(db_, "SELECT \"ProductVersion\" FROM \"__EFMigrationsHistory\" ORDER BY \"MigrationId\" DESC LIMIT 1");
+    return s.step() ? s.text(0) : std::string();
+}
+
+void WorldDatabase::setEfHistory(const std::string& migrationId, bool present) {
+    if (present) {
+        Statement s(db_, "INSERT INTO \"__EFMigrationsHistory\" (\"MigrationId\", \"ProductVersion\") VALUES (?1, ?2)");
+        s.bindText(1, migrationId);
+        s.bindText(2, efProductVersion());
+        s.run(db_);
+    } else {
+        Statement s(db_, "DELETE FROM \"__EFMigrationsHistory\" WHERE \"MigrationId\" = ?1");
+        s.bindText(1, migrationId);
+        s.run(db_);
+    }
 }
 
 void WorldDatabase::beginWrite() {
-    ensureMigrationTable();
+    if (!hasTable("__EFMigrationsHistory"))
+        throw std::runtime_error("the database has no __EFMigrationsHistory table (not made by Rasa.NET's migrations), so a save cannot be "
+                                 "recorded as a migration");
+    if (migrationFolder_.empty()) throw std::runtime_error("no migration folder is set, so a save cannot be recorded as a migration");
     db_->begin();
     capture_ = std::make_unique<ChangeCapture>(*db_, mySql_);
-    capture_->ignore("rasaedit_migration");
+    capture_->ignore("__EFMigrationsHistory");
     activeCapture = capture_.get();
 }
 
@@ -1348,73 +1427,64 @@ void WorldDatabase::abortWrite() {
     db_->rollback();
 }
 
-int64_t WorldDatabase::recordMigration(const std::string& name, const std::string& summary, bool applied, const std::string& up, const std::string& down) {
-    int64_t id = 1;
-    {
-        Statement next(db_, "SELECT COALESCE(MAX(\"id\"), 0) + 1 FROM \"rasaedit_migration\"");
-        if (next.step()) id = next.integer(0);
-    }
-    Statement s(db_, "INSERT INTO \"rasaedit_migration\" (\"id\", \"name\", \"created_utc\", \"summary\", \"applied\", \"up_sql\", \"down_sql\") "
-                     "VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)");
-    s.bindInt(1, id);
-    s.bindText(2, name.empty() ? std::to_string(id) : name);
-    s.bindText(3, utcNow("%Y-%m-%d %H:%M:%S"));
-    s.bindText(4, summary);
-    s.bindInt(5, applied ? 1 : 0);
-    s.bindText(6, up);
-    s.bindText(7, down);
-    s.run(db_);
-    return id;
-}
-
 bool WorldDatabase::commitWrite(const std::string& label, SaveSummary& summary, std::string& error) {
     activeCapture = nullptr;
-    std::vector<std::filesystem::path> written;
+    std::filesystem::path written;                   // the migration's folder, removed again if the save fails
     try {
         ChangeCapture::Result result = capture_ ? capture_->finish() : ChangeCapture::Result{};
         capture_.reset();
         if (!result.empty()) {
-            int64_t id = 1;
-            {
-                Statement next(db_, "SELECT COALESCE(MAX(\"id\"), 0) + 1 FROM \"rasaedit_migration\"");
-                if (next.step()) id = next.integer(0);
-            }
-            char prefix[32];
-            std::snprintf(prefix, sizeof prefix, "_%04lld_", static_cast<long long>(id));
-            const std::string name = utcNow("%Y%m%d_%H%M%S") + prefix + labelText(label);
+            // The EF migration id: later than now and than every migration the database has had (upstream's ids run ahead of the
+            // calendar, and EF applies pending migrations in id order).
+            int64_t seconds = static_cast<int64_t>(std::time(nullptr));
+            for (const std::string& id : efHistory()) seconds = std::max(seconds, idSeconds(id) + 1);
+            const std::string stamp = idStamp(seconds);
+            // Short names: the deepest file is <folder>/<id>/Rasa.DBL/Migrations/SqliteWorld/<id>.cs, and Windows paths stop at 260.
+            const std::string name = stamp + kRasaEditMark + labelText(label).substr(0, 24);
+            const std::string className = "RasaEdit_" + stamp;
             const std::string created = utcNow("%Y-%m-%d %H:%M:%S");
             char counts[160];
             std::snprintf(counts, sizeof counts, "%d inserted, %d updated, %d deleted", result.inserted, result.updated, result.deleted);
             std::string tables;
             for (const std::string& t : result.tables) tables += (tables.empty() ? "" : ", ") + t;
-            const std::string up = migrationHeader(name, "up", path_, created, result) + result.up;
-            const std::string down = migrationHeader(name, "down", path_, created, result) + result.down;
-            const std::string upMySql = migrationHeader(name, "up", path_, created, result, true) + mySqlDialect(result.up);
-            const std::string downMySql = migrationHeader(name, "down", path_, created, result, true) + mySqlDialect(result.down);
-            if (!migrationFolder_.empty()) {
-                const std::filesystem::path folder = std::filesystem::u8path(migrationFolder_);
-                std::error_code ec;
-                std::filesystem::create_directories(folder, ec);
-                for (const auto& [suffix, text] : {std::make_pair(".up.sql", &up), std::make_pair(".down.sql", &down),
-                                                   std::make_pair(".mysql.up.sql", &upMySql), std::make_pair(".mysql.down.sql", &downMySql)}) {
-                    const std::filesystem::path file = folder / std::filesystem::u8path(name + suffix);
-                    std::ofstream out(file, std::ios::binary);
-                    out << *text;
-                    out.close();
-                    if (!out) throw std::runtime_error("cannot write the migration file " + pathText(file) + " (nothing was saved)");
-                    written.push_back(file);
+            const std::string database = databaseLabel();
+            const std::string up = migrationHeader(name, "up", database, created, result) + result.up;
+            const std::string down = migrationHeader(name, "down", database, created, result) + result.down;
+            const std::string upMySql = migrationHeader(name, "up", database, created, result, true) + mySqlDialect(result.up);
+            const std::string downMySql = migrationHeader(name, "down", database, created, result, true) + mySqlDialect(result.down);
+            const std::string description = "RasaEdit save (" + labelText(label) + ") on " + database + " at " + created + " UTC: " + counts +
+                                            "; tables " + tables + ".";
+            std::vector<std::pair<std::string, const std::string*>> files = {
+                {name + ".up.sql", &up}, {name + ".down.sql", &down}, {name + ".mysql.up.sql", &upMySql}, {name + ".mysql.down.sql", &downMySql}};
+            const std::vector<EfMigrationFile> ef = efMigrationFiles(name, className, description, up, down);
+            for (const EfMigrationFile& f : ef) files.push_back({f.path, &f.text});
+            const std::filesystem::path folder = std::filesystem::u8path(migrationFolder_) / std::filesystem::u8path(name);
+            std::error_code ec;
+            if (std::filesystem::exists(folder, ec)) throw std::runtime_error("the migration folder " + pathText(folder) + " exists already");
+            written = folder;
+            for (const auto& [relative, text] : files) {
+                const std::filesystem::path file = folder / std::filesystem::u8path(relative);
+                std::filesystem::create_directories(file.parent_path(), ec);
+                std::ofstream out(file, std::ios::binary);
+                out << *text;
+                out.close();
+                if (!out) {
+                    const size_t length = pathText(file).size();
+                    throw std::runtime_error("cannot write the migration file " + pathText(file) + " (nothing was saved)" +
+                                             (length >= 260 ? " - the path is " + std::to_string(length) + " characters, and Windows stops at "
+                                                              "260: choose a shorter migration folder" : std::string()));
                 }
             }
-            recordMigration(name, std::string(counts) + "; " + tables, true, up, down);
+            setEfHistory(name, true);
             summary.migration = name;
         }
         db_->commit();
         return true;
     } catch (const std::exception& e) {
         error = e.what();
-        for (const auto& file : written) {
+        if (!written.empty()) {
             std::error_code ec;
-            std::filesystem::remove(file, ec);
+            std::filesystem::remove_all(written, ec);
         }
         capture_.reset();
         try { db_->rollback(); } catch (const std::exception&) {}
@@ -1424,14 +1494,37 @@ bool WorldDatabase::commitWrite(const std::string& label, SaveSummary& summary, 
 
 std::vector<WorldDatabase::MigrationRecord> WorldDatabase::migrations() const {
     std::vector<MigrationRecord> out;
-    if (!hasTable("rasaedit_migration")) return out;
-    Statement s(db_, "SELECT \"id\", \"name\", \"created_utc\", \"summary\", \"applied\", \"up_sql\", \"down_sql\" FROM \"rasaedit_migration\" "
-                     "ORDER BY \"id\" DESC");
-    while (s.step()) out.push_back(MigrationRecord{s.integer(0), s.text(1), s.text(2), s.text(3), s.integer(4) != 0, s.text(5), s.text(6)});
+    const std::set<std::string> history = efHistory();
+    std::set<std::string> seen;
+    std::error_code ec;
+    if (!migrationFolder_.empty())
+        for (const auto& entry : std::filesystem::directory_iterator(std::filesystem::u8path(migrationFolder_), ec)) {
+            if (!entry.is_directory(ec)) continue;
+            MigrationRecord m;
+            m.name = pathText(entry.path().filename());
+            m.folder = pathText(entry.path());
+            if (!readFileText(entry.path() / std::filesystem::u8path(m.name + ".up.sql"), m.upSql) ||
+                !readFileText(entry.path() / std::filesystem::u8path(m.name + ".down.sql"), m.downSql))
+                continue;                                // not a migration's folder
+            m.createdUtc = headerValue(m.upSql, "Created (UTC)");
+            m.summary = headerValue(m.upSql, "Up changes rows");
+            m.applied = history.count(m.name) != 0;
+            seen.insert(m.name);
+            out.push_back(std::move(m));
+        }
+    for (const std::string& id : history)                // RasaEdit's ids the folder has no files for
+        if (id.find(kRasaEditMark) != std::string::npos && !seen.count(id)) {
+            MigrationRecord m;
+            m.name = id;
+            m.applied = true;
+            m.filesMissing = true;
+            out.push_back(std::move(m));
+        }
+    std::sort(out.begin(), out.end(), [](const MigrationRecord& a, const MigrationRecord& b) { return a.name > b.name; });
     return out;
 }
 
-bool WorldDatabase::setMigrationApplied(int64_t id, bool applied, std::string& error) {
+bool WorldDatabase::setMigrationApplied(const std::string& name, bool applied, std::string& error) {
     if (readOnly_) {
         error = "the database was opened read-only";
         return false;
@@ -1439,9 +1532,13 @@ bool WorldDatabase::setMigrationApplied(int64_t id, bool applied, std::string& e
     MigrationRecord record;
     bool found = false;
     for (const MigrationRecord& m : migrations())
-        if (m.id == id) record = m, found = true;
+        if (m.name == name) record = m, found = true;
     if (!found) {
-        error = "no migration " + std::to_string(id);
+        error = "no migration " + name;
+        return false;
+    }
+    if (record.filesMissing) {
+        error = "the files of migration " + name + " are not in the migration folder";
         return false;
     }
     if (record.applied == applied) {
@@ -1454,10 +1551,7 @@ bool WorldDatabase::setMigrationApplied(int64_t id, bool applied, std::string& e
             db_->rollback();
             return false;
         }
-        Statement s(db_, "UPDATE \"rasaedit_migration\" SET \"applied\" = ?2 WHERE \"id\" = ?1");
-        s.bindInt(1, id);
-        s.bindInt(2, applied ? 1 : 0);
-        s.run(db_);
+        setEfHistory(name, applied);
         db_->commit();
     } catch (const std::exception& e) {
         error = e.what();
@@ -1473,6 +1567,14 @@ bool WorldDatabase::importMigration(const std::string& upFile, std::string& erro
         error = "the database was opened read-only";
         return false;
     }
+    if (migrationFolder_.empty()) {
+        error = "no migration folder is set";
+        return false;
+    }
+    if (!hasTable("__EFMigrationsHistory")) {
+        error = "the database has no __EFMigrationsHistory table (not made by Rasa.NET's migrations)";
+        return false;
+    }
     const std::filesystem::path upPath = std::filesystem::u8path(upFile);
     std::string name = pathText(upPath.filename());
     const std::string suffix = ".up.sql";
@@ -1481,45 +1583,51 @@ bool WorldDatabase::importMigration(const std::string& upFile, std::string& erro
         return false;
     }
     name.resize(name.size() - suffix.size());
-    std::filesystem::path portableUp = upPath;
-    if (name.size() > 6 && name.compare(name.size() - 6, 6, ".mysql") == 0) {        // the MySQL copy: use the portable pair beside it
-        name.resize(name.size() - 6);
-        portableUp = upPath.parent_path() / std::filesystem::u8path(name + ".up.sql");
-    }
-    const std::filesystem::path downPath = upPath.parent_path() / std::filesystem::u8path(name + ".down.sql");
-    const auto readText = [](const std::filesystem::path& p, std::string& out) {
-        std::ifstream in(p, std::ios::binary);
-        if (!in) return false;
-        out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-        return true;
-    };
+    if (name.size() > 6 && name.compare(name.size() - 6, 6, ".mysql") == 0) name.resize(name.size() - 6);   // the MySQL copy: its pair
+    const std::filesystem::path source = upPath.parent_path();
     std::string up, down;
-    if (!readText(portableUp, up)) {
-        error = "cannot read " + pathText(portableUp);
+    if (!readFileText(source / std::filesystem::u8path(name + ".up.sql"), up)) {
+        error = "cannot read " + pathText(source / std::filesystem::u8path(name + ".up.sql"));
         return false;
     }
-    if (!readText(downPath, down)) {
-        error = "cannot read its Down file " + pathText(downPath) + " (a migration is imported with its rollback)";
+    if (!readFileText(source / std::filesystem::u8path(name + ".down.sql"), down)) {
+        error = "cannot read its Down file " + name + ".down.sql (a migration is imported with its rollback)";
         return false;
     }
-    for (const MigrationRecord& m : migrations())
-        if (m.name == name || m.upSql == up) {
-            error = "this database has migration " + m.name + " already";
+    if (efHistory().count(name)) {
+        error = "this database has migration " + name + " already";
+        return false;
+    }
+    // Its folder in this database's migration folder (copied unless it is there already), so it can be rolled back later.
+    const std::filesystem::path target = std::filesystem::u8path(migrationFolder_) / std::filesystem::u8path(name);
+    std::error_code ec;
+    bool copied = false;
+    if (!std::filesystem::equivalent(source, target, ec)) {
+        if (std::filesystem::exists(target, ec)) {
+            error = "the migration folder has another " + name + " already";
             return false;
         }
+        std::filesystem::create_directories(target.parent_path(), ec);
+        std::filesystem::copy(source, target, std::filesystem::copy_options::recursive, ec);
+        if (ec) {
+            error = "cannot copy the migration into " + pathText(target) + ": " + ec.message();
+            return false;
+        }
+        copied = true;
+    }
     try {
-        ensureMigrationTable();
         db_->begin();
         if (!applyMigrationSql(*db_, mySql_, up, error, true)) {
             db_->rollback();
+            if (copied) std::filesystem::remove_all(target, ec);
             return false;
         }
-        const std::vector<MigrationStatement> statements = parseMigrationSql(up);
-        recordMigration(name, "imported (" + std::to_string(statements.size()) + " statements)", true, up, down);
+        setEfHistory(name, true);
         db_->commit();
     } catch (const std::exception& e) {
         error = e.what();
         try { db_->rollback(); } catch (const std::exception&) {}
+        if (copied) std::filesystem::remove_all(target, ec);
         return false;
     }
     loadGlobals();

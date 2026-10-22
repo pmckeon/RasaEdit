@@ -178,9 +178,9 @@ private:
     void drawMigrationsPanel();
     std::string migrationFolderFor(const WorldDatabase& database) const;
     static void SDLCALL migrationFileCallback(void* userdata, const char* const* files, int filter);
-    int64_t migrationViewed_ = -1;                   // the migration whose SQL is shown
+    std::string migrationViewed_;                       // the migration whose SQL is shown
     int migrationViewTab_ = 0;
-    int64_t migrationConfirm_ = 0;                   // the migration a roll back / re-apply waits for confirmation of
+    std::string migrationConfirm_;                      // the migration a roll back / re-apply waits for confirmation of
     std::mutex migrationFileMutex_;
     std::string migrationFilePicked_;                // from the file dialog (another thread)
     std::string migrationImportPath_;
