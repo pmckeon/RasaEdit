@@ -154,6 +154,15 @@ int main() {
         check(dockspaceExists("ServerDockSpace"), "server layout built");
         check(server.database_ && !server.database_->readOnly(), "server database open read-write");
         {
+            // The navmesh layer (Concordia's .nav file).
+            SceneView& scene = *ctx.scene;
+            scene.showNavMesh = true;
+            scene.loadNavMesh();
+            std::printf("  navmesh: %s\n", scene.navMeshStatus().c_str());
+            check(scene.navMeshStatus().find(" polygons") != std::string::npos, "navmesh: Concordia's server navmesh read");
+            scene.showNavMesh = false;
+        }
+        {
             // Every spawnpool row of Concordia (1220), counted from the table itself (the upstream world keeps growing: 251 in
             // the 2026-10-08 world, 263 after the 2026-10-13 update).
             size_t rows = 0;
@@ -238,7 +247,8 @@ int main() {
               "map switch with unsaved changes opens the prompt instead");
         editor.promptAction_ = Editor::PromptAction::None;          // (cancel)
 
-        check(server.saveChanges() && !server.hasUnsavedChanges(), "save succeeds and clears the unsaved state");
+        { const bool saved = server.saveChanges(); if (!saved) std::printf("  save status: %s\n", ctx.statusText.c_str());
+          check(saved && !server.hasUnsavedChanges(), "save succeeds and clears the unsaved state"); }
         // Migrations (Migrations.h): the save recorded its changes as a migration - its folder with the four SQL files and the EF
         // migration, and its id in __EFMigrationsHistory.
         {

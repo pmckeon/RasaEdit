@@ -466,6 +466,7 @@ void ViewportPanel::applyOptions(const ViewSettings& view, SceneView& scene) con
     scene.showLightMarkers = view.lightMarkers && !serverControls_;      // selectable only where map entities are
     scene.showSoundMarkers = view.soundMarkers && !serverControls_;
     scene.showCollision = view.collision;
+    scene.showNavMesh = view.navMesh;
     scene.showServer = options.showServer;
     scene.showMissionAreas = options.showMissionAreas;
     scene.showRegions = options.showRegions;
@@ -481,6 +482,48 @@ void ViewportPanel::applyOptions(const ViewSettings& view, SceneView& scene) con
 void ViewportPanel::focusOn(EditorContext& ctx, const Selection& selection) {
     if (ctx.scene && isSelected(selection)) ctx.scene->focusOn(selection);
     raiseWindow_ = true;
+}
+
+void ViewportPanel::goTo(EditorContext& ctx, const tr::Vec3& point, float distance) {
+    if (!ctx.scene) return;
+    if (distance > 0.0f) ctx.scene->focusOnPoint(point, distance);
+    else ctx.scene->camera().position = point;
+    ctx.scene->gotoMarker = point;
+    raiseWindow_ = true;
+}
+
+void ViewportPanel::drawGoTo(EditorContext& ctx, SceneView& scene) {
+    if (openGoTo_) {
+        const tr::Vec3 c = scene.camera().position;
+        goToPoint_[0] = c.x; goToPoint_[1] = c.y; goToPoint_[2] = c.z;
+        ImGui::OpenPopup("Go to##viewport");
+        openGoTo_ = false;
+    }
+    if (!ImGui::BeginPopup("Go to##viewport")) return;
+    if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 20.0f);
+    const bool go = ImGui::InputFloat3("X Y Z", goToPoint_, "%.2f", ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14.0f);
+    ImGui::SliderFloat("View from (m)", &goToDistance_, 0.0f, 100.0f, "%.0f");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Look at the point from this far away (from above, like Focus); 0 puts the camera at the point.");
+    if (ImGui::Button("Go") || go) {
+        goTo(ctx, tr::Vec3{goToPoint_[0], goToPoint_[1], goToPoint_[2]}, goToDistance_);
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Copy camera position")) {
+        const tr::Vec3 c = scene.camera().position;
+        char text[96];
+        std::snprintf(text, sizeof text, "%.2f %.2f %.2f", c.x, c.y, c.z);
+        ImGui::SetClipboardText(text);
+    }
+    ImGui::SameLine();
+    if (!scene.gotoMarker) ImGui::BeginDisabled();
+    if (ImGui::Button("Clear marker")) scene.gotoMarker.reset();
+    if (!scene.gotoMarker) ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
 }
 
 void ViewportPanel::draw(EditorContext& ctx, const char* title, Selection& selection, bool pickEntities, bool pickServer, ViewportEditHooks* hooks) {
@@ -550,6 +593,12 @@ void ViewportPanel::draw(EditorContext& ctx, const char* title, Selection& selec
                 "Red: a surface the game drops (its bone has no WSName, or the entity's map flag turns surfaces off).\n"
                 "Grey outlines: box / sphere volumes, which the player does not collide with on map objects.\n"
                 "Terrain collides everywhere except its holes and is not drawn here.");
+            ImGui::Checkbox("Navmesh (server)", &ctx.view.navMesh);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Where the server lets creatures walk: Rasa.NET's navmesh for this map (built offline by Rasa.NavMesh\n"
+                                  "from the terrain and the map's collision; map edits reach it only after a rebuild).\n"
+                                  "Green: walkable polygons, outer edges brighter. Violet: polygons flagged underground.\n%s",
+                                  scene.navMeshStatus().c_str());
             if (!serverControls_) {
                 ImGui::SeparatorText("Markers");
                 ImGui::Checkbox("Light markers", &ctx.view.lightMarkers);
@@ -678,6 +727,10 @@ void ViewportPanel::draw(EditorContext& ctx, const char* title, Selection& selec
         if (ImGui::Button("Focus (F)")) scene.focusOn(selection);
         if (!canFocus) ImGui::EndDisabled();
     }
+    place(ImGui::CalcTextSize("Go to (Ctrl+G)").x + ImGui::GetStyle().FramePadding.x * 2.0f);
+    if (ImGui::Button("Go to (Ctrl+G)")) openGoTo_ = true;
+    tip("Fly to coordinates (X Y Z, e.g. the Debug Tracker's).");
+    drawGoTo(ctx, scene);
     place(ImGui::CalcTextSize("Legend").x);
     drawMarkerLegend();
     applyOptions(ctx.view, scene);
@@ -723,6 +776,7 @@ void ViewportPanel::draw(EditorContext& ctx, const char* title, Selection& selec
         if (ImGui::IsKeyPressed(ImGuiKey_F) && isSelected(selection)) scene.focusOn(selection);
         if (ImGui::IsKeyPressed(ImGuiKey_Escape)) selection = Selection{};
     }
+    if (focused && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_G, false)) openGoTo_ = true;
     if (active && ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
         const float panScale = ctx.view.flySpeed * 0.01f;
         cam.position = add(cam.position, add(scaled(cam.right(), -io.MouseDelta.x * panScale), scaled(cam.up(), io.MouseDelta.y * panScale)));

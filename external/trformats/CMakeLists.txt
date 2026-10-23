@@ -13,7 +13,7 @@ if(NOT TARGET ZLIB::ZLIB AND TARGET ZLIB::ZLIBSTATIC)
     target_link_libraries(ZLIB::ZLIB INTERFACE ZLIB::ZLIBSTATIC)
 endif()
 
-add_library(trformats trformats.cpp trformats.h geofile.cpp geofile.h image.cpp image.h assetlibrary.cpp assetlibrary.h gamedata.cpp gamedata.h dds.cpp dds.h sky.cpp sky.h particles.cpp particles.h xml.cpp xml.h ui.cpp ui.h)
+add_library(trformats trformats.cpp trformats.h geofile.cpp geofile.h image.cpp image.h assetlibrary.cpp assetlibrary.h gamedata.cpp gamedata.h dds.cpp dds.h sky.cpp sky.h particles.cpp particles.h xml.cpp xml.h ui.cpp ui.h navmesh.cpp navmesh.h)
 target_include_directories(trformats PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(trformats PUBLIC ZLIB::ZLIB)
 if(MSVC)

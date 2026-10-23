@@ -26,4 +26,11 @@ std::string findSource(const std::string& configured, const std::string& databas
 // The states Rasa.NET sends for the usables of map context `mapContextId`, read from the source at `sourceRoot`.
 MapUsableStates mapUsableStates(const std::string& sourceRoot, uint32_t mapContextId);
 
+// The server's navmesh folder (<map name>.nav files, Rasa.Navigation/NavMeshFile.cs): `configured` when set, else - as the server's
+// NavMeshManager.ResolveDirectory falls back to it - the `navmesh` folder of the repository holding Rasa.NET.sln above the Rasa.Game
+// folder findSource returned. "" when there is none.
+std::string navMeshFolder(const std::string& configured, const std::string& gameSourceFolder);
+// The navmesh file of a map (its client folder name, lower case, + ".nav") in that folder.
+std::string navMeshFile(const std::string& folder, const std::string& mapName);
+
 }  // namespace rasanet

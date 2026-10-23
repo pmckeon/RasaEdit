@@ -242,4 +242,31 @@ MapUsableStates mapUsableStates(const std::string& sourceRoot, uint32_t mapConte
     return out;
 }
 
+std::string navMeshFolder(const std::string& configured, const std::string& gameSourceFolder) {
+    if (!configured.empty()) return configured;
+    if (gameSourceFolder.empty()) return {};
+    std::error_code ec;
+    fs::path dir = fs::absolute(fs::u8path(gameSourceFolder), ec);
+    for (int up = 0; up < 6 && !dir.empty(); ++up) {
+        if (fs::is_regular_file(dir / "Rasa.NET.sln", ec)) {
+            const fs::path folder = dir / "navmesh";
+            if (!fs::is_directory(folder, ec)) return {};
+            const auto text = folder.u8string();
+            return std::string(text.begin(), text.end());
+        }
+        const fs::path parent = dir.parent_path();
+        if (parent == dir) break;
+        dir = parent;
+    }
+    return {};
+}
+
+std::string navMeshFile(const std::string& folder, const std::string& mapName) {
+    if (folder.empty()) return {};
+    std::string name = mapName;
+    for (char& c : name) c = char(std::tolower(static_cast<unsigned char>(c)));
+    const auto text = (fs::u8path(folder) / fs::u8path(name + ".nav")).u8string();
+    return std::string(text.begin(), text.end());
+}
+
 }  // namespace rasanet

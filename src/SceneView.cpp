@@ -3,6 +3,7 @@
 #include "GpuTexture.h"
 #include "dds.h"
 #include "MarkerColours.h"
+#include "navmesh.h"
 
 #include <algorithm>
 #include <cstring>
@@ -1261,6 +1262,8 @@ SceneView::~SceneView() {
     renderer_->destroyMesh(unitSquare_);
     for (auto& c : collisionMeshes_)
         for (GpuMesh* m : {&c.second.used, &c.second.usedEdges, &c.second.dropped, &c.second.droppedEdges, &c.second.ignored}) renderer_->destroyMesh(*m);
+    for (NavTileMesh& t : navTiles_)
+        for (GpuMesh* m : {&t.ground, &t.underground, &t.edges, &t.outerEdges}) renderer_->destroyMesh(*m);
     renderer_->destroyMesh(arrow_);
     renderer_->destroyMesh(pole_);
     for (auto& m : models_)
@@ -3442,6 +3445,83 @@ const SceneView::CollisionMesh* SceneView::collisionFor(const Model* model, size
     return &c;
 }
 
+void SceneView::setNavMeshFile(const std::string& path) {
+    for (NavTileMesh& t : navTiles_)
+        for (GpuMesh* m : {&t.ground, &t.underground, &t.edges, &t.outerEdges}) renderer_->destroyMesh(*m);
+    navTiles_.clear();
+    navMeshPath_ = path;
+    navMeshLoaded_ = false;
+    navMeshStatus_ = path.empty() ? "no navmesh: the Rasa.NET navmesh folder was not found (setting navMeshFolder)" : "not loaded yet: " + path;
+}
+
+void SceneView::loadNavMesh() {
+    if (navMeshLoaded_ || navMeshPath_.empty()) return;
+    navMeshLoaded_ = true;
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(std::filesystem::u8path(navMeshPath_), ec)) {
+        navMeshStatus_ = "no navmesh for this map: " + navMeshPath_ + " does not exist (Rasa.NavMesh builds it)";
+        return;
+    }
+    tr::NavMesh mesh;
+    try {
+        mesh = tr::readNavMeshFile(navMeshPath_);
+    } catch (const std::exception& e) {
+        navMeshStatus_ = std::string("could not read ") + navMeshPath_ + ": " + e.what();
+        return;
+    }
+    // Lifted 5 cm so the overlay does not fight the surface it lies on (the detail mesh follows the ground within Rasa.NavMesh's
+    // sample error, a few centimetres either way).
+    const float lift = 0.05f;
+    auto vertex = [&](const tr::Vec3& p) {
+        MeshVertex v;
+        v.positionX = p.x; v.positionY = p.y + lift; v.positionZ = p.z;
+        v.normalY = 1;
+        return v;
+    };
+    size_t triangles = 0;
+    std::vector<tr::Vec3> scratch;
+    for (const tr::NavTile& tile : mesh.tiles) {
+        std::vector<MeshVertex> groundVerts, undergroundVerts, lineVerts;
+        std::vector<uint32_t> groundIdx, undergroundIdx, edgeIdx, outerIdx;
+        for (size_t i = 0; i < tile.polys.size(); ++i) {
+            const tr::NavPoly& p = tile.polys[i];
+            if (p.type() != 0) continue;
+            const bool underground = (p.flags & 0x02) != 0;
+            scratch.clear();
+            tr::navPolyTriangles(tile, i, scratch);
+            std::vector<MeshVertex>& verts = underground ? undergroundVerts : groundVerts;
+            std::vector<uint32_t>& idx = underground ? undergroundIdx : groundIdx;
+            for (const tr::Vec3& q : scratch) {
+                idx.push_back(uint32_t(verts.size()));
+                verts.push_back(vertex(q));
+            }
+            triangles += scratch.size() / 3;
+            // Outline: each polygon edge once - an edge shared with a neighbour polygon in the tile is drawn by the lower index;
+            // an edge with no neighbour (0) is the mesh's boundary; DT_EXT_LINK (0x8000) edges continue into the next tile.
+            for (int j = 0; j < p.vertCount; ++j) {
+                const uint16_t n = p.neighbours[j];
+                if (n != 0 && !(n & 0x8000) && size_t(n - 1) < i) continue;
+                const uint32_t first = uint32_t(lineVerts.size());
+                lineVerts.push_back(vertex(tile.verts[p.verts[j]]));
+                lineVerts.push_back(vertex(tile.verts[p.verts[(j + 1) % p.vertCount]]));
+                (n == 0 ? outerIdx : edgeIdx).insert((n == 0 ? outerIdx : edgeIdx).end(), {first, first + 1});
+            }
+        }
+        NavTileMesh t;
+        t.centre = tr::Vec3{(tile.bounds.min.x + tile.bounds.max.x) * 0.5f, (tile.bounds.min.y + tile.bounds.max.y) * 0.5f,
+                            (tile.bounds.min.z + tile.bounds.max.z) * 0.5f};
+        t.radius = length(subtract(tile.bounds.max, t.centre));
+        if (!groundIdx.empty()) t.ground = renderer_->createMesh(groundVerts, groundIdx, false);
+        if (!undergroundIdx.empty()) t.underground = renderer_->createMesh(undergroundVerts, undergroundIdx, false);
+        if (!edgeIdx.empty()) t.edges = renderer_->createMesh(lineVerts, edgeIdx, true);
+        if (!outerIdx.empty()) t.outerEdges = renderer_->createMesh(lineVerts, outerIdx, true);
+        navTiles_.push_back(t);
+    }
+    char text[160];
+    std::snprintf(text, sizeof text, "%zu tiles, %zu polygons, %zu triangles", mesh.tiles.size(), mesh.polyCount(), triangles);
+    navMeshStatus_ = navMeshPath_ + ": " + text;
+}
+
 void SceneView::queueDraws(const Selection& selection) {
     ++frameNumber_;
     auto sectionStart = std::chrono::steady_clock::now();
@@ -4111,6 +4191,36 @@ void SceneView::queueDraws(const Selection& selection) {
             renderer_->draw(c->droppedEdges, p.world, selected ? highlight : markerColour::collisionDropped, false);
             renderer_->draw(c->ignored, p.world, selected ? highlight : markerColour::collisionIgnored, false);
         }
+    }
+
+    // The server's navmesh (showNavMesh): green ground and violet underground polygons (additive fill, no depth writes), their
+    // outlines, the mesh's boundary brighter. Tiles within the draw distance and in view.
+    navTilesDrawn_ = 0;
+    if (showNavMesh) {
+        loadNavMesh();
+        renderer_->clearSkin();
+        const Mat4 identity = identityMatrix();
+        auto scaledColour = [](const Vec4f& c, float k) { return Vec4f{c.x * k, c.y * k, c.z * k, 1}; };
+        for (const NavTileMesh& t : navTiles_) {
+            const tr::Vec3 d = subtract(t.centre, camera_.position);
+            const float reach = std::sqrt(maxDistance2) + t.radius;
+            if (dot(d, d) > reach * reach || !visible(t.centre, t.radius)) continue;
+            ++navTilesDrawn_;
+            if (t.ground.indexCount) renderer_->drawAdditive(t.ground, identity, scaledColour(markerColour::navMesh, 0.18f), nullptr, false, nullptr, 0, true);
+            if (t.underground.indexCount)
+                renderer_->drawAdditive(t.underground, identity, scaledColour(markerColour::navMeshUnderground, 0.18f), nullptr, false, nullptr, 0, true);
+            if (t.edges.indexCount) renderer_->draw(t.edges, identity, scaledColour(markerColour::navMesh, 0.55f), false);
+            if (t.outerEdges.indexCount) renderer_->draw(t.outerEdges, identity, markerColour::navMesh, false);
+        }
+    }
+
+    // The viewport's Go to point: a 0.5 m box with a thin 3 m pole above it.
+    if (gotoMarker) {
+        const tr::Vec3& p = *gotoMarker;
+        renderer_->draw(unitBoxLines_, boxMatrix(tr::Bounds{tr::Vec3{p.x - 0.25f, p.y - 0.25f, p.z - 0.25f}, tr::Vec3{p.x + 0.25f, p.y + 0.25f, p.z + 0.25f}}),
+                        markerColour::gotoPoint, false);
+        renderer_->draw(unitBoxLines_, boxMatrix(tr::Bounds{tr::Vec3{p.x - 0.02f, p.y, p.z - 0.02f}, tr::Vec3{p.x + 0.02f, p.y + 3.0f, p.z + 0.02f}}),
+                        markerColour::gotoPoint, false);
     }
 
     // Sound emitters (audioemitters.xml): a 0.4 m box at each; the selected one shows its MinDistance and MaxDistance as spheres

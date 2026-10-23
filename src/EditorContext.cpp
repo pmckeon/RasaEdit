@@ -230,6 +230,9 @@ bool EditorContext::openMap(const std::string& name) {
                 if (!usableStates.error.empty()) SDL_Log("%s", usableStates.error.c_str());
                 scene->setMapUsableStates(usableStates.states);
             }
+            // The server's navmesh for this map (Navmesh layer): Rasa.NET's <map>.nav, read when the layer is first shown.
+            scene->setNavMeshFile(rasanet::navMeshFile(
+                rasanet::navMeshFolder(setting("navMeshFolder"), rasanet::findSource(setting("rasaNetSource"), setting("database"))), map->name));
         }
         currentMapName = map->name;
         mapTemplateId = templateId;

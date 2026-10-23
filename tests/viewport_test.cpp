@@ -12,6 +12,7 @@
 #include "gamedata.h"
 #include "geofile.h"
 #include "image.h"
+#include "navmesh.h"
 #include "ModelExchange.h"
 #include "Json.h"
 #include "MissionValidation.h"
@@ -931,6 +932,62 @@ int main(int argc, char** argv) {
             }
             std::printf("catalogues: %zu files, %zu failed, %zu with the load list first, %zu with every direct asset in it, %zu records, %zu "
                         "assets listed\n", files, failed, loadFirst, directInLoad, records, assetsListed);
+            return 0;
+        }
+        // RASA_NAVSCAN=<folder>: read every server navmesh (<map>.nav, tr::readNavMesh); tiles, polygons, vertices, detail triangles,
+        // off-mesh connections, polygons per flag / area, and files not read to their last byte. RASA_NAVSCAN_FILE=<name> prints that
+        // file's per-tile counts (for a check against DotRecast's own reader).
+        if (const char* navFolder = envValue("RASA_NAVSCAN")) {
+            size_t files = 0, failed = 0, inexact = 0, tiles = 0, polys = 0, verts = 0, detailTris = 0, offMesh = 0, offMeshPolys = 0;
+            std::map<int, size_t> byFlags, byArea;
+            const char* detailFile = envValue("RASA_NAVSCAN_FILE");
+            std::vector<std::filesystem::path> paths;
+            for (const auto& entry : std::filesystem::directory_iterator(std::filesystem::u8path(navFolder)))
+                if (entry.path().extension() == ".nav") paths.push_back(entry.path());
+            std::sort(paths.begin(), paths.end());
+            auto pathText = [](const std::filesystem::path& p) { const auto s = p.u8string(); return std::string(s.begin(), s.end()); };
+            for (const auto& path : paths) {
+                ++files;
+                try {
+                    const tr::NavMesh mesh = tr::readNavMeshFile(pathText(path));
+                    if (mesh.trailingBytes) {
+                        ++inexact;
+                        std::printf("nav %s: %zu bytes after the last tile\n", pathText(path.filename()).c_str(), mesh.trailingBytes);
+                    }
+                    tiles += mesh.tiles.size();
+                    for (const tr::NavTile& t : mesh.tiles) {
+                        polys += t.polys.size();
+                        verts += t.verts.size();
+                        detailTris += t.detailTris.size() / 4;
+                        offMesh += t.offMeshConnections.size();
+                        for (const tr::NavPoly& p : t.polys) {
+                            ++byFlags[p.flags];
+                            ++byArea[p.area()];
+                            offMeshPolys += p.type() != 0 ? 1 : 0;
+                        }
+                    }
+                    if (detailFile && pathText(path.filename()) == detailFile) {
+                        std::printf("%s: origin %.3f %.3f %.3f, tile %.2f x %.2f, max tiles %d, max polys %d, %d verts per poly\n", detailFile,
+                                    mesh.origin.x, mesh.origin.y, mesh.origin.z, mesh.tileWidth, mesh.tileHeight, mesh.maxTiles, mesh.maxPolys,
+                                    mesh.maxVertsPerPoly);
+                        for (const tr::NavTile& t : mesh.tiles) {
+                            double sum = 0;
+                            for (const tr::Vec3& v : t.verts) sum += v.x + v.y + v.z;
+                            std::printf("  tile %d,%d layer %d: %zu polys, %zu verts (sum %.3f), %zu detail meshes, %zu detail verts, %zu detail tris\n",
+                                        t.x, t.y, t.layer, t.polys.size(), t.verts.size(), sum, t.detailMeshes.size(), t.detailVerts.size(),
+                                        t.detailTris.size() / 4);
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    ++failed;
+                    std::printf("nav %s: %s\n", pathText(path.filename()).c_str(), e.what());
+                }
+            }
+            std::printf("navmeshes: %zu files, %zu failed, %zu not read to the end; %zu tiles, %zu polygons, %zu vertices, %zu detail "
+                        "triangles, %zu off-mesh connections (%zu off-mesh polygons)\n", files, failed, inexact, tiles, polys, verts, detailTris,
+                        offMesh, offMeshPolys);
+            for (const auto& f : byFlags) std::printf("  flags 0x%x: %zu polygons\n", f.first, f.second);
+            for (const auto& a : byArea) std::printf("  area %d: %zu polygons\n", a.first, a.second);
             return 0;
         }
         // RASA_MKRSCAN=1: parse every animation marker file; markers per type, files whose markers lie past their animation's end.
@@ -3167,6 +3224,16 @@ int main(int argc, char** argv) {
         scene.showSoundMarkers = envValue("RASA_SOUNDMARKERS") != nullptr;
         scene.showCollision = envValue("RASA_COLLISION") != nullptr;   // the collision layer (SceneView::showCollision)
         scene.collisionBuildsPerFrame = 100000;
+        // RASA_NAVMESH=1 (the folder found as the editor finds it) or =<folder>: the server navmesh layer (SceneView::showNavMesh).
+        if (const char* nav = envValue("RASA_NAVMESH")) {
+            const char* source = envValue("RASA_RASANET");
+            const char* db = envValue("RASA_DB");
+            const std::string folder = std::string(nav) == "1" ? rasanet::navMeshFolder("", rasanet::findSource(source ? source : "", db ? db : "")) : nav;
+            scene.setNavMeshFile(rasanet::navMeshFile(folder, map.name));
+            scene.showNavMesh = true;
+            scene.loadNavMesh();
+            std::printf("navmesh: %s\n", scene.navMeshStatus().c_str());
+        }
         if (const char* sound = envValue("RASA_SELECTSOUND")) {
             highlighted = Selection{SelectionKind::AudioEmitter, size_t(std::atoi(sound))};
             scene.focusOn(highlighted);

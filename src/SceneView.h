@@ -14,6 +14,7 @@
 #include <map>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -216,6 +217,11 @@ public:
     // grey outlines. Depth-tested; off by default.
     bool showCollision = false;
     size_t collisionBuildsPerFrame = 4;     // models whose collision meshes are built a frame (each reads its .geo)
+    // The server's navmesh (setNavMeshFile): its polygons' surfaces (detail triangles) and outlines, green for ground, violet for
+    // polygons flagged underground; the mesh's outer edges brighter. Depth-tested, off by default.
+    bool showNavMesh = false;
+    // The point the viewport's Go to jumped to, marked with a small white box and a 3 m pole until cleared.
+    std::optional<tr::Vec3> gotoMarker;
     bool showSoundMarkers = false;          // the map's audioemitters.xml emitters as small boxes (selectable); the selected one shows its distances
     bool showLightMarkers = false;          // the map's lights.xml lights as small boxes (selectable); the selected one shows its reach
     bool showEffects = true;
@@ -270,6 +276,13 @@ public:
     void setUsableStatePackages(std::function<std::string(int32_t classId, int32_t stateId)> packageFor) { usablePackageFor_ = std::move(packageFor); }
     // The use states the server gives the map's own usables (entity id -> state; rasanet::mapUsableStates); rebuilds the entities.
     void setMapUsableStates(std::map<uint64_t, int32_t> states);
+    // The server's navmesh for this map (Rasa.NET's <map name>.nav, tr::readNavMesh), drawn while showNavMesh is on; "" = none.
+    // The file is read the first time the layer is shown. navMeshStatus says what was loaded or why not.
+    void setNavMeshFile(const std::string& path);
+    const std::string& navMeshStatus() const { return navMeshStatus_; }
+    // Loads the navmesh now if it is not loaded yet (the first draw with showNavMesh does this too).
+    void loadNavMesh();
+    size_t navMeshTilesDrawn() const { return navTilesDrawn_; }
     int32_t entityUseState(size_t entityIndex) const { return entityIndex < placements_.size() ? placements_[entityIndex].useState : -1; }
     // The client's string table (an FX emitter names its package by string id); call before setServerContent.
     void setStringLookup(std::function<std::string(int32_t stringId)> lookup) { stringFor_ = std::move(lookup); }
@@ -927,6 +940,18 @@ private:
     };
     std::unordered_map<const Model*, CollisionMesh> collisionMeshes_;
     const CollisionMesh* collisionFor(const Model* model, size_t& buildBudget);
+    // The navmesh's tiles as GPU meshes (built when loaded), each with its bounding sphere for culling.
+    struct NavTileMesh {
+        tr::Vec3 centre;
+        float radius = 0;
+        GpuMesh ground, underground;        // detail triangles
+        GpuMesh edges, outerEdges;          // polygon outlines; edges with no neighbour (the mesh's boundary)
+    };
+    std::string navMeshPath_;
+    std::string navMeshStatus_;
+    bool navMeshLoaded_ = false;
+    std::vector<NavTileMesh> navTiles_;
+    size_t navTilesDrawn_ = 0;
     size_t modelsLoaded_ = 0;
     size_t modelsFailed_ = 0;
     size_t drawnEntities_ = 0;

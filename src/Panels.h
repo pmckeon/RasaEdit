@@ -88,9 +88,16 @@ public:
     void render(EditorContext& ctx, SDL_GPUCommandBuffer* commands, const Selection& selection);
     // Flies the camera to the selection and brings the panel to the front.
     void focusOn(EditorContext& ctx, const Selection& selection);
+    // Go to (toolbar, Ctrl+G): flies the camera to a point - looking at it from `distance` metres (focusOnPoint), or placed at it
+    // when distance is 0 - and marks it (SceneView::gotoMarker).
+    void goTo(EditorContext& ctx, const tr::Vec3& point, float distance);
 private:
     void applyOptions(const ViewSettings& view, SceneView& scene) const;
+    void drawGoTo(EditorContext& ctx, SceneView& scene);
     bool serverControls_;
+    bool openGoTo_ = false;
+    float goToPoint_[3] = {};
+    float goToDistance_ = 10.0f;
     bool visible_ = false;
     bool raiseWindow_ = false;
     bool dragCandidate_ = false;
